@@ -1,6 +1,7 @@
 # Threat model
 
-**Status: initial version, written during Phase 1. Completed and reviewed in Phase 9.**
+**Status: updated for Phase 2 (device identity, keystore, pairing, owner auth,
+permissions). Completed and reviewed in Phase 9.**
 
 Controls marked *(planned: Phase N)* are designed but not yet implemented. Do not rely
 on them yet.
@@ -17,11 +18,11 @@ on them yet.
 
 | Asset | Where it lives | Protection |
 |---|---|---|
-| Device private key | OS keystore (DPAPI / `0600` file), never the database | *(planned: Phase 2)* |
+| Device private key | Versioned keystore file (DPAPI `CurrentUser` / `0600` in a `0700` dir), never the database | Implemented — see [`keystore-format.md`](keystore-format.md) |
 | Pinned peer fingerprints | `trusted_device` table | Integrity of the local DB |
-| Owner password | Argon2id hash in `owner_account` | *(planned: Phase 2)* |
-| Session tokens | Hashed in `session_token`; plaintext in memory only | *(planned: Phase 2)* |
-| Pairing code | Hashed with a per-code salt; TTL; single-use | *(planned: Phase 2)* |
+| Owner password | Argon2id (m=19 MiB, t=2, p=1) hash in `owner_account` | Implemented — see [`owner-authentication.md`](owner-authentication.md) |
+| Session tokens | Hashed in `session_token`; plaintext in memory only | *(planned: Phase 3)* |
+| Pairing code | Argon2id verifier with a per-code salt; 180 s TTL; single-use; 5-attempt cap | Implemented — see [`pairing-protocol.md`](pairing-protocol.md) |
 | Session traffic | In flight only | mTLS 1.3 over QUIC *(planned: Phase 3)* |
 
 ## Trust boundaries
@@ -155,9 +156,50 @@ refresh tokens rotate, with reuse of a rotated token invalidating the chain
 ### A10. Brute force
 
 *Controls:* `auth_attempts_per_minute` is validated to be between 1 and 120;
-`owner_account.failed_login_count` and `locked_until_ms` throttle password attempts;
-pairing codes are attempt-capped at 5; `PairFailure::ProofRejected` is deliberately
-indistinguishable from a wrong code, so failures are not an oracle.
+`owner_account.failed_login_count` and `locked_until_ms` throttle password attempts and
+survive a restart; the in-process `Throttle` refuses a locked-out account *before*
+hashing, so lockout cannot be turned into a work-amplification vector, and its tracked-key
+map is bounded so key-cycling cannot exhaust memory or evict an active lockout; pairing
+codes are attempt-capped at 5; `SecurityError::ProofRejected` is deliberately
+indistinguishable from a wrong code, so failures are not an oracle; a missing owner account
+performs a full dummy Argon2id hash and returns the identical error, so login is not an
+enumeration oracle either.
+
+### A11. Substituted device identity
+
+*Threat:* an attacker replaces a paired device's key, or presents one key under two
+device ids, to inherit trust that was granted to something else.
+
+*Controls:* the device id is *derived* from the Ed25519 identity public key, so a peer
+cannot claim an id it does not hold the key for. `insert_paired_device` rejects an
+identity fingerprint already registered under a different device id. The identity
+fingerprint — not the certificate fingerprint — is what a client pins, so certificate
+renewal is distinguishable from identity substitution, and rotations are recorded
+explicitly.
+
+*Residual:* an attacker who obtains the private key material itself is that device. This
+is why the keystore protections and the full-disk-encryption prerequisite matter.
+
+## Security assumptions Phase 3 networking must preserve
+
+Phase 2 establishes trust. Phase 3 carries traffic, and it can invalidate every property
+above if it takes shortcuts. Specifically:
+
+1. **Certificate fingerprints in the pairing transcript must be the ones observed on the
+   actual TLS connection**, never values copied from the peer's message body. Filling them
+   in from what the peer *claims* destroys the anti-relay property entirely.
+2. **Revocation is re-checked per connection**, at the repository layer. Cached frontend
+   state, cached session state and long-lived connections are all non-authoritative.
+3. **Every remote action passes a capability check** resolved from the trusted device's
+   stored role at action time — not from a role asserted in the request.
+4. **Authentication is throttled on the remote path too**, through the same abstraction,
+   keyed to include the source. A remote attacker must not find an unthrottled channel.
+5. **Application authorization never becomes OS privilege.** The privileged-agent
+   allowlist stays the sole path to elevated work.
+6. **Pairing is reachable only when the operator has opened a window.** There is no
+   ambient pairing endpoint.
+7. **Proofs, codes, verifiers, keys and DPAPI blobs stay out of logs, audit records and
+   diagnostics**, on the network path as much as locally.
 
 ## Explicit non-goals
 

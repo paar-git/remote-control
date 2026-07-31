@@ -10,7 +10,9 @@ repository.workspace = true
 
 [dependencies]
 rc-protocol = { workspace = true }
+rc-security = { workspace = true }
 sqlx = { workspace = true }
+hex = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

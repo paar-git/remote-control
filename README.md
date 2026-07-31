@@ -4,10 +4,12 @@ A private remote-access platform for servers **you own and administer**: remote
 desktop, a real terminal, file management, monitoring and power control, with strong
 device identity and no third-party cloud in the path.
 
-> **Status: Phase 1 of 9 complete.** The foundation — protocol, storage, platform
-> abstraction, agent and client applications, toolchain — is built, tested and
-> verified. Networking, pairing and the feature surfaces land in later phases. See
-> [`PROGRESS.md`](PROGRESS.md) for exactly what works today and what does not.
+> **Status: Phase 2 of 9 complete.** The foundation and the security core — device
+> identity, protected keystore, secure pairing, trusted devices, owner authentication
+> and the capability model — are built, tested and verified. **Networking is not built
+> yet**: two devices can be paired cryptographically but cannot yet connect. That lands
+> in Phase 3. See [`PROGRESS.md`](PROGRESS.md) for exactly what works today and what
+> does not.
 
 ## Design in one paragraph
 
@@ -30,7 +32,8 @@ fixed program paths and explicit argument vectors.
 │  └─ coordination-server/     Optional self-hosted signalling service
 ├─ crates/
 │  ├─ protocol/                Wire protocol, framing, limits, replay guard
-│  ├─ storage/                 SQLite schema, migrations, row types
+│  ├─ security/                Identity, keystore, pairing, passwords, permissions
+│  ├─ storage/                 SQLite schema, migrations, repositories, audit log
 │  ├─ platform/                OS abstraction, privileged-command allowlist
 │  └─ host-agent/              The agent service
 ├─ packages/
@@ -40,8 +43,8 @@ fixed program paths and explicit argument vectors.
 └─ scripts/                    Verification and development helpers
 ```
 
-Crates for `security`, `remote-desktop`, `file-transfer`, `terminal` and `monitoring`
-are created in the phases that implement them, rather than sitting empty.
+Crates for `remote-desktop`, `file-transfer`, `terminal` and `monitoring` are created in
+the phases that implement them, rather than sitting empty.
 
 ## Requirements
 
@@ -70,8 +73,15 @@ pnpm verify
 ```bash
 cargo run -p rc-host-agent -- --root ./local/agent write-config   # seed a config file
 cargo run -p rc-host-agent -- --root ./local/agent check          # validate it
+cargo run -p rc-host-agent -- --root ./local/agent identity       # show this device's identity
+cargo run -p rc-host-agent -- --root ./local/agent pair           # open a pairing window
 cargo run -p rc-host-agent -- --root ./local/agent run            # start it
 ```
+
+`identity` creates the device identity on first use and prints the fingerprint a client
+pins. `pair` prints a single-use code that expires in 180 seconds — the one sanctioned
+path by which a code becomes visible. Completing a pairing over the network requires the
+transport from Phase 3.
 
 Omit `--root` to use the production locations (`%ProgramData%\remote-control` on
 Windows, `/etc` + `/var/lib` + `/var/log` on Linux).
@@ -107,8 +117,24 @@ The rules the codebase is built to, each enforced by tests:
 - **Device identity is pinned.** A changed fingerprint is a hard, user-visible failure,
   never a silent re-trust.
 - **No plaintext secrets at rest.** Passwords are Argon2id hashes; tokens are stored
-  hashed; private keys live in the OS keystore, not the database.
+  hashed; private keys live in a protected keystore (DPAPI on Windows, `0600` in a
+  `0700` directory on Linux), not the database. Pairing codes are stored only as an
+  Argon2id verifier.
 - **The client is not elevated.** It warns if you run it as administrator.
+- **Authorization is by typed capability.** No `if is_owner` conditionals; adding a
+  capability without deciding which roles get it is a compile error.
+- **Application permission is not OS privilege.** An owner cannot use application
+  permissions to bypass UAC, polkit, or the protected-services deny-list.
+
+### Security documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/threat-model.md`](docs/threat-model.md) | Assets, boundaries, adversaries, residual risk |
+| [`docs/pairing-protocol.md`](docs/pairing-protocol.md) | The pairing exchange, transcript construction, domain separation |
+| [`docs/keystore-format.md`](docs/keystore-format.md) | Keystore envelope, DPAPI and Unix protection, installer requirements |
+| [`docs/owner-authentication.md`](docs/owner-authentication.md) | Argon2id parameters, throttling, hash upgrades |
+| [`docs/permission-model.md`](docs/permission-model.md) | Capabilities, roles, the privilege boundary |
 
 Read [`docs/threat-model.md`](docs/threat-model.md) before exposing anything beyond
 your LAN.

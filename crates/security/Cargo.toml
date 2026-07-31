@@ -1,0 +1,54 @@
+[package]
+name = "rc-security"
+description = "Device identity, secure keystore, pairing, owner authentication and the permission model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc-protocol = { workspace = true }
+rc-platform = { workspace = true }
+
+# Signatures and certificates.
+ed25519-dalek = { workspace = true }
+rcgen = { workspace = true }
+pkcs8 = { version = "0.11", features = ["alloc"] }
+
+# Hashing, key derivation and password hashing.
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+# `password_hash` is used through argon2's re-export so the two cannot drift apart.
+argon2 = { workspace = true }
+
+# Secret hygiene.
+subtle = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+getrandom = { workspace = true }
+
+# Encoding.
+hex = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+# Matches the version `rcgen` uses for certificate validity fields.
+time = { version = "0.3", default-features = false, features = ["std"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Safe wrapper over CryptProtectData/CryptUnprotectData. Used in preference to
+# calling the Win32 API directly so this crate can keep `forbid(unsafe_code)`.
+windows-dpapi = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

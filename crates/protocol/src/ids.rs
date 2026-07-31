@@ -88,6 +88,14 @@ uuid_newtype!(
 );
 
 uuid_newtype!(
+    /// One first-time pairing exchange. Distinct from [`SessionId`] because a pairing
+    /// session exists *before* trust does, and confusing the two would let an
+    /// unauthenticated peer act where an authenticated one is expected.
+    PairingSessionId,
+    "pair_"
+);
+
+uuid_newtype!(
     /// A single terminal (PTY) session inside a connection.
     TerminalId,
     "trm_"

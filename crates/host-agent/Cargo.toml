@@ -15,7 +15,10 @@ path = "src/main.rs"
 [dependencies]
 rc-protocol = { workspace = true }
 rc-platform = { workspace = true }
+rc-security = { workspace = true }
 rc-storage = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true }
 serde = { workspace = true }

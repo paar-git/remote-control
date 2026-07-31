@@ -12,10 +12,29 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-use std::sync::Arc;
+mod commands;
+
+use std::sync::{Arc, Mutex};
 
 use rc_platform::{AppPaths, HostInfo};
+use rc_security::permissions::{AuthorizationContext, Capability, Role};
+use rc_security::{Clock, DeviceIdentity, SystemClock};
+use rc_storage::audit::AuditEvent;
 use serde::Serialize;
+
+/// An authenticated owner session, held in memory only.
+///
+/// Deliberately not persisted: unlocking the application is a per-run action, so
+/// closing the app relocks it.
+#[derive(Debug, Clone)]
+pub struct OwnerSession {
+    /// Account identifier.
+    pub account_id: String,
+    /// Login name.
+    pub username: String,
+    /// Role. Always [`Role::Owner`] in v1.
+    pub role: Role,
+}
 
 /// Shared backend state, created once during setup.
 pub struct AppState {
@@ -28,6 +47,58 @@ pub struct AppState {
     /// A failure here is not fatal: the UI must still start so it can *tell* the user
     /// what went wrong, rather than showing a window that never appears.
     pub database: Option<rc_storage::Database>,
+    /// This client's cryptographic identity, loaded from the keystore.
+    pub identity: Option<DeviceIdentity>,
+    /// Owner account repository.
+    pub owner: Option<rc_storage::OwnerRepository>,
+    /// Trusted-device repository.
+    pub trust: Option<rc_storage::TrustRepository>,
+    /// Audit repository.
+    pub audit_repo: Option<rc_storage::AuditRepository>,
+    /// The authenticated session, if the application is unlocked.
+    pub session: Mutex<Option<OwnerSession>>,
+    /// Time source. Injected so tests can control it.
+    pub clock: Arc<dyn Clock>,
+}
+
+impl AppState {
+    /// The authorization context for the current session.
+    ///
+    /// Returns `None` when the application is locked. Note that this is *application*
+    /// authorization only: it never implies operating-system privilege, which stays
+    /// behind the agent's allowlist.
+    #[must_use]
+    pub fn authorization(&self) -> Option<AuthorizationContext> {
+        let session = self.session.lock().ok()?;
+        session.as_ref().map(|s| AuthorizationContext::new(s.role))
+    }
+
+    /// Enforce that the current session holds `capability`.
+    ///
+    /// Every capability check goes through here rather than through scattered
+    /// `is_owner` tests, so adding a role means changing the permission table and
+    /// nothing else.
+    fn require_capability(&self, capability: Capability) -> Result<(), commands::CommandError> {
+        match self.authorization() {
+            None => Err(commands::CommandError::locked()),
+            Some(context) => context
+                .require(capability)
+                .map_err(|_| commands::CommandError::permission_denied(capability)),
+        }
+    }
+
+    /// Append an audit record, logging rather than failing if the write does not work.
+    ///
+    /// Losing an audit row is bad; aborting a completed security action because the
+    /// log write failed would be worse.
+    async fn audit(&self, event: AuditEvent) {
+        let Some(repo) = self.audit_repo.as_ref() else {
+            return;
+        };
+        if let Err(err) = repo.record(&event, self.clock.now_ms()).await {
+            tracing::error!(%err, action = event.action, "could not write an audit record");
+        }
+    }
 }
 
 /// Protocol version, in the shape the frontend schema expects.
@@ -97,9 +168,26 @@ fn os_family_str(family: rc_protocol::control::OsFamily) -> &'static str {
     }
 }
 
-/// Build the backend state: directories, logging and the local database.
+/// Build the backend state: directories, keystore, database and repositories.
+///
+/// Every step degrades rather than aborting. A client that cannot open its database
+/// still opens its window, so the user is *told* what is wrong instead of watching
+/// nothing happen.
 async fn initialise() -> Arc<AppState> {
     let host = HostInfo::detect();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+
+    let empty = |paths: AppPaths| AppState {
+        host: host.clone(),
+        paths,
+        database: None,
+        identity: None,
+        owner: None,
+        trust: None,
+        audit_repo: None,
+        session: Mutex::new(None),
+        clock: Arc::clone(&clock),
+    };
 
     let paths = match AppPaths::for_client() {
         Ok(paths) => paths,
@@ -107,22 +195,35 @@ async fn initialise() -> Arc<AppState> {
             tracing::error!(%err, "could not resolve client directories");
             // Nothing further can be persisted, but the window must still open so the
             // user sees the failure instead of nothing happening.
-            return Arc::new(AppState {
-                host,
-                paths: AppPaths::with_root(std::env::temp_dir().join("remote-control")),
-                database: None,
-            });
+            return Arc::new(empty(AppPaths::with_root(
+                std::env::temp_dir().join("remote-control"),
+            )));
         }
     };
 
     if let Err(err) = paths.create_all() {
         tracing::error!(%err, "could not create client directories");
-        return Arc::new(AppState {
-            host,
-            paths,
-            database: None,
-        });
+        return Arc::new(empty(paths));
     }
+
+    // The keystore is loaded before the database: without an identity the client
+    // cannot pair or connect, so a failure here is worth reporting prominently.
+    let keystore = rc_security::Keystore::in_data_dir(paths.data_dir());
+    let identity = match keystore.load_or_create(&host.hostname, clock.as_ref()) {
+        Ok(identity) => {
+            tracing::info!(
+                device_id = %identity.device_id(),
+                identity_fingerprint = %identity.public().identity_fingerprint,
+                certificate_version = identity.public().certificate_version,
+                "client identity ready"
+            );
+            Some(identity)
+        }
+        Err(err) => {
+            tracing::error!(%err, "could not load or create the client identity");
+            None
+        }
+    };
 
     let database = match rc_storage::Database::open(paths.database_file()).await {
         Ok(db) => {
@@ -135,10 +236,24 @@ async fn initialise() -> Arc<AppState> {
         }
     };
 
+    let (owner, trust, audit_repo) = database.as_ref().map_or((None, None, None), |db| {
+        (
+            Some(rc_storage::OwnerRepository::new(db)),
+            Some(rc_storage::TrustRepository::new(db)),
+            Some(rc_storage::AuditRepository::new(db)),
+        )
+    });
+
     Arc::new(AppState {
         host,
         paths,
         database,
+        identity,
+        owner,
+        trust,
+        audit_repo,
+        session: Mutex::new(None),
+        clock,
     })
 }
 
@@ -175,7 +290,19 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .invoke_handler(tauri::generate_handler![client_info])
+        .invoke_handler(tauri::generate_handler![
+            client_info,
+            commands::local_identity,
+            commands::owner_status,
+            commands::create_owner,
+            commands::owner_login,
+            commands::owner_logout,
+            commands::list_trusted_devices,
+            commands::rename_trusted_device,
+            commands::revoke_trusted_device,
+            commands::recent_audit_events,
+            commands::check_pairing_code_format,
+        ])
         .run(tauri::generate_context!());
 
     if let Err(err) = result {

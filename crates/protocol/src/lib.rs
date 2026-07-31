@@ -50,7 +50,7 @@ pub mod version;
 
 pub use error::{ProtocolError, Result};
 pub use frame::{Channel, Frame, FrameDecoder};
-pub use ids::{DeviceId, RequestId, SessionId, TerminalId, TransferId, UserId};
+pub use ids::{DeviceId, PairingSessionId, RequestId, SessionId, TerminalId, TransferId, UserId};
 pub use version::{CURRENT_VERSION, ProtocolVersion};
 
 /// Application-Layer Protocol Negotiation identifier offered on every QUIC/TLS

@@ -1,15 +1,25 @@
 /**
  * Application shell.
  *
- * At this phase the shell renders the navigation skeleton and a real status panel
- * fed by the `client_info` backend command. Navigation items whose features arrive in
- * later phases are rendered as disabled with the phase stated, rather than as buttons
- * that look live and do nothing.
+ * The app is gated: on first run it asks for an owner account, thereafter it asks for
+ * the owner password. Only once unlocked does the sidebar appear. Sections whose
+ * features arrive in a later phase are rendered disabled and labelled with the phase,
+ * rather than as buttons that look live and do nothing.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-import { type ClientInfo, getClientInfo } from './api.js';
+import {
+  type ClientInfo,
+  type OwnerStatus,
+  createOwner,
+  getClientInfo,
+  getOwnerStatus,
+  ownerLogin,
+  ownerLogout,
+} from './api.js';
+import { Button, type Toast, ToastBar } from './components';
+import DevicesScreen from './DevicesScreen';
 import { isTauriAvailable } from './ipc.js';
 
 interface NavItem {
@@ -21,7 +31,7 @@ interface NavItem {
 
 const NAV_ITEMS: readonly NavItem[] = [
   { id: 'home', label: 'Home', availableInPhase: null },
-  { id: 'devices', label: 'Devices', availableInPhase: 2 },
+  { id: 'devices', label: 'Devices', availableInPhase: null },
   { id: 'remote-desktop', label: 'Remote Desktop', availableInPhase: 6 },
   { id: 'terminal', label: 'Terminal', availableInPhase: 4 },
   { id: 'files', label: 'Files', availableInPhase: 5 },
@@ -33,35 +43,48 @@ const NAV_ITEMS: readonly NavItem[] = [
   { id: 'settings', label: 'Settings', availableInPhase: 9 },
 ];
 
-type LoadState =
+type Gate =
   | { readonly status: 'loading' }
-  | { readonly status: 'ready'; readonly info: ClientInfo }
-  | { readonly status: 'error'; readonly message: string };
+  | { readonly status: 'unavailable'; readonly message: string }
+  | { readonly status: 'setup' }
+  | { readonly status: 'locked' }
+  | { readonly status: 'unlocked'; readonly username: string };
 
 export default function App(): React.JSX.Element {
-  const [state, setState] = useState<LoadState>({ status: 'loading' });
+  const [gate, setGate] = useState<Gate>({ status: 'loading' });
+  const [section, setSection] = useState('home');
+  const [toast, setToast] = useState<Toast | null>(null);
+
+  const applyStatus = useCallback((status: OwnerStatus) => {
+    if (status.authenticated && status.username !== null) {
+      setGate({ status: 'unlocked', username: status.username });
+    } else if (status.accountExists) {
+      setGate({ status: 'locked' });
+    } else {
+      setGate({ status: 'setup' });
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
     if (!isTauriAvailable()) {
-      setState({
-        status: 'error',
+      setGate({
+        status: 'unavailable',
         message:
-          'The backend is not reachable. Run the app with `pnpm tauri:dev` rather than ' +
-          'opening the dev server in a browser.',
+          'The backend is not reachable. Run the app with `pnpm tauri:dev` rather than opening ' +
+          'the dev server in a browser.',
       });
       return;
     }
 
-    getClientInfo()
-      .then((info) => {
-        if (!cancelled) setState({ status: 'ready', info });
+    let cancelled = false;
+    getOwnerStatus()
+      .then((status) => {
+        if (!cancelled) applyStatus(status);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setState({
-          status: 'error',
+        setGate({
+          status: 'unavailable',
           message: error instanceof Error ? error.message : 'Could not reach the backend.',
         });
       });
@@ -69,57 +92,279 @@ export default function App(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyStatus]);
+
+  if (gate.status === 'loading') {
+    return (
+      <Centered>
+        <p role="status" className="text-sm text-(--color-text-secondary)">
+          Starting…
+        </p>
+      </Centered>
+    );
+  }
+
+  if (gate.status === 'unavailable') {
+    return (
+      <Centered>
+        <div role="alert" className="max-w-prose rounded border border-(--color-danger) p-4">
+          <h1 className="mb-1 text-sm font-semibold text-(--color-danger)">Backend unavailable</h1>
+          <p className="text-sm text-(--color-text-secondary)">{gate.message}</p>
+        </div>
+      </Centered>
+    );
+  }
+
+  if (gate.status === 'setup' || gate.status === 'locked') {
+    return (
+      <Centered>
+        <AuthPanel mode={gate.status} onAuthenticated={applyStatus} onToast={setToast} />
+        <ToastBar
+          toast={toast}
+          onDismiss={() => {
+            setToast(null);
+          }}
+        />
+      </Centered>
+    );
+  }
 
   return (
     <div className="flex h-full">
       <nav
         aria-label="Sections"
-        className="flex w-56 shrink-0 flex-col border-r border-(--color-border-subtle) bg-(--color-surface-sunken)"
+        className="flex w-56 shrink-0 flex-col justify-between border-r border-(--color-border-subtle) bg-(--color-surface-sunken)"
       >
-        <div className="px-4 py-4">
-          <h1 className="text-sm font-semibold">Remote Control</h1>
-          <p className="text-xs text-(--color-text-secondary)">Private remote access</p>
+        <div>
+          <div className="px-4 py-4">
+            <h1 className="text-sm font-semibold">Remote Control</h1>
+            <p className="text-xs text-(--color-text-secondary)">Private remote access</p>
+          </div>
+
+          <ul className="flex flex-col gap-0.5 px-2 pb-4">
+            {NAV_ITEMS.map((item) => {
+              const enabled = item.availableInPhase === null;
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    disabled={!enabled}
+                    aria-current={item.id === section ? 'page' : undefined}
+                    onClick={() => {
+                      if (enabled) setSection(item.id);
+                    }}
+                    title={
+                      enabled ? undefined : `Arrives in development phase ${item.availableInPhase}`
+                    }
+                    className={
+                      'flex w-full items-center justify-between rounded px-3 py-1.5 text-left text-sm ' +
+                      (enabled
+                        ? item.id === section
+                          ? 'bg-(--color-surface-raised) font-medium'
+                          : 'hover:bg-(--color-surface-raised)'
+                        : 'cursor-not-allowed text-(--color-text-secondary) opacity-60')
+                    }
+                  >
+                    <span>{item.label}</span>
+                    {!enabled && (
+                      <span className="text-[10px] tabular-nums">P{item.availableInPhase}</span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
         </div>
 
-        <ul className="flex flex-col gap-0.5 px-2 pb-4">
-          {NAV_ITEMS.map((item) => (
-            <li key={item.id}>
-              <button
-                type="button"
-                disabled={item.availableInPhase !== null}
-                aria-current={item.id === 'home' ? 'page' : undefined}
-                title={
-                  item.availableInPhase === null
-                    ? undefined
-                    : `Arrives in development phase ${item.availableInPhase}`
-                }
-                className={
-                  'flex w-full items-center justify-between rounded px-3 py-1.5 text-left text-sm ' +
-                  (item.availableInPhase === null
-                    ? 'bg-(--color-surface-raised) font-medium'
-                    : 'cursor-not-allowed text-(--color-text-secondary) opacity-60')
-                }
-              >
-                <span>{item.label}</span>
-                {item.availableInPhase !== null && (
-                  <span className="text-[10px] tabular-nums">P{item.availableInPhase}</span>
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="border-t border-(--color-border-subtle) px-3 py-3">
+          <p className="mb-2 truncate text-xs text-(--color-text-secondary)">
+            Signed in as {gate.username}
+          </p>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              ownerLogout()
+                .then(() => {
+                  setGate({ status: 'locked' });
+                })
+                .catch(() => {
+                  setToast({ kind: 'error', message: 'Could not lock the application.' });
+                });
+            }}
+          >
+            Lock
+          </Button>
+        </div>
       </nav>
 
       <main className="flex-1 overflow-auto p-6">
-        <StatusPanel state={state} />
+        {section === 'devices' ? <DevicesScreen onToast={setToast} /> : <HomeScreen />}
       </main>
+
+      <ToastBar
+        toast={toast}
+        onDismiss={() => {
+          setToast(null);
+        }}
+      />
     </div>
   );
 }
 
-function StatusPanel({ state }: { readonly state: LoadState }): React.JSX.Element {
-  if (state.status === 'loading') {
+function Centered({ children }: { readonly children: React.ReactNode }): React.JSX.Element {
+  return <div className="flex h-full items-center justify-center p-6">{children}</div>;
+}
+
+/** Owner account creation and sign-in. */
+function AuthPanel({
+  mode,
+  onAuthenticated,
+  onToast,
+}: {
+  readonly mode: 'setup' | 'locked';
+  readonly onAuthenticated: (status: OwnerStatus) => void;
+  readonly onToast: (toast: Toast) => void;
+}): React.JSX.Element {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const setupMode = mode === 'setup';
+
+  const submit = (event: React.FormEvent): void => {
+    event.preventDefault();
+    setError(null);
+
+    if (setupMode && password !== confirm) {
+      setError('The two passwords do not match.');
+      return;
+    }
+
+    setBusy(true);
+    const action = setupMode
+      ? createOwner(username, password).then(() => ownerLogin(username, password))
+      : ownerLogin(username, password);
+
+    action
+      .then((status) => {
+        setPassword('');
+        setConfirm('');
+        if (setupMode) onToast({ kind: 'success', message: 'Owner account created.' });
+        onAuthenticated(status);
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : 'Could not sign in.');
+        setPassword('');
+      })
+      .finally(() => {
+        setBusy(false);
+      });
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      className="w-full max-w-sm rounded border border-(--color-border-subtle) bg-(--color-surface-raised) p-6"
+    >
+      <h1 className="mb-1 text-base font-semibold">
+        {setupMode ? 'Create your owner account' : 'Sign in'}
+      </h1>
+      <p className="mb-5 text-sm text-(--color-text-secondary)">
+        {setupMode
+          ? 'This account unlocks the application on this computer. There is no default password and no recovery — choose something you will not lose.'
+          : 'Enter your owner password to unlock the application.'}
+      </p>
+
+      <label htmlFor="username" className="mb-1 block text-sm font-medium">
+        Username
+      </label>
+      <input
+        id="username"
+        value={username}
+        onChange={(event) => {
+          setUsername(event.target.value);
+        }}
+        autoComplete="username"
+        maxLength={64}
+        required
+        className="mb-4 w-full rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
+      />
+
+      <label htmlFor="password" className="mb-1 block text-sm font-medium">
+        Password
+      </label>
+      <input
+        id="password"
+        type="password"
+        value={password}
+        onChange={(event) => {
+          setPassword(event.target.value);
+        }}
+        autoComplete={setupMode ? 'new-password' : 'current-password'}
+        required
+        className="w-full rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
+      />
+      {setupMode && (
+        <p className="mt-1 mb-4 text-xs text-(--color-text-secondary)">
+          At least 12 characters. Stored as an Argon2id hash, never in plain text.
+        </p>
+      )}
+
+      {setupMode && (
+        <>
+          <label htmlFor="confirm" className="mt-3 mb-1 block text-sm font-medium">
+            Confirm password
+          </label>
+          <input
+            id="confirm"
+            type="password"
+            value={confirm}
+            onChange={(event) => {
+              setConfirm(event.target.value);
+            }}
+            autoComplete="new-password"
+            required
+            className="mb-4 w-full rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
+          />
+        </>
+      )}
+
+      {error !== null && (
+        <p role="alert" className="mt-4 mb-2 text-sm text-(--color-danger)">
+          {error}
+        </p>
+      )}
+
+      <div className="mt-5">
+        <Button type="submit" variant="primary" disabled={busy}>
+          {busy ? 'Working…' : setupMode ? 'Create account' : 'Unlock'}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** The home overview. */
+function HomeScreen(): React.JSX.Element {
+  const [info, setInfo] = useState<ClientInfo | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getClientInfo()
+      .then((value) => {
+        if (!cancelled) setInfo(value);
+      })
+      .catch(() => {
+        if (!cancelled) setInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (info === null) {
     return (
       <p role="status" className="text-sm text-(--color-text-secondary)">
         Loading client information…
@@ -127,16 +372,6 @@ function StatusPanel({ state }: { readonly state: LoadState }): React.JSX.Elemen
     );
   }
 
-  if (state.status === 'error') {
-    return (
-      <div role="alert" className="max-w-prose rounded border border-(--color-danger) p-4 text-sm">
-        <h2 className="mb-1 font-semibold text-(--color-danger)">Backend unavailable</h2>
-        <p className="text-(--color-text-secondary)">{state.message}</p>
-      </div>
-    );
-  }
-
-  const { info } = state;
   const rows: readonly (readonly [string, string])[] = [
     ['App version', info.appVersion],
     ['Protocol', `${String(info.protocolVersion.major)}.${String(info.protocolVersion.minor)}`],
@@ -151,8 +386,8 @@ function StatusPanel({ state }: { readonly state: LoadState }): React.JSX.Elemen
     <section>
       <h2 className="mb-1 text-base font-semibold">This computer</h2>
       <p className="mb-4 max-w-prose text-sm text-(--color-text-secondary)">
-        The client is running and its local database is migrated. Pairing and the saved-device list
-        arrive in phase 2; see <code>PROGRESS.md</code>.
+        Device identity and pairing are ready. Connecting to a server needs the network transport,
+        which arrives in phase 3; see <code>PROGRESS.md</code>.
       </p>
 
       <dl className="max-w-md divide-y divide-(--color-border-subtle) rounded border border-(--color-border-subtle)">

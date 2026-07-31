@@ -19,6 +19,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod config;
+mod identity;
 mod logging;
 
 use std::path::PathBuf;
@@ -60,6 +61,14 @@ enum Command {
         /// Overwrite an existing configuration file.
         #[arg(long)]
         force: bool,
+    },
+    /// Print this agent's device identity and fingerprints.
+    Identity,
+    /// Open a pairing window and display a one-time code.
+    Pair {
+        /// How long the code stays valid, in seconds.
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u64).range(30..=900))]
+        ttl: u64,
     },
 }
 
@@ -109,6 +118,44 @@ fn main() -> anyhow::Result<()> {
             println!("wrote {}", config_path.display());
             Ok(())
         }
+        Command::Identity => {
+            let config = load()?;
+            paths
+                .create_all()
+                .context("could not create agent directories")?;
+            let (device_identity, _origin) = identity::load_identity(&paths, &config)?;
+            identity::print_identity(&device_identity);
+            Ok(())
+        }
+        Command::Pair { ttl } => {
+            let config = load()?;
+            paths
+                .create_all()
+                .context("could not create agent directories")?;
+            let (device_identity, origin) = identity::load_identity(&paths, &config)?;
+
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("could not start the async runtime")?;
+
+            runtime.block_on(async {
+                let database = rc_storage::Database::open(paths.database_file())
+                    .await
+                    .context("could not open the agent database")?;
+                identity::record_identity_event(
+                    &rc_storage::audit::AuditRepository::new(&database),
+                    origin,
+                    &device_identity,
+                    &rc_security::SystemClock,
+                )
+                .await?;
+                identity::expire_stale_windows(&database).await?;
+                identity::run_pairing_window(&device_identity, &database, ttl).await?;
+                database.close().await;
+                Ok(())
+            })
+        }
         Command::Run => run(paths, load()?),
     }
 }
@@ -136,6 +183,7 @@ fn run(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
 
 async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
     let host = HostInfo::detect();
+    let (device_identity, identity_origin) = identity::load_identity(&paths, &config)?;
 
     tracing::info!(
         agent_version = env!("CARGO_PKG_VERSION"),
@@ -161,6 +209,27 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         schema_version = database.schema_version().await.unwrap_or(-1),
         path = %paths.database_file().display(),
         "database ready"
+    );
+
+    // Recorded once the database is available, so first-run identity creation leaves a
+    // trail. An ordinary load writes nothing.
+    identity::record_identity_event(
+        &rc_storage::audit::AuditRepository::new(&database),
+        identity_origin,
+        &device_identity,
+        &rc_security::SystemClock,
+    )
+    .await?;
+
+    // Pairing sessions are in-memory, so any window still marked open belongs to a
+    // previous run and can no longer be used. Recording that keeps the trail honest.
+    identity::expire_stale_windows(&database).await?;
+
+    tracing::info!(
+        device_id = %device_identity.device_id(),
+        identity_fingerprint = %device_identity.public().identity_fingerprint,
+        certificate_version = device_identity.public().certificate_version,
+        "device identity ready"
     );
 
     // The listener is bound in Phase 3. Announcing the intended endpoint now makes

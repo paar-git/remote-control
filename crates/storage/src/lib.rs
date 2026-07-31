@@ -17,8 +17,14 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod audit;
 pub mod error;
 pub mod models;
+pub mod owner;
+pub mod trust;
+
+#[cfg(test)]
+mod repo_tests;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
@@ -26,13 +32,16 @@ use std::str::FromStr as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
 
+pub use audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult};
 pub use error::{Result, StorageError};
+pub use owner::{AuthenticatedOwner, OwnerRepository};
+pub use trust::{PresentedIdentity, TrustRepository, TrustedDevice};
 
 /// Migrations compiled into the binary.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Highest migration version this build ships.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
 
 /// An open, migrated database.
 #[derive(Debug, Clone)]

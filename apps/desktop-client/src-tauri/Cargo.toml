@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 rc-protocol = { workspace = true }
 rc-platform = { workspace = true }
+rc-security = { workspace = true }
 rc-storage = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
