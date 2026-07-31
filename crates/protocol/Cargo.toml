@@ -1,0 +1,24 @@
+[package]
+name = "rc-protocol"
+description = "Wire protocol, message types, framing and version negotiation for the remote-control platform."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

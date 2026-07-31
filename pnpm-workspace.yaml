@@ -1,0 +1,7 @@
+packages:
+  - 'apps/desktop-client'
+  - 'packages/*'
+
+# Build scripts are opt-in in pnpm 10+; only allow the ones we actually need.
+onlyBuiltDependencies:
+  - esbuild

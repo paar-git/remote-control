@@ -1,0 +1,36 @@
+{
+  "name": "remote-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private remote-access platform: host agent, desktop client and optional coordination service.",
+  "packageManager": "pnpm@11.1.1",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @rc/desktop-client dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:run": "pnpm -r test:run",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "rust:fmt": "cargo fmt --all",
+    "rust:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "rust:test": "cargo test --workspace",
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:run && pnpm rust:lint && pnpm rust:test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.8.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0"
+  }
+}

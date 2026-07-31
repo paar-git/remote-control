@@ -1,0 +1,124 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/protocol",
+    "crates/storage",
+    "crates/platform",
+    "crates/host-agent",
+    "apps/coordination-server",
+    "apps/desktop-client/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+authors = ["Remote Control maintainers"]
+repository = "https://example.invalid/remote-control"
+
+[workspace.dependencies]
+# --- local crates ---
+rc-protocol = { path = "crates/protocol" }
+rc-security = { path = "crates/security" }
+rc-platform = { path = "crates/platform" }
+rc-storage = { path = "crates/storage" }
+rc-monitoring = { path = "crates/monitoring" }
+rc-terminal = { path = "crates/terminal" }
+rc-file-transfer = { path = "crates/file-transfer" }
+rc-remote-desktop = { path = "crates/remote-desktop" }
+
+# --- async runtime ---
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "process", "signal"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# --- serialization / validation ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+postcard = { version = "1.1", features = ["use-std"] }
+toml = "1.1"
+bytes = "1.12"
+
+# --- errors / logging ---
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender = "0.2"
+
+# --- crypto / security ---
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "crypto", "ring"] }
+rustls-pki-types = "1.13"
+ed25519-dalek = { version = "3.0", features = ["rand_core", "pkcs8", "zeroize"] }
+sha2 = "0.11"
+blake3 = "1.8"
+argon2 = { version = "0.5", features = ["std"] }
+subtle = "2.6"
+zeroize = { version = "1.9", features = ["derive"] }
+rand = "0.10"
+rand_core = "0.10"
+getrandom = "0.3"
+hex = "0.4"
+base64 = "0.23"
+
+# --- storage ---
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "uuid"] }
+
+# --- system / platform ---
+sysinfo = "0.39"
+portable-pty = "0.9"
+mdns-sd = "0.20"
+directories = "6.0"
+walkdir = "2.5"
+
+# --- misc ---
+uuid = { version = "1.24", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+parking_lot = "0.12"
+dashmap = "6.2"
+humantime = "2.4"
+
+# --- coordination server ---
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.7", features = ["trace", "limit", "cors"] }
+governor = "0.10"
+
+# --- dev / test ---
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true

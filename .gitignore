@@ -1,0 +1,62 @@
+# Rust
+/target
+**/target/
+*.pdb
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+coverage/
+
+# Tauri
+apps/desktop-client/src-tauri/gen/
+apps/desktop-client/src-tauri/target/
+
+# Local state / secrets — never commit.
+#
+# Device identities, keystore blobs and databases are generated at runtime and are
+# specific to one installation. Committing any of them would publish key material and
+# would also make two checkouts claim the same device identity.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Key material and certificates in every form we might emit.
+*.pem
+*.key
+*.der
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.keystore
+device-identity.*
+*.identity
+identity.json
+
+# Runtime data roots created by `--root` during development.
+/local/
+/run/
+**/data/remote-control.db*
+
+# Environment files.
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
+logs/

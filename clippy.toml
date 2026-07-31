@@ -1,0 +1,29 @@
+# Product and technology names that appear in prose documentation. Without this,
+# `clippy::doc_markdown` demands backticks around them, which reads badly in a
+# sentence. `..` extends clippy's built-in list rather than replacing it.
+doc-valid-idents = [
+    "..",
+    "SQLite",
+    "PowerShell",
+    "ConPTY",
+    "WebRTC",
+    "QUIC",
+    "TypeScript",
+    "JavaScript",
+    "WebSocket",
+    "WebSockets",
+    "GitHub",
+    "OpenSSL",
+    "Wake-on-LAN",
+    "DirectX",
+    "Direct3D",
+]
+
+# The agent handles untrusted input on every path; keep functions small enough to
+# reason about.
+cognitive-complexity-threshold = 20
+too-many-arguments-threshold = 8
+
+# Anything read from the network must be size-bounded, so large stack types are a
+# smell worth surfacing.
+enum-variant-size-threshold = 512

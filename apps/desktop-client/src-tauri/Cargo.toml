@@ -1,0 +1,37 @@
+[package]
+name = "rc-desktop-client"
+description = "Remote-control desktop client backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rc_desktop_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "rc-desktop-client"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rc-protocol = { workspace = true }
+rc-platform = { workspace = true }
+rc-storage = { workspace = true }
+tauri = { version = "2", features = [] }
+tauri-plugin-os = "2"
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

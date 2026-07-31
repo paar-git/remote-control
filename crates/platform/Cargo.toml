@@ -1,0 +1,26 @@
+[package]
+name = "rc-platform"
+description = "Platform abstraction: host facts, privileged command allowlist, power actions, secret storage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+sysinfo = { workspace = true }
+directories = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
