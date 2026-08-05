@@ -53,6 +53,20 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Maximum pairing sessions open at once, bounding memory.
 pub const MAX_CONCURRENT_SESSIONS: usize = 4;
 
+/// Longest pairing window this build will ever open, in seconds.
+///
+/// A hard ceiling rather than a default. `PairingPolicy::ttl_secs` is what an operator
+/// gets when they do not say; this is what they cannot exceed when they do. Fifteen
+/// minutes is long enough to walk between two machines and short enough that a window
+/// left open by mistake closes on its own within a coffee break.
+pub const MAX_PAIRING_TTL_SECS: u64 = 900;
+
+/// Shortest pairing window this build will open, in seconds.
+///
+/// Below this the operator cannot realistically finish typing, and a window that
+/// expires mid-exchange is indistinguishable from a wrong code.
+pub const MIN_PAIRING_TTL_SECS: u64 = 30;
+
 /// Tunable pairing parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PairingPolicy {
@@ -307,6 +321,25 @@ impl PairingManager {
         clock: &dyn Clock,
         rng: &dyn RandomSource,
     ) -> Result<OpenedPairing> {
+        self.begin_pairing_with_ttl(clock, rng, self.policy.ttl_secs)
+    }
+
+    /// Open a pairing window with an operator-chosen lifetime.
+    ///
+    /// The manager is shared and long-lived, so its policy cannot be replaced per
+    /// request; the TTL is passed instead. It is clamped into
+    /// [`MIN_PAIRING_TTL_SECS`]..=[`MAX_PAIRING_TTL_SECS`] here as well as validated by
+    /// the caller, so no path can open a window longer than this build allows.
+    ///
+    /// # Errors
+    /// As [`PairingManager::begin_pairing`].
+    pub fn begin_pairing_with_ttl(
+        &self,
+        clock: &dyn Clock,
+        rng: &dyn RandomSource,
+        ttl_secs: u64,
+    ) -> Result<OpenedPairing> {
+        let ttl_secs = ttl_secs.clamp(MIN_PAIRING_TTL_SECS, MAX_PAIRING_TTL_SECS);
         let now = clock.now_ms();
         let mut sessions = self.lock()?;
 
@@ -328,9 +361,8 @@ impl PairingManager {
         let verifier = code.derive_verifier(&salt)?;
 
         let id = PairingSessionId::generate();
-        let expires_at_ms = now.saturating_add(
-            i64::try_from(self.policy.ttl_secs.saturating_mul(1000)).unwrap_or(i64::MAX),
-        );
+        let expires_at_ms =
+            now.saturating_add(i64::try_from(ttl_secs.saturating_mul(1000)).unwrap_or(i64::MAX));
 
         let opened = OpenedPairing {
             pairing_session_id: id,
@@ -356,7 +388,7 @@ impl PairingManager {
         // The code itself is never logged — only that a window opened.
         tracing::info!(
             pairing_session_id = %id,
-            ttl_secs = self.policy.ttl_secs,
+            ttl_secs,
             "pairing window opened"
         );
 
@@ -645,4 +677,79 @@ fn validate_display_name(name: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clock::{OsRandom, SystemClock};
+
+    use super::*;
+
+    #[test]
+    fn an_operator_chosen_window_is_honoured_within_the_build_limits() {
+        let manager = PairingManager::with_defaults();
+        let clock = SystemClock;
+
+        let opened = manager
+            .begin_pairing_with_ttl(&clock, &OsRandom, 300)
+            .unwrap();
+
+        let remaining_secs = (opened.expires_at_ms - clock.now_ms()) / 1000;
+        assert!(
+            (295..=300).contains(&remaining_secs),
+            "expected roughly 300 seconds, got {remaining_secs}"
+        );
+    }
+
+    #[test]
+    fn an_over_long_window_is_clamped_rather_than_granted() {
+        // A request is validated by the caller *and* clamped here, so no path can open
+        // a window longer than this build allows.
+        let manager = PairingManager::with_defaults();
+        let clock = SystemClock;
+
+        let opened = manager
+            .begin_pairing_with_ttl(&clock, &OsRandom, u64::MAX)
+            .unwrap();
+
+        let remaining_secs = (opened.expires_at_ms - clock.now_ms()) / 1000;
+        assert!(
+            remaining_secs <= i64::try_from(MAX_PAIRING_TTL_SECS).unwrap(),
+            "got {remaining_secs}"
+        );
+    }
+
+    #[test]
+    fn an_impossibly_short_window_is_raised_to_the_floor() {
+        let manager = PairingManager::with_defaults();
+        let clock = SystemClock;
+
+        let opened = manager
+            .begin_pairing_with_ttl(&clock, &OsRandom, 0)
+            .unwrap();
+
+        let remaining_secs = (opened.expires_at_ms - clock.now_ms()) / 1000;
+        assert!(
+            remaining_secs >= i64::try_from(MIN_PAIRING_TTL_SECS).unwrap() - 1,
+            "a window that expires before it can be typed is not a window: got {remaining_secs}"
+        );
+    }
+
+    #[test]
+    fn open_windows_are_listed_newest_first_and_terminal_ones_are_not_listed() {
+        let manager = PairingManager::with_defaults();
+        let clock = SystemClock;
+
+        let first = manager.begin_pairing(&clock, &OsRandom).unwrap();
+        let second = manager.begin_pairing(&clock, &OsRandom).unwrap();
+
+        let open = manager.open_session_ids(&clock);
+        assert_eq!(open.len(), 2);
+        assert!(open.contains(&first.pairing_session_id));
+        assert!(open.contains(&second.pairing_session_id));
+
+        manager.cancel(first.pairing_session_id).unwrap();
+        let after = manager.open_session_ids(&clock);
+        assert_eq!(after, vec![second.pairing_session_id]);
+    }
 }

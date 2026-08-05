@@ -1,10 +1,9 @@
 //! Host agent entry point.
 //!
-//! The agent runs as a system service on the machine being controlled. At this point
-//! in development it performs the full startup sequence — configuration, logging,
-//! directories, database, host inventory, health check — and then idles until a
-//! shutdown signal arrives. The QUIC listener and session handling are added in
-//! Phase 3; see `PROGRESS.md`.
+//! The agent runs as a system service on the machine being controlled. It performs the
+//! full startup sequence — configuration, logging, directories, database, host
+//! inventory, health check — then binds its QUIC listener and serves authenticated
+//! sessions until it is asked to stop.
 //!
 //! Subcommands:
 //!
@@ -20,7 +19,10 @@
 
 mod config;
 mod identity;
+mod local_api;
 mod logging;
+mod server;
+mod sessions;
 
 use std::path::PathBuf;
 
@@ -129,32 +131,17 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Pair { ttl } => {
             let config = load()?;
-            paths
-                .create_all()
-                .context("could not create agent directories")?;
-            let (device_identity, origin) = identity::load_identity(&paths, &config)?;
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .context("could not start the async runtime")?;
 
-            runtime.block_on(async {
-                let database = rc_storage::Database::open(paths.database_file())
-                    .await
-                    .context("could not open the agent database")?;
-                identity::record_identity_event(
-                    &rc_storage::audit::AuditRepository::new(&database),
-                    origin,
-                    &device_identity,
-                    &rc_security::SystemClock,
-                )
-                .await?;
-                identity::expire_stale_windows(&database).await?;
-                identity::run_pairing_window(&device_identity, &database, ttl).await?;
-                database.close().await;
-                Ok(())
-            })
+            // The window has to be opened inside the *running* agent: pairing sessions
+            // live in that process's memory, and only that process can verify the
+            // proof a client will send. So this command asks it, rather than opening a
+            // window of its own that nothing would ever answer.
+            runtime.block_on(identity::request_pairing_window(&paths, &config, ttl))
         }
         Command::Run => run(paths, load()?),
     }
@@ -232,29 +219,122 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         "device identity ready"
     );
 
-    // The listener is bound in Phase 3. Announcing the intended endpoint now makes
-    // firewall configuration verifiable before the network path exists.
     tracing::info!(
         listen = %config.listen_socket(),
         discovery = config.network.discovery_enabled,
         remote_access = config.network.remote_access_enabled,
         max_sessions = config.network.max_sessions,
-        "network configuration loaded (listener starts in Phase 3)"
+        "network configuration loaded"
     );
 
     if config.network.remote_access_enabled {
         tracing::warn!(
-            "remote access is enabled; confirm the firewall guidance in \
-             docs/installation.md has been applied"
+            "remote access is enabled; confirm the firewall guidance in              docs/installation.md has been applied"
         );
     }
 
-    wait_for_shutdown().await;
+    // Shared with the local control endpoint. Windows are opened out-of-band, by an
+    // operator running `rc-agent pair`, and live only in this process's memory.
+    let pairing = std::sync::Arc::new(rc_security::PairingManager::with_defaults());
+    let health_port = config.network.health_port;
+    let device_identity = std::sync::Arc::new(device_identity);
+
+    let server = std::sync::Arc::new(server::AgentServer::new(
+        std::sync::Arc::clone(&device_identity),
+        config,
+        database.clone(),
+        std::sync::Arc::clone(&pairing),
+    ));
+
+    // One shutdown signal, observed by both the listener and the local endpoint. A
+    // broadcast rather than two waiters on the OS signal, because only one task can
+    // own `ctrl_c`.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let local_shutdown = shutdown_tx.subscribe();
+
+    tokio::spawn(async move {
+        wait_for_shutdown().await;
+        // A send failure means every receiver has already gone, which is the state
+        // being asked for anyway.
+        let _ = shutdown_tx.send(());
+    });
+
+    let local_task = spawn_local_endpoint(
+        health_port,
+        &paths,
+        &database,
+        &server,
+        &pairing,
+        &device_identity,
+        local_shutdown,
+    );
+
+    server
+        .run(async move {
+            let _ = shutdown_rx.recv().await;
+        })
+        .await?;
 
     tracing::info!("shutdown signal received, stopping");
+    if let Some(task) = local_task {
+        // The endpoint has been told to stop; waiting for it keeps the shutdown
+        // ordered rather than leaving a socket open behind the process.
+        let _ = task.await;
+    }
     database.close().await;
     tracing::info!("agent stopped cleanly");
     Ok(())
+}
+
+/// Start the loopback control endpoint, if it is enabled.
+///
+/// Best-effort throughout: an agent that cannot serve health or accept a local pairing
+/// request can still serve clients, and refusing to start would turn a diagnostic
+/// facility into an outage.
+fn spawn_local_endpoint(
+    port: u16,
+    paths: &AppPaths,
+    database: &rc_storage::Database,
+    server: &std::sync::Arc<server::AgentServer>,
+    pairing: &std::sync::Arc<rc_security::PairingManager>,
+    identity: &std::sync::Arc<rc_security::DeviceIdentity>,
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if port == 0 {
+        tracing::info!("the local control endpoint is disabled by configuration");
+        return None;
+    }
+
+    // Written before the endpoint starts serving, so `rc-agent pair` never finds a
+    // socket it cannot authenticate to. A fresh token per start invalidates any copy
+    // taken from a previous run.
+    let token = local_api::LocalControlToken::generate();
+    if let Err(err) = token.write_to(&local_api::token_path(paths)) {
+        tracing::warn!(
+            %err,
+            "could not write the local control token; `rc-agent pair` will not work"
+        );
+    }
+
+    let endpoint = std::sync::Arc::new(local_api::LocalEndpoint::new(
+        database.clone(),
+        server.sessions(),
+        server.listener_ready(),
+        std::sync::Arc::clone(pairing),
+        std::sync::Arc::clone(identity),
+        token,
+    ));
+
+    Some(tokio::spawn(async move {
+        if let Err(err) = endpoint
+            .serve(port, async move {
+                let _ = shutdown.recv().await;
+            })
+            .await
+        {
+            tracing::warn!(%err, port, "the local control endpoint stopped");
+        }
+    }))
 }
 
 /// Block until the OS asks the process to stop.

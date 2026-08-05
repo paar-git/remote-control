@@ -61,6 +61,9 @@ pub const ALPN_PROTOCOL: &[u8] = b"rc/1";
 /// Default UDP port the host agent listens on for QUIC.
 pub const DEFAULT_AGENT_PORT: u16 = 47_811;
 
+/// Default TCP port for the agent's loopback-only health endpoint.
+pub const DEFAULT_AGENT_HEALTH_PORT: u16 = 47_813;
+
 /// Default TCP port the optional coordination service listens on.
 pub const DEFAULT_COORDINATION_PORT: u16 = 47_812;
 
@@ -113,6 +116,9 @@ mod tests {
         const { assert!(DEFAULT_AGENT_PORT > 1024) }
         const { assert!(DEFAULT_COORDINATION_PORT > 1024) }
         const { assert!(DEFAULT_AGENT_PORT != DEFAULT_COORDINATION_PORT) }
+        const { assert!(DEFAULT_AGENT_HEALTH_PORT > 1024) }
+        const { assert!(DEFAULT_AGENT_HEALTH_PORT != DEFAULT_AGENT_PORT) }
+        const { assert!(DEFAULT_AGENT_HEALTH_PORT != DEFAULT_COORDINATION_PORT) }
     }
 
     #[test]

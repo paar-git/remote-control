@@ -23,6 +23,7 @@ repository = "https://example.invalid/remote-control"
 # --- local crates ---
 rc-protocol = { path = "crates/protocol" }
 rc-security = { path = "crates/security" }
+rc-transport = { path = "crates/transport" }
 rc-platform = { path = "crates/platform" }
 rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }

@@ -221,6 +221,30 @@ impl TrustRepository {
         row.map(TryInto::try_into).transpose()
     }
 
+    /// Look a device up by its **current** certificate fingerprint.
+    ///
+    /// This is the lookup the transport handshake performs, because a certificate
+    /// fingerprint is what a TLS connection actually observes. A device that renewed
+    /// its certificate without the agent recording the rotation will not be found here
+    /// and is refused — re-pinning a renewed certificate is a deliberate step, never
+    /// something a connection attempt performs for itself.
+    ///
+    /// # Errors
+    /// Propagates query failures.
+    pub async fn find_by_certificate(
+        &self,
+        certificate_fingerprint: Fingerprint,
+    ) -> Result<Option<TrustedDevice>> {
+        let row = sqlx::query_as::<_, TrustedDeviceRaw>(
+            "SELECT * FROM trusted_device WHERE certificate_fingerprint = ?",
+        )
+        .bind(certificate_fingerprint.to_hex())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
     /// Decide whether a presenting peer may proceed, and with what authority.
     ///
     /// This is the single authorization entry point. It reads live state every time:

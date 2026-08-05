@@ -102,6 +102,11 @@ pub struct NetworkConfig {
     pub coordination_url: Option<String>,
     /// Relay URL used when a direct peer-to-peer path cannot be established.
     pub relay_url: Option<String>,
+    /// TCP port for the unauthenticated local health endpoint, or `0` to disable it.
+    ///
+    /// Always bound to `127.0.0.1`; the address is deliberately not configurable, so no
+    /// configuration mistake can expose it to the network.
+    pub health_port: u16,
     /// Maximum concurrent authenticated sessions.
     pub max_sessions: u16,
     /// Failed authentication attempts permitted per source address per minute.
@@ -113,6 +118,7 @@ impl Default for NetworkConfig {
         Self {
             listen_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             listen_port: rc_protocol::DEFAULT_AGENT_PORT,
+            health_port: rc_protocol::DEFAULT_AGENT_HEALTH_PORT,
             discovery_enabled: true,
             remote_access_enabled: false,
             coordination_url: None,
@@ -325,6 +331,19 @@ impl AgentConfig {
             return invalid(
                 "network.listen_port",
                 "must be above 1023; the agent must not need root to bind",
+            );
+        }
+        // `0` disables the endpoint; any other value must be bindable without root.
+        if self.network.health_port != 0 && self.network.health_port < 1024 {
+            return invalid(
+                "network.health_port",
+                "must be 0 to disable it, or above 1023",
+            );
+        }
+        if self.network.health_port != 0 && self.network.health_port == self.network.listen_port {
+            return invalid(
+                "network.health_port",
+                "must differ from the QUIC listener port",
             );
         }
         if self.network.max_sessions == 0 {

@@ -122,6 +122,18 @@ pub mod actions {
     pub const OWNER_CREATED: &str = "auth.owner_created";
     /// The owner's password hash was upgraded to stronger parameters.
     pub const PASSWORD_HASH_UPGRADED: &str = "auth.password_hash_upgraded";
+    /// The agent bound its listener and began accepting connections.
+    pub const LISTENER_STARTED: &str = "connection.listener_started";
+    /// A client authenticated and a session began.
+    pub const SESSION_STARTED: &str = "connection.session_started";
+    /// A session ended, for any reason.
+    pub const SESSION_ENDED: &str = "connection.session_ended";
+    /// A connection was refused before a session began.
+    pub const CONNECTION_REFUSED: &str = "connection.refused";
+    /// A connection was refused because the session limit was already reached.
+    pub const CONNECTION_LIMIT_REACHED: &str = "connection.limit_reached";
+    /// A client reconnected to an agent it had previously been connected to.
+    pub const RECONNECTED: &str = "connection.reconnected";
 }
 
 /// Metadata keys that must never appear in an audit record.

@@ -1,19 +1,20 @@
 //! Agent identity and pairing entry points.
 //!
-//! These back the `identity` and `pair` subcommands. Pairing sessions live in memory
-//! and die with the process, so the `pair` command holds the window open for its
-//! lifetime and prints the code to the console — the one sanctioned path by which a
-//! code becomes visible. The code is never written to the log.
+//! These back the `identity` and `pair` subcommands.
+//!
+//! Pairing sessions live in the *running agent's* memory and die with that process, so
+//! `pair` cannot open a window for itself: a client's proof would arrive at the agent,
+//! whose manager had never heard of it. Instead the command asks the running agent over
+//! its loopback control endpoint and prints what comes back — the one sanctioned path
+//! by which a code becomes visible. The code is never written to the log.
 
 use anyhow::Context as _;
 use rc_protocol::{DeviceId, PairingSessionId};
-use rc_security::pairing::{ClientProof, PairingManager, PairingOutcome, PairingPolicy};
-use rc_security::{Clock, DeviceIdentity, Keystore, OsRandom, SecurityError, SystemClock};
+use rc_security::{Clock, DeviceIdentity, Keystore, SystemClock};
 use rc_storage::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
-use rc_storage::models::PeerRoleRow;
-use rc_storage::trust::TrustRepository;
 
 use crate::config::AgentConfig;
+use crate::local_api::TOKEN_HEADER;
 
 /// How the identity returned by [`load_identity`] came to be.
 ///
@@ -139,234 +140,144 @@ pub fn print_identity(identity: &DeviceIdentity) {
     println!("certificate is renewed. Compare it with what your client displays.");
 }
 
-/// Open a pairing window and hold it until it expires or the operator cancels.
+/// Ask the running agent to open a pairing window, and display the code.
+///
+/// # Why this is a request rather than an action
+///
+/// Pairing sessions live in the agent process's memory, by design: a code shown before
+/// a crash must not still be usable afterwards. This command is a *different process*,
+/// so a window it opened for itself would be a window no client could ever complete —
+/// the proof would arrive at the agent, whose manager has never heard of it.
+///
+/// So it asks, over the agent's loopback control endpoint, presenting the local-control
+/// token. Being able to read that token is the authorization: it lives in the agent's
+/// data directory under the same protection as the keystore.
 ///
 /// # Errors
-/// Fails if the window cannot be opened or the audit record cannot be written.
-pub async fn run_pairing_window(
-    identity: &DeviceIdentity,
-    database: &rc_storage::Database,
+/// Fails with an operator-facing explanation if no agent is running, if this user may
+/// not read the control token, or if the agent refuses the request.
+pub async fn request_pairing_window(
+    paths: &rc_platform::AppPaths,
+    config: &AgentConfig,
     ttl_secs: u64,
 ) -> anyhow::Result<()> {
-    let clock = SystemClock;
-    let manager = PairingManager::new(PairingPolicy {
-        ttl_secs,
-        ..PairingPolicy::default()
-    });
-    let audit = AuditRepository::new(database);
-
-    let opened = manager
-        .begin_pairing(&clock, &OsRandom)
-        .context("could not open a pairing window")?;
-
-    // Persist the verifier, never the code. Reading this row does not yield a usable
-    // code: it is an Argon2id output over a 44-bit space.
-    sqlx::query(
-        "INSERT INTO pairing_code (
-             id, code_hash, code_salt, created_at_ms, expires_at_ms,
-             max_attempts, pairing_session_id, outcome
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
-    )
-    .bind(opened.pairing_session_id.to_canonical_string())
-    .bind(&opened.verifier_hex)
-    .bind(&opened.salt_hex)
-    .bind(clock.now_ms())
-    .bind(opened.expires_at_ms)
-    .bind(i64::from(manager.policy().max_attempts))
-    .bind(opened.pairing_session_id.to_canonical_string())
-    .execute(database.pool())
-    .await
-    .context("could not record the pairing window")?;
-
-    audit
-        .record(
-            &AuditEvent::new(
-                AuditCategory::Pairing,
-                actions::PAIRING_CODE_CREATED,
-                AuditResult::Success,
-            )
-            .meta("ttl_secs", ttl_secs),
-            clock.now_ms(),
-        )
-        .await
-        .context("could not write the pairing audit record")?;
-
-    let public = identity.public();
-    println!();
-    println!("  Pairing code:  {}", opened.code.expose_for_display());
-    println!();
-    println!("  This server:   {}", public.device_id);
-    println!(
-        "  Fingerprint:   {}",
-        public.identity_fingerprint.to_display_groups()
+    let port = config.network.health_port;
+    anyhow::ensure!(
+        port != 0,
+        "the agent's local control endpoint is disabled (network.health_port = 0), \
+         so a pairing window cannot be opened from this command"
     );
+
+    let token_path = crate::local_api::token_path(paths);
+    let token = crate::local_api::LocalControlToken::read_from(&token_path).with_context(|| {
+        format!(
+            "could not read the local control token at {}. Is the agent running, and \
+             are you running this as the same user (or an administrator)?",
+            token_path.display()
+        )
+    })?;
+
+    let response = post_open_pairing(port, &token, ttl_secs).await?;
+
+    println!();
+    println!("  Pairing code:  {}", response.code);
+    println!();
+    println!("  This server:   {}", response.device_id);
+    println!("  Fingerprint:   {}", response.identity_fingerprint);
     println!();
     println!("  Enter the code on your client and check that the fingerprint matches.");
-    println!("  The code expires in {ttl_secs} seconds and can be used once.");
+    println!(
+        "  The code expires in {} seconds and can be used once.",
+        response.ttl_secs
+    );
     println!();
 
     // The code is deliberately absent from this record.
     tracing::info!(
-        pairing_session_id = %opened.pairing_session_id,
-        ttl_secs,
-        "pairing window open; waiting for a client"
+        pairing_session_id = %response.pairing_session_id,
+        ttl_secs = response.ttl_secs,
+        "pairing window opened by operator request"
     );
-
-    // Hold the window open. Phase 3's listener will complete the exchange; until then
-    // this waits out the timer so the operator sees the real lifetime.
-    let deadline = std::time::Duration::from_secs(ttl_secs);
-    tokio::select! {
-        () = tokio::time::sleep(deadline) => {
-            println!("The pairing code has expired.");
-            audit
-                .record(
-                    &AuditEvent::new(
-                        AuditCategory::Pairing,
-                        actions::PAIRING_EXPIRED,
-                        AuditResult::Failure,
-                    ),
-                    clock.now_ms(),
-                )
-                .await
-                .ok();
-        }
-        _ = tokio::signal::ctrl_c() => {
-            manager.cancel(opened.pairing_session_id).ok();
-            println!("Pairing cancelled.");
-            audit
-                .record(
-                    &AuditEvent::new(
-                        AuditCategory::Pairing,
-                        actions::PAIRING_CANCELLED,
-                        AuditResult::Failure,
-                    ),
-                    clock.now_ms(),
-                )
-                .await
-                .ok();
-        }
-    }
-
-    mark_window_closed(database, &opened.pairing_session_id.to_canonical_string()).await;
     Ok(())
 }
 
-/// Verify a client's pairing proof, record trust, and audit the outcome.
+/// Perform the loopback request that opens a window.
 ///
-/// This is the agent-side completion step. Phase 3's listener calls it with a proof
-/// received over the wire; it is written and tested now so the trust-recording and
-/// audit behaviour is settled before a network path exists to reach it.
-///
-/// The three failure audits are deliberately distinct, because they mean different
-/// things operationally: `PAIRING_THROTTLED` says an attacker is being rate-limited,
-/// `PAIRING_EXPIRED` says a window closed unused, and `PAIRING_ATTEMPT_FAILED` says a
-/// proof was actually rejected. None of them records the proof, the code or the
-/// verifier — only the session id, which is not secret.
-///
-/// # Errors
-/// Returns the underlying [`SecurityError`] when the proof is rejected, and a storage
-/// error if trust cannot be recorded.
-// Reached only from tests until Phase 3 binds the listener that supplies a proof. The
-// allow is deliberate and scoped: the function is fully implemented and tested, not a
-// stub, and removing it to satisfy dead-code analysis would mean rewriting it later
-// without the tests that currently pin its behaviour.
-#[allow(dead_code)]
-pub async fn complete_pairing(
-    manager: &PairingManager,
-    session_id: PairingSessionId,
-    proof: &ClientProof,
-    agent: &DeviceIdentity,
-    database: &rc_storage::Database,
-    clock: &dyn Clock,
-) -> anyhow::Result<PairingOutcome> {
-    let audit = AuditRepository::new(database);
-    let now = clock.now_ms();
+/// Written against `tokio` directly rather than pulling in an HTTP client: the request
+/// is one fixed shape to one fixed address, and a dependency whose only job is to build
+/// it would be more surface than the code it replaced.
+async fn post_open_pairing(
+    port: u16,
+    token: &crate::local_api::LocalControlToken,
+    ttl_secs: u64,
+) -> anyhow::Result<crate::local_api::OpenPairingResponse> {
+    use std::fmt::Write as _;
 
-    let outcome = match manager.verify_client_proof(session_id, proof, agent, clock) {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            let (action, result) = match err {
-                // The attempt cap and an expired window are throttling outcomes: the
-                // caller is being refused without its proof having been judged.
-                SecurityError::PairingAttemptsExhausted | SecurityError::Throttled { .. } => {
-                    (actions::PAIRING_THROTTLED, AuditResult::Denied)
-                }
-                SecurityError::PairingExpired => (actions::PAIRING_EXPIRED, AuditResult::Failure),
-                _ => (actions::PAIRING_ATTEMPT_FAILED, AuditResult::Failure),
-            };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-            audit
-                .record(
-                    &AuditEvent::new(AuditCategory::Pairing, action, result)
-                        .meta("pairing_session_id", session_id)
-                        // The error's `Display` is written to be safe to surface: it
-                        // never echoes attacker input and never names a secret.
-                        .meta("reason", &err),
-                    now,
-                )
-                .await
-                .context("could not write the pairing failure audit record")?;
+    let body = serde_json::to_string(&crate::local_api::OpenPairingRequest { ttl_secs })?;
 
-            return Err(err.into());
-        }
-    };
-
-    // Trust is recorded before the confirmation is handed back, so a client can never
-    // believe it is paired while the agent has no record of it.
-    let trust = TrustRepository::new(database);
-    trust
-        .insert_paired_device(
-            outcome.client_device_id,
-            PeerRoleRow::Client,
-            &outcome.client_display_name,
-            "",
-            &outcome.client_public_key,
-            outcome.client_identity_fingerprint,
-            outcome.client_certificate_fingerprint,
-            &outcome.granted_permissions,
-            Some(&outcome.transcript_digest),
-            now,
-        )
+    let mut stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
         .await
-        .context("could not record the newly trusted device")?;
+        .with_context(|| {
+            format!("could not reach the agent on 127.0.0.1:{port}. Is the agent running?")
+        })?;
 
-    mark_window_consumed(
-        database,
-        &session_id.to_canonical_string(),
-        outcome.client_device_id,
-        now,
-    )
-    .await;
+    // Written out by hand because HTTP requires CRLF line endings and a blank line
+    // before the body; a source-formatted multi-line string would send spaces instead.
+    let mut request = String::new();
+    request.push_str("POST /pairing HTTP/1.1\r\n");
+    request.push_str("Host: 127.0.0.1\r\n");
+    request.push_str("Content-Type: application/json\r\n");
+    // Writing into a `String` cannot fail; the results are discarded rather than
+    // unwrapped so this stays panic-free.
+    let _ = write!(request, "Content-Length: {}\r\n", body.len());
+    let _ = write!(request, "{TOKEN_HEADER}: {}\r\n", token.header_value());
+    // Asking the server to close tells us where the response ends without having to
+    // parse chunked encoding or keep-alive framing.
+    request.push_str("Connection: close\r\n\r\n");
+    request.push_str(&body);
 
-    audit
-        .record(
-            &AuditEvent::new(
-                AuditCategory::Pairing,
-                actions::PAIRING_COMPLETED,
-                AuditResult::Success,
-            )
-            .target_device(outcome.client_device_id)
-            .meta("pairing_session_id", session_id)
-            .meta("role", outcome.granted_permissions.role.name())
-            // A short digest, not the transcript itself: enough to correlate the two
-            // peers' records, not enough to reconstruct the exchange.
-            .meta("transcript_digest", &outcome.transcript_digest),
-            now,
-        )
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Bounded: the response is a small JSON document, and an unbounded read from a
+    // socket is an unbounded allocation.
+    let mut raw = Vec::new();
+    stream
+        .take(64 * 1024)
+        .read_to_end(&mut raw)
         .await
-        .context("could not write the pairing completion audit record")?;
+        .context("could not read the agent's reply")?;
 
-    Ok(outcome)
+    let text = String::from_utf8_lossy(&raw);
+    let (headers, payload) = text
+        .split_once("\r\n\r\n")
+        .context("the agent sent a malformed reply")?;
+
+    let status_ok = headers.starts_with("HTTP/1.1 200");
+    let parsed: serde_json::Value =
+        serde_json::from_str(payload.trim()).context("the agent sent a reply that is not JSON")?;
+
+    if !status_ok {
+        let message = parsed
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("the agent refused the request");
+        anyhow::bail!("{message}");
+    }
+
+    serde_json::from_value(parsed).context("the agent's reply was not in the expected shape")
 }
 
-/// Mark a pairing window as successfully used.
+/// Record that a pairing window was used successfully.
 ///
-/// Guarded on `outcome = 'open'` so a second completion cannot rewrite the row, which
-/// keeps the persisted trail consistent with the in-memory single-use guarantee.
-#[allow(dead_code)] // Called only by `complete_pairing`; see the note there.
-async fn mark_window_consumed(
+/// Guarded on `outcome = 'open'`, so a second completion cannot rewrite the row. That
+/// keeps the persisted trail consistent with the in-memory single-use guarantee rather
+/// than merely agreeing with it most of the time.
+pub async fn mark_window_consumed(
     database: &rc_storage::Database,
-    session_id: &str,
+    session_id: PairingSessionId,
     paired_device: DeviceId,
     now_ms: i64,
 ) {
@@ -377,27 +288,12 @@ async fn mark_window_consumed(
     )
     .bind(now_ms)
     .bind(paired_device.to_canonical_string())
-    .bind(session_id)
+    .bind(session_id.to_canonical_string())
     .execute(database.pool())
     .await;
 
     if let Err(err) = result {
         tracing::warn!(%err, "could not record the pairing window as consumed");
-    }
-}
-
-/// Record the terminal outcome of a pairing window.
-async fn mark_window_closed(database: &rc_storage::Database, session_id: &str) {
-    let result = sqlx::query(
-        "UPDATE pairing_code SET outcome = 'expired'
-         WHERE pairing_session_id = ? AND outcome = 'open'",
-    )
-    .bind(session_id)
-    .execute(database.pool())
-    .await;
-
-    if let Err(err) = result {
-        tracing::warn!(%err, "could not record the pairing window outcome");
     }
 }
 
@@ -433,212 +329,76 @@ fn format_timestamp(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rc_security::pairing::{PairingClient, RequestedPermissions};
-    use rc_security::permissions::Role;
-    use rc_security::{OsRandom, RandomSourceExt as _};
     use rc_storage::audit::AuditCategory;
 
     use super::*;
 
-    /// Drives a real pairing exchange against a real database.
-    struct Fixture {
-        database: rc_storage::Database,
-        manager: PairingManager,
-        agent: DeviceIdentity,
-        client: DeviceIdentity,
-        clock: SystemClock,
-    }
-
-    impl Fixture {
-        async fn new() -> Self {
-            let clock = SystemClock;
-            Self {
-                database: rc_storage::Database::open_in_memory().await.unwrap(),
-                manager: PairingManager::with_defaults(),
-                agent: DeviceIdentity::generate("test-agent", &clock).unwrap(),
-                client: DeviceIdentity::generate("test-client", &clock).unwrap(),
-                clock,
-            }
-        }
-
-        /// Run the exchange up to the point a valid proof exists.
-        fn proof_for(&self, role: Role) -> (PairingSessionId, ClientProof) {
-            let opened = self.manager.begin_pairing(&self.clock, &OsRandom).unwrap();
-            let permissions = RequestedPermissions::full(role);
-
-            let client = PairingClient::current();
-            let claim = client.build_claim(
-                &self.client,
-                OsRandom.bytes(),
-                "Test Client".to_owned(),
-                permissions.clone(),
-            );
-
-            let challenge = self
-                .manager
-                .submit_client_identity(
-                    opened.pairing_session_id,
-                    claim.clone(),
-                    &self.agent,
-                    &self.clock,
-                )
-                .unwrap();
-
-            let transcript = client.build_transcript(&challenge, &claim).unwrap();
-            let verifier = PairingClient::derive_verifier(&opened.code, &challenge).unwrap();
-            let proof = client
-                .build_proof(&self.client, &verifier, &transcript)
-                .unwrap();
-
-            (opened.pairing_session_id, proof)
-        }
-
-        async fn audit_actions(&self) -> Vec<String> {
-            AuditRepository::new(&self.database)
-                .recent_in_category(AuditCategory::Pairing, 20)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|row| row.action)
-                .collect()
-        }
-    }
-
-    #[tokio::test]
-    async fn a_valid_proof_records_trust_and_audits_completion() {
-        let fixture = Fixture::new().await;
-        let (session_id, proof) = fixture.proof_for(Role::Operator);
-
-        let outcome = complete_pairing(
-            &fixture.manager,
-            session_id,
-            &proof,
-            &fixture.agent,
-            &fixture.database,
-            &fixture.clock,
+    /// The pairing exchange itself is covered end-to-end over real QUIC endpoints in
+    /// `rc-transport`'s `pairing_e2e` suite, against the same `PairingService` the
+    /// agent uses. What is left here is the agent's own bookkeeping.
+    async fn database_with_open_window(session_id: PairingSessionId) -> rc_storage::Database {
+        let db = rc_storage::Database::open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO pairing_code
+                 (id, code_hash, code_salt, created_at_ms, expires_at_ms, outcome)
+             VALUES (?, 'hash', 'salt', 1, 2, 'open')",
         )
+        .bind(session_id.to_canonical_string())
+        .execute(db.pool())
         .await
         .unwrap();
 
-        assert_eq!(outcome.client_device_id, fixture.client.device_id());
-
-        // Trust is persisted, not merely returned.
-        let trusted = TrustRepository::new(&fixture.database)
-            .find(fixture.client.device_id())
-            .await
-            .unwrap()
-            .expect("the paired device must be recorded");
-        assert!(!trusted.revoked);
-
-        assert!(
-            fixture
-                .audit_actions()
-                .await
-                .contains(&actions::PAIRING_COMPLETED.to_owned())
-        );
-    }
-
-    #[tokio::test]
-    async fn a_second_completion_of_the_same_session_is_refused() {
-        let fixture = Fixture::new().await;
-        let (session_id, proof) = fixture.proof_for(Role::Operator);
-
-        complete_pairing(
-            &fixture.manager,
-            session_id,
-            &proof,
-            &fixture.agent,
-            &fixture.database,
-            &fixture.clock,
-        )
-        .await
-        .unwrap();
-
-        // Replaying the identical proof must not produce a second trusted device.
-        let replay = complete_pairing(
-            &fixture.manager,
-            session_id,
-            &proof,
-            &fixture.agent,
-            &fixture.database,
-            &fixture.clock,
-        )
-        .await;
-        assert!(replay.is_err(), "a consumed session must not pair twice");
-
-        let devices = TrustRepository::new(&fixture.database)
-            .list(PeerRoleRow::Client)
+        sqlx::query("UPDATE pairing_code SET pairing_session_id = id")
+            .execute(db.pool())
             .await
             .unwrap();
-        assert_eq!(devices.len(), 1, "replay must not add a device");
+        db
+    }
+
+    async fn outcome_of(db: &rc_storage::Database, session_id: PairingSessionId) -> String {
+        let (outcome,): (String,) =
+            sqlx::query_as("SELECT outcome FROM pairing_code WHERE pairing_session_id = ?")
+                .bind(session_id.to_canonical_string())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        outcome
     }
 
     #[tokio::test]
-    async fn a_rejected_proof_audits_a_failed_attempt_and_records_no_trust() {
-        let fixture = Fixture::new().await;
-        let (session_id, mut proof) = fixture.proof_for(Role::Operator);
+    async fn a_completed_window_is_recorded_as_consumed() {
+        let session_id = PairingSessionId::generate();
+        let device_id = DeviceId::generate();
+        let db = database_with_open_window(session_id).await;
 
-        // Corrupt the MAC: the shape stays valid, the proof does not.
-        proof.mac[0] ^= 0xFF;
+        mark_window_consumed(&db, session_id, device_id, 42).await;
 
-        let result = complete_pairing(
-            &fixture.manager,
-            session_id,
-            &proof,
-            &fixture.agent,
-            &fixture.database,
-            &fixture.clock,
+        assert_eq!(outcome_of(&db, session_id).await, "consumed");
+    }
+
+    #[tokio::test]
+    async fn a_window_cannot_be_consumed_twice() {
+        // The persisted trail has to agree with the in-memory single-use guarantee,
+        // not merely resemble it: a replay must not rewrite the row.
+        let session_id = PairingSessionId::generate();
+        let first = DeviceId::generate();
+        let second = DeviceId::generate();
+        let db = database_with_open_window(session_id).await;
+
+        mark_window_consumed(&db, session_id, first, 42).await;
+        mark_window_consumed(&db, session_id, second, 99).await;
+
+        let (device, consumed_at): (String, i64) = sqlx::query_as(
+            "SELECT paired_device_id, consumed_at_ms FROM pairing_code
+             WHERE pairing_session_id = ?",
         )
-        .await;
-        assert!(result.is_err());
+        .bind(session_id.to_canonical_string())
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
 
-        assert!(
-            TrustRepository::new(&fixture.database)
-                .list(PeerRoleRow::Client)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a rejected proof must not create trust"
-        );
-
-        assert!(
-            fixture
-                .audit_actions()
-                .await
-                .contains(&actions::PAIRING_ATTEMPT_FAILED.to_owned())
-        );
-    }
-
-    #[tokio::test]
-    async fn exhausting_the_attempt_cap_audits_a_throttled_attempt() {
-        let fixture = Fixture::new().await;
-        let (session_id, good_proof) = fixture.proof_for(Role::Operator);
-
-        let mut bad = good_proof;
-        bad.mac[0] ^= 0xFF;
-
-        // Spend every attempt, then one more: the cap turns the refusal into throttling
-        // rather than another judged failure.
-        let cap = fixture.manager.policy().max_attempts + 1;
-        for _ in 0..cap {
-            let _ = complete_pairing(
-                &fixture.manager,
-                session_id,
-                &bad,
-                &fixture.agent,
-                &fixture.database,
-                &fixture.clock,
-            )
-            .await;
-        }
-
-        assert!(
-            fixture
-                .audit_actions()
-                .await
-                .contains(&actions::PAIRING_THROTTLED.to_owned()),
-            "the attempt cap must be audited distinctly from a rejected proof"
-        );
+        assert_eq!(device, first.to_canonical_string());
+        assert_eq!(consumed_at, 42);
     }
 
     #[tokio::test]
@@ -675,6 +435,15 @@ mod tests {
         assert!(
             !rendered.contains("PRIVATE"),
             "no key material in the trail"
+        );
+        assert_eq!(
+            audit
+                .recent_in_category(AuditCategory::Pairing, 10)
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "identity events belong to the config category, not pairing"
         );
     }
 

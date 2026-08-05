@@ -322,57 +322,10 @@ impl Keystore {
 
     /// Write `contents` to the keystore path atomically and with restrictive modes.
     fn write_atomically(&self, contents: &[u8]) -> Result<()> {
-        use std::io::Write as _;
-
-        let temp_path = self.path.with_extension("keystore.tmp");
-
-        // Remove any leftover temp file from a previous crash before creating ours.
-        let _ = std::fs::remove_file(&temp_path);
-
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        // Set the mode at creation time: a separate chmod would leave a window in
-        // which the key exists on disk as world-readable.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(REQUIRED_FILE_MODE);
-        }
-
-        let mut file = options
-            .open(&temp_path)
-            .map_err(|source| SecurityError::Io {
-                operation: "create keystore temporary file",
-                source,
-            })?;
-
-        let result = (|| -> std::io::Result<()> {
-            file.write_all(contents)?;
-            file.flush()?;
-            // Durability before rename, so a power loss cannot leave an empty file
-            // under the real name.
-            file.sync_all()
-        })();
-
-        if let Err(source) = result {
-            drop(file);
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(SecurityError::Io {
-                operation: "write keystore",
-                source,
-            });
-        }
-        drop(file);
-
-        std::fs::rename(&temp_path, &self.path).map_err(|source| {
-            let _ = std::fs::remove_file(&temp_path);
-            SecurityError::Io {
-                operation: "replace keystore",
-                source,
-            }
-        })?;
-
-        Ok(())
+        write_protected_file(&self.path, contents).map_err(|source| SecurityError::Io {
+            operation: "write keystore",
+            source,
+        })
     }
 
     /// Verify that the keystore and its directory have safe permissions.
@@ -533,6 +486,62 @@ fn decode_base64(text: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(text)
         .map_err(|_| SecurityError::KeystoreCorrupt)
+}
+
+/// Write `contents` to `path` atomically, with restrictive permissions from the moment
+/// the file exists.
+///
+/// Used for the keystore and for anything else whose *readability* is the access
+/// control — a file that is briefly world-readable while being written is a file that
+/// was world-readable.
+///
+/// Three properties, in the order they matter:
+///
+/// 1. **Mode at creation, not afterwards.** A separate `chmod` leaves a window in which
+///    the content exists on disk under the previous mode.
+/// 2. **Durable before rename.** `sync_all` before the rename means a power loss cannot
+///    leave an empty file under the real name.
+/// 3. **Rename, not truncate-and-write.** A concurrent reader sees either the old
+///    content or the new one, never a half-written file.
+///
+/// # Errors
+/// Propagates the underlying I/O failure. A leftover temporary file is removed on every
+/// failure path.
+pub fn write_protected_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let temp_path = path.with_extension("tmp");
+
+    // Remove any leftover temporary file from a previous crash before creating ours;
+    // `create_new` below would otherwise fail against it forever.
+    let _ = std::fs::remove_file(&temp_path);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(REQUIRED_FILE_MODE);
+    }
+
+    let mut file = options.open(&temp_path)?;
+
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(contents)?;
+        file.flush()?;
+        file.sync_all()
+    })();
+
+    if let Err(source) = result {
+        drop(file);
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(source);
+    }
+    drop(file);
+
+    std::fs::rename(&temp_path, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })
 }
 
 #[cfg(test)]

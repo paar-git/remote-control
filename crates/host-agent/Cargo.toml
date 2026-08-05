@@ -17,6 +17,13 @@ rc-protocol = { workspace = true }
 rc-platform = { workspace = true }
 rc-security = { workspace = true }
 rc-storage = { workspace = true }
+rc-transport = { workspace = true }
+quinn = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+subtle = { workspace = true }
+hex = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
