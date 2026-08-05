@@ -20,6 +20,8 @@ import {
 } from './api.js';
 import { Button, type Toast, ToastBar } from './components';
 import DevicesScreen from './DevicesScreen';
+import MonitoringScreen from './MonitoringScreen';
+import TerminalScreen from './TerminalScreen';
 import { isTauriAvailable } from './ipc.js';
 
 interface NavItem {
@@ -33,11 +35,11 @@ const NAV_ITEMS: readonly NavItem[] = [
   { id: 'home', label: 'Home', availableInPhase: null },
   { id: 'devices', label: 'Devices', availableInPhase: null },
   { id: 'remote-desktop', label: 'Remote Desktop', availableInPhase: 6 },
-  { id: 'terminal', label: 'Terminal', availableInPhase: 4 },
+  { id: 'terminal', label: 'Terminal', availableInPhase: null },
   { id: 'files', label: 'Files', availableInPhase: 5 },
   { id: 'processes', label: 'Processes', availableInPhase: 7 },
   { id: 'services', label: 'Services', availableInPhase: 7 },
-  { id: 'monitoring', label: 'Monitoring', availableInPhase: 4 },
+  { id: 'monitoring', label: 'Monitoring', availableInPhase: null },
   { id: 'power', label: 'Power', availableInPhase: 7 },
   { id: 'activity', label: 'Activity', availableInPhase: 7 },
   { id: 'settings', label: 'Settings', availableInPhase: 9 },
@@ -198,7 +200,7 @@ export default function App(): React.JSX.Element {
       </nav>
 
       <main className="flex-1 overflow-auto p-6">
-        {section === 'devices' ? <DevicesScreen onToast={setToast} /> : <HomeScreen />}
+        <Section id={section} onToast={setToast} />
       </main>
 
       <ToastBar
@@ -344,6 +346,32 @@ function AuthPanel({
       </div>
     </form>
   );
+}
+
+/**
+ * The screen for the selected sidebar section.
+ *
+ * Sections that are not yet built are unreachable — the sidebar disables them and says
+ * which phase implements them — so this falls back to Home rather than rendering a
+ * placeholder that would look like a broken page.
+ */
+function Section({
+  id,
+  onToast,
+}: {
+  readonly id: string;
+  readonly onToast: (toast: Toast) => void;
+}): React.JSX.Element {
+  switch (id) {
+    case 'devices':
+      return <DevicesScreen onToast={onToast} />;
+    case 'monitoring':
+      return <MonitoringScreen />;
+    case 'terminal':
+      return <TerminalScreen onToast={onToast} />;
+    default:
+      return <HomeScreen />;
+  }
 }
 
 /** The home overview. */

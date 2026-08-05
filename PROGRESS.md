@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-05 · **Phase 3 of 9 complete.**
+Last updated: 2026-08-05 · **Phases 1–3 of 9 complete; phase 4 partly done.**
 
 This document is the honest record of what runs today. Anything not listed as done is
 not built — there are no mock implementations or placeholder handlers anywhere in the
@@ -14,7 +14,7 @@ All figures below were produced by running the commands, not estimated.
 |---|---|---|
 | Rust format | `cargo fmt --all -- --check` | clean |
 | Rust lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (pedantic enabled) |
-| Rust tests | `cargo test --workspace` | **506 passed**, 0 failed |
+| Rust tests | `cargo test --workspace` | **574 passed**, 0 failed |
 | TS typecheck | `pnpm -r typecheck` | clean (strict, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
 | TS lint | `pnpm lint` | clean |
 | TS format | `pnpm format:check` | clean |
@@ -23,8 +23,8 @@ All figures below were produced by running the commands, not estimated.
 | Full gate | `scripts/verify.ps1` | `All checks passed.` |
 
 Rust test distribution: security 185, transport 61 + 15 end-to-end, protocol 62,
-storage 49, host-agent 58 + 8 two-process integration, desktop-client backend 39,
-platform 23, coordination-server 6.
+host-agent 66 + 10 two-process integration, storage 49, desktop-client backend 45,
+terminal 26, monitoring 24, platform 23, coordination-server 6.
 TypeScript: shared-types 51, desktop-client 34.
 
 The 8 integration tests spawn the **real `rc-agent` binary** as a separate process and
@@ -308,28 +308,104 @@ cannot present a fingerprint peers pin while holding a different key.
 - The `#[cfg(unix)]` permission tests still did not execute, since this workspace was
   verified on Windows.
 
+## Phase 4 — Terminal and monitoring ⚠ partly complete
+
+Terminals and metrics work end to end. The privileged-operation split does not exist
+yet, so this phase is **not** finished; see the limitations below.
+
+### `rc-monitoring`
+
+- CPU (aggregate and per core), memory, swap, disks, network rates, temperatures and
+  processes, read from the operating system.
+- **Nothing unmeasurable is reported as zero.** No GPU backend is linked, so the GPU
+  list is empty rather than showing an idle adapter. Windows has no load average, so it
+  is `None` rather than three zeros. A rate over a zero-length interval does not exist,
+  so the first snapshot after start carries none.
+- One collector for the whole agent. CPU utilisation is measured *across an interval*,
+  so a collector per connection would multiply the sampling cost on the machine being
+  watched and none of them would agree with the others.
+- Sampling intervals are clamped. A client asking for 10 ms would cost a full process
+  enumeration a hundred times a second on the server it is supposed to be observing.
+
+### `rc-terminal`
+
+- Real pseudo-terminals: ConPTY on Windows, `openpty` on Unix. Not a simulated shell —
+  a child process reading a real terminal device, which is why colour, line editing and
+  interactive prompts work without this crate knowing they exist.
+- A blocking reader thread feeds a bounded channel, so a shell printing faster than the
+  network can carry it applies backpressure rather than growing a buffer.
+- A session kills its shell in `Drop`, so no path out — including a dropped connection,
+  which is the common case rather than an exotic one — leaves a shell running.
+- Shells are chosen by *kind*, never by path. A field accepting a path would be an
+  arbitrary-execution API wearing a terminal's clothes.
+
+### Agent and client
+
+- `SystemSnapshot` and `HostInfo` control requests, and the terminal channel served on
+  its own task per connection.
+- Every request is authorized against the **live** session, not once at connect, so a
+  device revoked mid-session stops being answered immediately.
+- The client renders terminals with xterm.js. A real emulator rather than escape-stripped
+  text, because a shell will not draw a prompt until something answers its `ESC[6n`
+  cursor query — stripped output would look like a terminal until asked to be one.
+- A Monitoring screen with live readings, sparklines on a fixed 0–100 scale, and sections
+  that are absent rather than zeroed when the server could not measure them.
+
+### Security decisions made in Phase 4
+
+1. **Unmeasurable is absent, never zero.** An operator cannot distinguish a cold machine
+   from a missing sensor if both read `0 °C`, and will eventually trust the wrong one.
+2. **Terminal traffic is never recorded** — not in the log, the audit trail, application
+   state or the database. The trail records that a terminal opened, which program it
+   launched, and when it closed.
+3. **Ctrl+C is a control character, not a signal.** Signalling the shell would kill the
+   shell; writing ETX to the terminal interrupts what the shell is running, which is what
+   the person pressing it meant.
+4. **Elevation is refused, not downgraded.** Opening an unprivileged shell and labelling
+   it elevated would be worse than saying no.
+
+### Known limitations after Phase 4
+
+- **The privileged-operation split is not built.** There is no separate privileged
+  service on Windows and no sudoers/polkit path on Linux, so elevated terminals are
+  refused with a specific error. This is the largest remaining piece of Phase 4.
+- **Metrics are polled by the screen showing them**, not pushed on a subscription. The
+  `SubscribeMetrics` request is accepted and clamped but no periodic push exists yet, so
+  a dashboard costs nothing while nobody is looking at it and updates only while someone
+  is.
+- **A terminal does not survive a reconnect.** Keeping a PTY alive with nobody watching
+  needs an explicit lifetime and a way for the operator to see and end orphaned sessions
+  before it is safe to offer.
+- **No GPU, battery or disk-health readings.** Each needs a platform-specific backend
+  that has not been written; all three are reported as absent.
+- Command history, terminal search, output export and the destructive-command
+  confirmation templates from the specification are not built.
+
 ## Remaining phases
 
 | Phase | Scope | Status |
 |---|---|---|
 | 3 | QUIC transport, mDNS discovery, connect/disconnect/reconnect lifecycle, connection-state UI | done |
-| 4 | Real PTY sessions, system metrics, dashboard, privilege separation | next |
+| 4 | Real PTY sessions, system metrics, dashboard, privilege separation | partly done |
 | 5 | File manager: browsing, resumable transfers, checksums, transfer queue | pending |
 | 6 | Screen capture, encoding, streaming, input forwarding, monitor and quality controls | pending |
 | 7 | Process and service management, power actions, confirmations, audit events | pending |
 | 8 | Coordination service signalling, NAT traversal, relay fallback, E2E verification | pending |
 | 9 | Installers, update architecture, full threat model, security review, documentation | pending |
 
-## Next: Phase 4 — Terminal and monitoring
+## Next: finish Phase 4, then Phase 5 — File manager
 
-1. Real PTY sessions: ConPTY on Windows, `openpty` on Linux, over the terminal channel.
-2. System metrics collection, and a dashboard fed by measured values only.
-3. The privileged-operation split: a separate privileged service on Windows reached over
-   authenticated local IPC, and the sudoers/polkit path on Linux.
-4. Capability checks on every terminal and metrics request, audited.
+Remaining in Phase 4:
 
-The security assumptions this phase must preserve are listed in
-[`docs/threat-model.md`](docs/threat-model.md). The two most easily broken by accident:
-a PTY must never be spawned without a capability check against the *live* session, and
-the privileged helper must validate every request against the allowlist itself rather
+1. The privileged-operation split: a separate privileged service on Windows reached over
+   authenticated local IPC, and a restricted sudoers/polkit path on Linux. Elevated
+   terminals depend on it, as does every later phase that changes host state.
+2. Pushed metrics on the metrics channel, for a dashboard that updates without polling.
+
+Then Phase 5: browsing, resumable transfers with checksums, a transfer queue, conflict
+handling, and path-traversal and symlink-escape protection.
+
+The security assumptions these must preserve are in
+[`docs/threat-model.md`](docs/threat-model.md). The one most easily broken by accident:
+the privileged helper must validate every request against the allowlist *itself* rather
 than trusting that its caller already did.

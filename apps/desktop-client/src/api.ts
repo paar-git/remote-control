@@ -341,3 +341,218 @@ export function getConnectionState(): Promise<ConnectionState> {
 export function pingServer(): Promise<number> {
   return call('ping_server', z.number().int().nonnegative());
 }
+
+/* -------------------------------------------------------------------------- */
+/* Monitoring                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** One mounted volume on the server. */
+export const diskSchema = z.object({
+  mountPoint: untrustedText(260),
+  filesystem: untrustedText(32),
+  totalBytes: z.number().nonnegative(),
+  availableBytes: z.number().nonnegative(),
+});
+
+/** One network interface on the server. */
+export const networkSchema = z.object({
+  interface: untrustedText(64),
+  receiveRateBps: z.number().nonnegative(),
+  transmitRateBps: z.number().nonnegative(),
+  receivedBytes: z.number().nonnegative(),
+  transmittedBytes: z.number().nonnegative(),
+});
+
+/** One temperature sensor. */
+export const temperatureSchema = z.object({
+  label: untrustedText(64),
+  celsius: z.number(),
+  criticalCelsius: z.number().nullable(),
+});
+
+/** One process on the server. */
+export const processSchema = z.object({
+  pid: z.number().int().nonnegative(),
+  name: untrustedText(128),
+  user: untrustedText(64).nullable(),
+  cpuPercent: z.number(),
+  memoryBytes: z.number().nonnegative(),
+});
+
+/**
+ * A live reading from the server.
+ *
+ * An empty `temperatures` means no sensor was readable, not that the machine is cold.
+ * There is deliberately no field for a GPU or a battery: the agent does not measure
+ * either, and a field would invite showing a figure it never produced.
+ */
+export const snapshotSchema = z.object({
+  capturedAtMs: z.number().int(),
+  uptimeSecs: z.number().nonnegative(),
+  cpuModel: untrustedText(128),
+  cpuPercent: z.number(),
+  cpuPerCore: z.array(z.number()),
+  logicalCores: z.number().int().nonnegative(),
+  memoryUsedBytes: z.number().nonnegative(),
+  memoryTotalBytes: z.number().nonnegative(),
+  swapUsedBytes: z.number().nonnegative(),
+  swapTotalBytes: z.number().nonnegative(),
+  disks: z.array(diskSchema),
+  networks: z.array(networkSchema),
+  temperatures: z.array(temperatureSchema),
+  topProcesses: z.array(processSchema),
+  loadAverage: z.tuple([z.number(), z.number(), z.number()]).nullable(),
+});
+
+export type Snapshot = z.infer<typeof snapshotSchema>;
+
+/** Facts about the server that do not change between readings. */
+export const serverFactsSchema = z.object({
+  hostname: untrustedText(253),
+  osFamily: z.enum(['windows', 'linux', 'macos', 'unknown']),
+  osVersion: untrustedText(128),
+  kernelVersion: untrustedText(128),
+  architecture: untrustedText(32),
+  logicalCores: z.number().int().nonnegative(),
+  agentVersion: untrustedText(32),
+  agentUser: untrustedText(64),
+  agentElevated: z.boolean(),
+  bootedAtMs: z.number().int(),
+});
+
+export type ServerFacts = z.infer<typeof serverFactsSchema>;
+
+/** Fetch a live reading from the connected server. */
+export function getSystemSnapshot(): Promise<Snapshot> {
+  return call('system_snapshot', snapshotSchema);
+}
+
+/** Fetch the server facts that do not change between readings. */
+export function getServerFacts(): Promise<ServerFacts> {
+  return call('server_facts', serverFactsSchema);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Terminal                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** A terminal that opened on the server. */
+export const openedTerminalSchema = z.object({
+  terminalId: z.string().min(1),
+  shellPath: untrustedText(512),
+  pid: z.number().int().nonnegative(),
+  elevated: z.boolean(),
+});
+
+export type OpenedTerminal = z.infer<typeof openedTerminalSchema>;
+
+/** Open a terminal on the connected server. */
+export function openTerminal(
+  shell: string,
+  cols: number,
+  rows: number,
+  workingDirectory: string | null = null,
+): Promise<OpenedTerminal> {
+  return call('open_terminal', openedTerminalSchema, {
+    input: { shell, cols, rows, workingDirectory },
+  });
+}
+
+/**
+ * Send keystrokes to a terminal.
+ *
+ * Encoded to UTF-8 and then base64 because the transport carries bytes, not strings.
+ * A terminal's input is not text in general — it includes control characters and the
+ * emulator's own replies to the shell's queries — and treating it as text would mangle
+ * anything that is not.
+ */
+export function sendTerminalInput(terminalId: string, data: string): Promise<null> {
+  return call('send_terminal_input', z.null(), {
+    terminalId,
+    dataBase64: bytesToBase64(new TextEncoder().encode(data)),
+  });
+}
+
+/** Tell the server the terminal window changed size. */
+export function resizeTerminal(terminalId: string, cols: number, rows: number): Promise<null> {
+  return call('resize_terminal', z.null(), { terminalId, cols, rows });
+}
+
+/** Close a terminal. */
+export function closeTerminal(terminalId: string): Promise<null> {
+  return call('close_terminal', z.null(), { terminalId });
+}
+
+/** One chunk of terminal output, already decoded. */
+export interface TerminalOutput {
+  readonly terminalId: string;
+  /** The bytes the shell wrote, as a binary string the emulator consumes. */
+  readonly data: string;
+}
+
+/** A terminal that ended. */
+export interface TerminalExit {
+  readonly terminalId: string;
+  readonly exitCode: number | null;
+  readonly error: string | null;
+}
+
+const terminalOutputEventSchema = z.object({
+  terminalId: z.string().min(1),
+  dataBase64: z.string(),
+});
+
+const terminalExitEventSchema = z.object({
+  terminalId: z.string().min(1),
+  exitCode: z.number().int().nullable(),
+  error: z.string().nullable(),
+});
+
+/**
+ * Subscribe to terminal output.
+ *
+ * Returns the unlisten function, as Tauri's event API does.
+ */
+export async function listenTerminalOutput(
+  handler: (output: TerminalOutput) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('terminal://output', (event) => {
+    const parsed = terminalOutputEventSchema.safeParse(event.payload);
+    if (!parsed.success) return;
+
+    handler({
+      terminalId: parsed.data.terminalId,
+      // A binary string, one character per byte. A UTF-8 decode here would corrupt a
+      // multi-byte character split across two chunks; the emulator reassembles them.
+      data: base64ToBinaryString(parsed.data.dataBase64),
+    });
+  });
+}
+
+/** Subscribe to terminal exits and failures. */
+export async function listenTerminalExit(
+  handler: (exit: TerminalExit) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('terminal://exit', (event) => {
+    const parsed = terminalExitEventSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}
+
+/** Encode bytes as base64. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+/** Decode base64 into a binary string, one character per byte. */
+function base64ToBinaryString(encoded: string): string {
+  return atob(encoded);
+}
