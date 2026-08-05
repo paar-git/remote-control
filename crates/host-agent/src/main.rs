@@ -23,6 +23,7 @@ mod local_api;
 mod logging;
 mod server;
 mod sessions;
+mod terminal_service;
 
 use std::path::PathBuf;
 

@@ -246,11 +246,21 @@ async fn pair(
 }
 
 /// Open an authenticated session against the agent.
+/// The control streams are returned alongside the connection because dropping them
+/// ends the session: the agent treats the control channel closing as the session
+/// ending, which is correct — it is the channel the session is defined by — and a test
+/// that let them fall out of scope would tear down the very connection it was about to
+/// use.
 async fn connect(
     agent: &RunningAgent,
     identity: &DeviceIdentity,
     paired: &rc_security::pairing::PairedAgent,
-) -> rc_transport::Result<(quinn::Connection, rc_protocol::control::HelloAck)> {
+) -> rc_transport::Result<(
+    quinn::Connection,
+    rc_protocol::control::HelloAck,
+    rc_transport::ChannelWriter,
+    rc_transport::ChannelReader,
+)> {
     let (connector, _) =
         ClientConnector::new(identity, PinPolicy::Pinned(paired.certificate_fingerprint))?;
     let connection = connector.connect(agent.address()).await?;
@@ -269,7 +279,7 @@ async fn connect(
 
     // The connector owns the socket the connection runs on.
     std::mem::forget(connector);
-    Ok((connection, ack))
+    Ok((connection, ack, writer, reader))
 }
 
 #[tokio::test]
@@ -291,7 +301,7 @@ async fn a_client_pairs_connects_disconnects_and_reconnects() {
     let paired = pair(&agent, &identity).await;
 
     // Connect.
-    let (first, ack) = connect(&agent, &identity, &paired)
+    let (first, ack, first_writer, first_reader) = connect(&agent, &identity, &paired)
         .await
         .expect("a paired client must be admitted");
     assert!(ack.already_paired);
@@ -305,12 +315,14 @@ async fn a_client_pairs_connects_disconnects_and_reconnects() {
     );
 
     // Disconnect.
+    drop(first_writer);
+    drop(first_reader);
     first.close(0u32.into(), b"done");
     drop(first);
 
     // Reconnect, with no code and no further operator action. This is the property the
     // saved server exists for.
-    let (second, second_ack) = connect(&agent, &identity, &paired)
+    let (second, second_ack, _second_writer, _second_reader) = connect(&agent, &identity, &paired)
         .await
         .expect("reconnecting must not need the code again");
     assert!(second_ack.already_paired);
@@ -498,7 +510,7 @@ async fn an_agent_keeps_its_identity_across_a_restart() {
     let restarted = restart_at(&root, &config_path, quic_port, local_port).await;
 
     // The same pin still works, with no re-pairing.
-    let (connection, ack) = connect(&restarted, &identity, &paired)
+    let (connection, ack, _writer, _reader) = connect(&restarted, &identity, &paired)
         .await
         .expect("trust must survive an agent restart");
     assert_eq!(ack.descriptor.device_id, paired.device_id);
@@ -534,4 +546,179 @@ async fn restart_at(
     };
     agent.wait_until_healthy().await;
     agent
+}
+
+#[tokio::test]
+async fn a_session_gets_real_measured_metrics() {
+    // The dashboard's figures come from the operating system, not from a placeholder.
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    let (connector, _) =
+        ClientConnector::new(&identity, PinPolicy::Pinned(paired.certificate_fingerprint)).unwrap();
+    let connection = connector.connect(agent.address()).await.unwrap();
+
+    let (mut writer, mut reader) =
+        rc_transport::open_channel(&connection, rc_protocol::Channel::Control)
+            .await
+            .unwrap();
+
+    let ack = rc_transport::handshake::begin_handshake(
+        &mut reader,
+        &mut writer,
+        descriptor(&identity),
+        rc_protocol::control::Capabilities::default(),
+        rc_protocol::now_ms(),
+    )
+    .await
+    .unwrap();
+
+    let request_id = rc_protocol::RequestId::generate();
+    writer
+        .send(&rc_protocol::control::ControlRequest {
+            request_id,
+            session_id: ack.session_id,
+            sent_at_ms: rc_protocol::now_ms(),
+            nonce: [2u8; 16],
+            payload: ControlRequestPayload::SystemSnapshot,
+        })
+        .await
+        .unwrap();
+
+    let response: rc_protocol::control::ControlResponse =
+        reader.next_message().await.unwrap().unwrap();
+
+    match response.result {
+        ControlResult::Ok(rc_protocol::control::ControlResponsePayload::Snapshot(snapshot)) => {
+            assert!(snapshot.cpu.logical_cores >= 1, "a real host has cores");
+            assert!(snapshot.memory.total_bytes > 0, "a real host has memory");
+            assert!(
+                !snapshot.cpu.model.is_empty(),
+                "the processor model must be reported"
+            );
+            assert!(
+                !snapshot.top_processes.is_empty(),
+                "a running host has processes"
+            );
+            assert_eq!(
+                snapshot.cpu.per_core_percent.len(),
+                snapshot.cpu.logical_cores,
+                "one reading per core"
+            );
+        }
+        other => panic!("expected a snapshot, got {other:?}"),
+    }
+
+    std::mem::forget(connector);
+    connection.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn a_session_can_open_a_real_terminal_and_run_a_command() {
+    // End to end across two processes: a PTY on the agent, driven from a client, with
+    // the command's output coming back over QUIC.
+    use rc_protocol::terminal::{
+        PrivilegeLevel, ShellKind, TerminalAgentMessage, TerminalClientMessage, TerminalSize,
+    };
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    // The control streams are held for the life of the test; dropping them would end
+    // the session and take the terminal channel with it.
+    let (connection, _ack, _control_writer, _control_reader) =
+        connect(&agent, &identity, &paired).await.unwrap();
+
+    let (mut writer, mut reader) =
+        rc_transport::open_channel(&connection, rc_protocol::Channel::Terminal)
+            .await
+            .unwrap();
+
+    let terminal_id = rc_protocol::TerminalId::generate();
+    writer
+        .send(&TerminalClientMessage::Open {
+            terminal_id,
+            shell: ShellKind::SystemDefault,
+            privilege: PrivilegeLevel::Standard,
+            size: TerminalSize { cols: 80, rows: 24 },
+            working_directory: None,
+        })
+        .await
+        .unwrap();
+
+    let probe = "rc-integration-probe";
+    let mut opened = false;
+    let mut typed = false;
+    let mut collected = Vec::new();
+
+    let saw_output = tokio::time::timeout(Duration::from_secs(40), async {
+        while let Ok(Some(message)) = reader.next_message::<TerminalAgentMessage>().await {
+            match message {
+                TerminalAgentMessage::Opened { pid, .. } => {
+                    assert!(pid > 0, "a real shell has a process id");
+                    opened = true;
+                }
+                TerminalAgentMessage::Output { data, .. } => {
+                    // A shell asks the terminal where its cursor is before drawing a
+                    // prompt; a client that never answers leaves it waiting forever.
+                    if data.windows(4).any(|w| w == b"\x1b[6n") {
+                        writer
+                            .send(&TerminalClientMessage::Input {
+                                terminal_id,
+                                data: b"\x1b[1;1R".to_vec(),
+                            })
+                            .await
+                            .unwrap();
+                    }
+
+                    collected.extend_from_slice(&data);
+                    let text = String::from_utf8_lossy(&collected);
+
+                    if opened && !typed && collected.len() > 8 {
+                        typed = true;
+                        let command: &[u8] = if cfg!(windows) {
+                            b"echo rc-integration-probe\r\n"
+                        } else {
+                            b"echo rc-integration-probe\n"
+                        };
+                        writer
+                            .send(&TerminalClientMessage::Input {
+                                terminal_id,
+                                data: command.to_vec(),
+                            })
+                            .await
+                            .unwrap();
+                        continue;
+                    }
+
+                    // Twice: once echoed as it is typed, once as the command's output.
+                    if text.matches(probe).count() >= 2 {
+                        return true;
+                    }
+                }
+                TerminalAgentMessage::Error { message, .. } => {
+                    panic!("the agent refused the terminal: {message}");
+                }
+                TerminalAgentMessage::Exited { .. } => return false,
+                _ => {}
+            }
+        }
+        false
+    })
+    .await;
+
+    assert_eq!(
+        saw_output,
+        Ok(true),
+        "a command typed into the remote shell must run and return its output"
+    );
+
+    writer
+        .send(&TerminalClientMessage::Close { terminal_id })
+        .await
+        .unwrap();
+
+    connection.close(0u32.into(), b"done");
 }

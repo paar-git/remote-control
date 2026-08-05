@@ -15,6 +15,7 @@
 mod commands;
 mod connect_commands;
 mod connection;
+mod session_commands;
 
 use std::sync::{Arc, Mutex};
 
@@ -335,6 +336,12 @@ pub fn run() {
             connect_commands::reconnect_to_server,
             connect_commands::connection_state,
             connect_commands::ping_server,
+            session_commands::system_snapshot,
+            session_commands::server_facts,
+            session_commands::open_terminal,
+            session_commands::send_terminal_input,
+            session_commands::resize_terminal,
+            session_commands::close_terminal,
         ])
         .run(tauri::generate_context!());
 

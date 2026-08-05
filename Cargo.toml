@@ -5,6 +5,8 @@ members = [
     "crates/security",
     "crates/transport",
     "crates/storage",
+    "crates/monitoring",
+    "crates/terminal",
     "crates/platform",
     "crates/host-agent",
     "apps/coordination-server",

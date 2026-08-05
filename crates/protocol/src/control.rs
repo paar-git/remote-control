@@ -250,6 +250,8 @@ pub enum ControlRequestPayload {
     },
     /// Ask the agent for a full dashboard snapshot.
     SystemSnapshot,
+    /// Ask the agent for facts that do not change between snapshots.
+    HostInfo,
     /// Subscribe to periodic metrics on the metrics channel.
     SubscribeMetrics {
         /// Requested update interval. Clamped by the agent to a sane floor.
@@ -262,7 +264,7 @@ pub enum ControlRequestPayload {
 }
 
 /// Control-channel response envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlResponse {
     /// The request this answers.
     pub request_id: RequestId,
@@ -271,7 +273,10 @@ pub struct ControlResponse {
 }
 
 /// Success or failure of a control request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`, because a successful payload may carry a snapshot of floating-point
+/// utilisation figures and equality on those is not a meaningful operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlResult {
     /// The request succeeded.
@@ -287,7 +292,10 @@ pub enum ControlResult {
 }
 
 /// Successful control-channel payloads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: a snapshot carries floating-point utilisation figures, and equality on
+/// those is not a meaningful operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ControlResponsePayload {
@@ -305,6 +313,43 @@ pub enum ControlResponsePayload {
         /// Effective interval in milliseconds.
         interval_ms: u32,
     },
+    /// A full dashboard snapshot.
+    ///
+    /// Boxed because it is far larger than every other variant, and an un-boxed variant
+    /// sets the size of the whole enum — including the `Pong` sent several times a
+    /// minute.
+    Snapshot(Box<crate::system::SystemSnapshot>),
+    /// Static facts about the host that do not change between snapshots.
+    HostInfo(Box<HostSummary>),
+}
+
+/// Facts about a host that change rarely enough to fetch once per session.
+///
+/// Kept out of [`ControlResponsePayload::Snapshot`] deliberately: sending the CPU model
+/// and kernel version several times a minute would be repetition, and a dashboard that
+/// re-renders them on every tick makes them look like live readings when they are not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSummary {
+    /// Machine hostname. Untrusted text.
+    pub hostname: String,
+    /// OS family.
+    pub os_family: OsFamily,
+    /// Human-readable OS name and version. Untrusted text.
+    pub os_version: String,
+    /// Kernel version. Untrusted text.
+    pub kernel_version: String,
+    /// CPU architecture.
+    pub architecture: String,
+    /// Number of logical processors.
+    pub logical_cores: u32,
+    /// Agent version.
+    pub agent_version: String,
+    /// The account the agent runs as. Untrusted text.
+    pub agent_user: String,
+    /// Whether the agent process holds Administrator or root.
+    pub agent_elevated: bool,
+    /// When the host last booted, milliseconds since the Unix epoch.
+    pub booted_at_ms: i64,
 }
 
 /// Machine-readable error codes shared by every channel.

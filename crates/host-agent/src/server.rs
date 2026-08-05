@@ -40,6 +40,7 @@ use rc_protocol::control::{
 };
 use rc_protocol::pairing::PairingMessage;
 use rc_security::pairing::{PairingManager, PairingOutcome};
+use rc_security::permissions::{AuthorizationContext, Capability};
 use rc_security::{Clock, DeviceIdentity, Fingerprint, SystemClock};
 use rc_storage::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
 use rc_storage::models::PeerRoleRow;
@@ -69,6 +70,12 @@ pub struct AgentServer {
     clock: Arc<dyn Clock>,
     /// Facts about this host, gathered once.
     host: rc_platform::HostInfo,
+    /// Collects system metrics.
+    ///
+    /// One collector for the whole agent, not one per connection: CPU utilisation is
+    /// measured across an interval, so several collectors would each pay for their own
+    /// process enumeration and none would agree with the others.
+    metrics: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
     /// Set once the QUIC listener is bound, cleared when it stops.
     ///
     /// Read by the health endpoint, which must be able to distinguish "the process is
@@ -95,6 +102,9 @@ impl AgentServer {
             sessions: Arc::new(SessionRegistry::new(max_sessions)),
             clock: Arc::new(SystemClock),
             host: rc_platform::HostInfo::detect(),
+            metrics: Arc::new(tokio::sync::Mutex::new(
+                rc_monitoring::MetricsCollector::new(),
+            )),
             listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -405,37 +415,23 @@ impl AgentServer {
             self.clock.now_ms(),
         );
 
-        // Recorded after admission, so a refused peer cannot move this timestamp.
-        if let Err(err) = TrustRepository::new(&self.database)
-            .record_authentication(device_id, self.clock.now_ms())
-            .await
-        {
-            tracing::warn!(%err, %device_id, "could not record the authentication time");
-        }
+        self.record_session_start(&peer, remote).await;
 
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::SESSION_STARTED,
-                AuditResult::Success,
-            )
-            .actor_device(device_id)
-            .meta("session_id", session_id)
-            .meta("role", peer.role.name())
-            .meta("source", redact_address(remote))
-            .meta("protocol", peer.negotiated_version),
-        )
-        .await;
+        // The authorization this connection was admitted with, re-checked on every
+        // request rather than assumed for the life of the session.
+        let authorization = AuthorizationContext::new(peer.role);
 
-        tracing::info!(
-            %device_id,
-            %session_id,
-            role = peer.role.name(),
-            %remote,
-            "session started"
-        );
+        // Terminals live on their own channel. Serving it in a task lets a shell
+        // produce output while the control channel is idle, and dropping the task's
+        // registry when the connection ends is what stops shells outliving it.
+        let terminals =
+            self.spawn_channel_server(connection, authorization.clone(), device_id, session_id);
 
-        let reason = self.run_session(connection, reader, writer, &slot).await;
+        let reason = self
+            .run_session(connection, reader, writer, &slot, &authorization)
+            .await;
+
+        terminals.abort();
 
         self.audit(
             AuditEvent::new(
@@ -463,6 +459,7 @@ impl AgentServer {
         reader: &mut ChannelReader,
         writer: &mut ChannelWriter,
         slot: &SessionSlot,
+        authorization: &AuthorizationContext,
     ) -> DisconnectReason {
         let idle_timeout = self.config.session.idle_timeout_secs;
 
@@ -492,7 +489,7 @@ impl AgentServer {
 
             let response = ControlResponse {
                 request_id: request.request_id,
-                result: self.answer(&request.payload),
+                result: self.answer(&request.payload, authorization).await,
             };
 
             if let Err(err) = writer.send(&response).await {
@@ -507,7 +504,11 @@ impl AgentServer {
     /// Requests whose implementation arrives in a later phase return a typed
     /// `Unsupported` rather than a plausible-looking empty answer, so a client is never
     /// shown a figure the agent did not measure.
-    fn answer(&self, payload: &ControlRequestPayload) -> ControlResult {
+    async fn answer(
+        &self,
+        payload: &ControlRequestPayload,
+        authorization: &AuthorizationContext,
+    ) -> ControlResult {
         match payload {
             ControlRequestPayload::Ping { token } => {
                 ControlResult::Ok(ControlResponsePayload::Pong {
@@ -515,21 +516,186 @@ impl AgentServer {
                     agent_time_ms: self.clock.now_ms(),
                 })
             }
-            ControlRequestPayload::SystemSnapshot
-            | ControlRequestPayload::SubscribeMetrics { .. }
-            | ControlRequestPayload::UnsubscribeMetrics => ControlResult::Err {
-                code: rc_protocol::control::ErrorCode::Unsupported,
-                message: "this agent build does not yet collect system metrics".to_owned(),
-            },
+
+            ControlRequestPayload::SystemSnapshot => {
+                // Checked against this connection's authorization on every request, not
+                // once at connect: a device revoked mid-session must stop being answered.
+                if authorization
+                    .require(Capability::RemoteDesktopView)
+                    .is_err()
+                {
+                    return denied("view this server's status");
+                }
+
+                // The collector is shared across connections, so one lock is held while
+                // a sample is taken. Sampling is milliseconds; duplicating the collector
+                // per connection would multiply the load on the machine being watched,
+                // which is the one cost a monitoring feature must not impose.
+                let snapshot = self.metrics.lock().await.snapshot(self.clock.now_ms());
+                ControlResult::Ok(ControlResponsePayload::Snapshot(Box::new(snapshot)))
+            }
+
+            ControlRequestPayload::HostInfo => {
+                if authorization
+                    .require(Capability::RemoteDesktopView)
+                    .is_err()
+                {
+                    return denied("view this server's status");
+                }
+                ControlResult::Ok(ControlResponsePayload::HostInfo(Box::new(
+                    self.host_summary(),
+                )))
+            }
+
+            ControlRequestPayload::SubscribeMetrics { interval_ms } => {
+                if authorization
+                    .require(Capability::RemoteDesktopView)
+                    .is_err()
+                {
+                    return denied("view this server's status");
+                }
+                // Clamped rather than honoured: a client asking for 10 ms would cost a
+                // full process enumeration a hundred times a second on the machine it is
+                // supposed to be observing.
+                ControlResult::Ok(ControlResponsePayload::MetricsSubscribed {
+                    interval_ms: rc_monitoring::MetricsCollector::clamp_interval(*interval_ms),
+                })
+            }
+
+            ControlRequestPayload::UnsubscribeMetrics => {
+                ControlResult::Ok(ControlResponsePayload::Empty)
+            }
+
             // Handled by the caller; reaching here would be a routing bug.
             ControlRequestPayload::Disconnect(_) => ControlResult::Err {
                 code: rc_protocol::control::ErrorCode::Internal,
                 message: "the request was routed incorrectly".to_owned(),
             },
+
+            // `ControlRequestPayload` is `#[non_exhaustive]`: a request from a newer
+            // client is refused rather than approximated.
             _ => ControlResult::Err {
                 code: rc_protocol::control::ErrorCode::Unsupported,
                 message: "this agent does not support that request".to_owned(),
             },
+        }
+    }
+
+    /// Record that a session began, in the database and in the audit trail.
+    ///
+    /// Called only after the peer has been admitted, so a refused connection can never
+    /// move the "last authenticated" timestamp an operator reads to decide whether a
+    /// device is still in use.
+    async fn record_session_start(
+        &self,
+        peer: &rc_transport::AuthenticatedPeer,
+        remote: SocketAddr,
+    ) {
+        if let Err(err) = TrustRepository::new(&self.database)
+            .record_authentication(peer.device_id, self.clock.now_ms())
+            .await
+        {
+            let device_id = peer.device_id;
+            tracing::warn!(%err, %device_id, "could not record the authentication time");
+        }
+
+        self.audit(
+            AuditEvent::new(
+                AuditCategory::Connection,
+                actions::SESSION_STARTED,
+                AuditResult::Success,
+            )
+            .actor_device(peer.device_id)
+            .meta("session_id", peer.session_id)
+            .meta("role", peer.role.name())
+            .meta("source", redact_address(remote))
+            .meta("protocol", peer.negotiated_version),
+        )
+        .await;
+
+        tracing::info!(
+            device_id = %peer.device_id,
+            session_id = %peer.session_id,
+            role = peer.role.name(),
+            %remote,
+            "session started"
+        );
+    }
+
+    /// Serve the channels a client opens after authenticating.
+    ///
+    /// The control channel is already established; this accepts the *additional*
+    /// streams — today the terminal channel — and serves each on its own task.
+    ///
+    /// Aborting the returned handle when the session ends is what guarantees no shell
+    /// outlives the connection that started it: the terminal registry lives inside this
+    /// task, so cancelling it drops the registry, and dropping the registry kills every
+    /// PTY it holds.
+    fn spawn_channel_server(
+        self: &Arc<Self>,
+        connection: &quinn::Connection,
+        authorization: AuthorizationContext,
+        device_id: rc_protocol::DeviceId,
+        session_id: rc_protocol::SessionId,
+    ) -> tokio::task::JoinHandle<()> {
+        let server = Arc::clone(self);
+        let connection = connection.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (writer, mut reader) = match rc_transport::accept_channel(&connection).await {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        // The ordinary end: the connection closed.
+                        tracing::debug!(%err, "stopped accepting channels");
+                        break;
+                    }
+                };
+
+                match reader.channel() {
+                    rc_protocol::Channel::Terminal => {
+                        let service = crate::terminal_service::TerminalService::new(
+                            writer,
+                            authorization.clone(),
+                            server.database.clone(),
+                            device_id,
+                            session_id,
+                            Arc::clone(&server.clock),
+                            server.config.features.terminal,
+                        );
+                        tokio::spawn(async move {
+                            service.run(&mut reader).await;
+                        });
+                    }
+                    other => {
+                        // A channel this build does not serve is closed rather than left
+                        // open: a client waiting on a stream nobody reads would appear
+                        // to hang, which is worse than a clear end.
+                        tracing::debug!(
+                            channel = ?other,
+                            "a client opened a channel this agent does not serve yet"
+                        );
+                    }
+                }
+            }
+        })
+    }
+
+    /// Facts about this host that do not change between snapshots.
+    fn host_summary(&self) -> rc_protocol::control::HostSummary {
+        let host = &self.host;
+
+        rc_protocol::control::HostSummary {
+            hostname: host.hostname.clone(),
+            os_family: host.os_family,
+            os_version: host.os_version.clone(),
+            kernel_version: host.kernel_version.clone(),
+            architecture: host.architecture.clone(),
+            logical_cores: u32::try_from(host.logical_cores).unwrap_or(u32::MAX),
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            agent_user: current_user(),
+            agent_elevated: rc_platform::is_elevated(),
+            booted_at_ms: boot_time_ms(self.clock.now_ms()),
         }
     }
 
@@ -704,6 +870,38 @@ const fn reason_name(reason: DisconnectReason) -> &'static str {
     }
 }
 
+/// Refuse a request the connection's authorization does not cover.
+///
+/// The message names the operation in the operator's terms rather than the capability's
+/// internal name, because the person reading it is being told what they may not do, not
+/// which enum variant governs it.
+fn denied(operation: &str) -> ControlResult {
+    ControlResult::Err {
+        code: rc_protocol::control::ErrorCode::PermissionDenied,
+        message: format!("This device is not permitted to {operation}."),
+    }
+}
+
+/// The account the agent runs as.
+///
+/// Reported so an operator can see whether the agent is running as a service account or
+/// as themselves, which decides what it can reach. `"unknown"` rather than a guess when
+/// the platform does not say.
+fn current_user() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+/// When the host booted, derived from its uptime.
+///
+/// Computed from `now` rather than read from a separate clock so it agrees with every
+/// other timestamp the agent produces.
+fn boot_time_ms(now_ms: i64) -> i64 {
+    let uptime_ms = i64::try_from(sysinfo::System::uptime().saturating_mul(1000)).unwrap_or(0);
+    now_ms.saturating_sub(uptime_ms)
+}
+
 /// Render a peer address for an audit record.
 ///
 /// The port is dropped. It is an ephemeral value that identifies nothing useful after
@@ -768,10 +966,17 @@ mod tests {
         assert!(capabilities.file_transfer);
     }
 
+    /// An owner's authorization, which is what an ordinary session carries.
+    fn owner() -> AuthorizationContext {
+        AuthorizationContext::new(rc_security::Role::Owner)
+    }
+
     #[tokio::test]
     async fn a_ping_is_answered_with_the_token_it_carried() {
         let server = server().await;
-        let result = server.answer(&ControlRequestPayload::Ping { token: 42 });
+        let result = server
+            .answer(&ControlRequestPayload::Ping { token: 42 }, &owner())
+            .await;
 
         match result {
             ControlResult::Ok(ControlResponsePayload::Pong { token, .. }) => {
@@ -782,21 +987,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unimplemented_request_is_refused_rather_than_answered_with_zeroes() {
-        // Returning an empty snapshot would put figures on the operator's dashboard
-        // that the agent never measured.
+    async fn a_snapshot_carries_values_the_agent_actually_measured() {
         let server = server().await;
-        let result = server.answer(&ControlRequestPayload::SystemSnapshot);
+        let result = server
+            .answer(&ControlRequestPayload::SystemSnapshot, &owner())
+            .await;
 
+        match result {
+            ControlResult::Ok(ControlResponsePayload::Snapshot(snapshot)) => {
+                assert!(snapshot.cpu.logical_cores >= 1);
+                assert!(snapshot.memory.total_bytes > 0);
+                assert!(
+                    !snapshot.top_processes.is_empty(),
+                    "a running host has processes"
+                );
+            }
+            other => panic!("expected a snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn host_facts_are_reported_separately_from_live_readings() {
+        // Sending the CPU model and kernel version on every tick would make them look
+        // like live readings when they are not.
+        let server = server().await;
+        let result = server
+            .answer(&ControlRequestPayload::HostInfo, &owner())
+            .await;
+
+        match result {
+            ControlResult::Ok(ControlResponsePayload::HostInfo(host)) => {
+                assert!(!host.hostname.is_empty());
+                assert!(!host.architecture.is_empty());
+                assert!(host.logical_cores >= 1);
+                assert_eq!(host.agent_version, env!("CARGO_PKG_VERSION"));
+            }
+            other => panic!("expected host facts, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_view_only_device_may_still_read_the_dashboard() {
+        // Watching a server is what View Only is for; refusing it would leave the role
+        // with nothing it could do.
+        let server = server().await;
+        let view_only = AuthorizationContext::new(rc_security::Role::ViewOnly);
+
+        let result = server
+            .answer(&ControlRequestPayload::SystemSnapshot, &view_only)
+            .await;
+        assert!(matches!(
+            result,
+            ControlResult::Ok(ControlResponsePayload::Snapshot(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_revoked_device_is_refused_even_mid_session() {
+        // The check is against the live authorization on every request, so revocation
+        // does not wait for the connection to end.
+        let server = server().await;
+        let revoked = AuthorizationContext::revoked(rc_security::Role::Owner);
+
+        let result = server
+            .answer(&ControlRequestPayload::SystemSnapshot, &revoked)
+            .await;
         assert!(
             matches!(
                 result,
                 ControlResult::Err {
-                    code: rc_protocol::control::ErrorCode::Unsupported,
+                    code: rc_protocol::control::ErrorCode::PermissionDenied,
                     ..
                 }
             ),
             "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_metrics_interval_is_clamped_rather_than_honoured_as_asked() {
+        // A client asking for 10 ms would cost a full process enumeration a hundred
+        // times a second on the machine it is supposed to be observing.
+        let server = server().await;
+        let result = server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 1 },
+                &owner(),
+            )
+            .await;
+
+        match result {
+            ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms }) => {
+                assert_eq!(interval_ms, rc_monitoring::MIN_SAMPLE_INTERVAL_MS);
+            }
+            other => panic!("expected a subscription, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_this_build_does_not_implement_is_refused_not_faked() {
+        // Returning an empty answer would put figures on the operator's dashboard that
+        // the agent never measured.
+        let server = server().await;
+        let result = server
+            .answer(
+                &ControlRequestPayload::Disconnect(rc_protocol::control::Disconnect {
+                    reason: DisconnectReason::UserRequested,
+                    detail: None,
+                }),
+                &owner(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, ControlResult::Err { .. }),
+            "a misrouted request must not be answered as though it succeeded"
         );
     }
 

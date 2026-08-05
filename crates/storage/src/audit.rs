@@ -134,6 +134,12 @@ pub mod actions {
     pub const CONNECTION_LIMIT_REACHED: &str = "connection.limit_reached";
     /// A client reconnected to an agent it had previously been connected to.
     pub const RECONNECTED: &str = "connection.reconnected";
+    /// A terminal session was opened.
+    pub const TERMINAL_OPENED: &str = "terminal.opened";
+    /// A terminal session was closed.
+    pub const TERMINAL_CLOSED: &str = "terminal.closed";
+    /// A client subscribed to periodic system metrics.
+    pub const METRICS_SUBSCRIBED: &str = "monitoring.subscribed";
 }
 
 /// Metadata keys that must never appear in an audit record.

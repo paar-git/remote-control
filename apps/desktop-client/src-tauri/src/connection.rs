@@ -48,7 +48,8 @@ use rc_protocol::control::{
     Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResult,
     DeviceDescriptor, Disconnect, DisconnectReason,
 };
-use rc_protocol::{DeviceId, RequestId, SessionId};
+use rc_protocol::terminal::{TerminalAgentMessage, TerminalClientMessage};
+use rc_protocol::{DeviceId, RequestId, SessionId, TerminalId};
 use rc_security::{DeviceIdentity, Fingerprint};
 use rc_transport::{ChannelReader, ChannelWriter, ClientConnector, PinPolicy, TransportError};
 use serde::Serialize;
@@ -59,6 +60,60 @@ pub const CONNECT_TIMEOUT_SECS: u64 = 8;
 
 /// How long to wait for local discovery when no saved address works.
 pub const DISCOVERY_TIMEOUT_SECS: u64 = 3;
+
+/// How long to wait for a server to answer a request to open a terminal.
+///
+/// Generous, because the server resolves a shell and spawns a process. Bounded, because
+/// a server that never answers must not leave the UI waiting forever.
+pub const TERMINAL_OPEN_TIMEOUT_SECS: u64 = 20;
+
+/// Where terminal output and lifecycle messages are delivered.
+///
+/// A callback rather than a channel so the caller decides how to deliver them — the
+/// desktop client emits Tauri events; a test collects into a vector.
+pub type TerminalSink = Arc<dyn Fn(TerminalAgentMessage) + Send + Sync>;
+
+/// The terminal channel, shared by every terminal on one connection.
+struct TerminalChannel {
+    writer: Mutex<ChannelWriter>,
+    /// Open requests waiting for the agent's answer, keyed by the id they named.
+    pending_opens: Mutex<
+        std::collections::HashMap<TerminalId, tokio::sync::oneshot::Sender<TerminalAgentMessage>>,
+    >,
+}
+
+/// Forward agent terminal messages to `sink` until the channel closes.
+///
+/// An `Opened` or `Error` that answers a pending open is routed to whoever is waiting
+/// for it; everything else — output, exits — goes to the sink.
+fn spawn_terminal_reader(
+    channel: Arc<TerminalChannel>,
+    mut reader: ChannelReader,
+    sink: TerminalSink,
+) {
+    tokio::spawn(async move {
+        while let Ok(Some(message)) = reader.next_message::<TerminalAgentMessage>().await {
+            let answering = match &message {
+                TerminalAgentMessage::Opened { terminal_id, .. }
+                | TerminalAgentMessage::Error { terminal_id, .. } => Some(*terminal_id),
+                _ => None,
+            };
+
+            if let Some(terminal_id) = answering
+                && let Some(waiting) = channel.pending_opens.lock().await.remove(&terminal_id)
+            {
+                // The open request is waiting for exactly this. A send failure means the
+                // caller gave up, which the timeout already reported.
+                let _ = waiting.send(message);
+                continue;
+            }
+
+            sink(message);
+        }
+
+        tracing::debug!("the terminal channel closed");
+    });
+}
 
 /// Where a connection is in its lifecycle.
 ///
@@ -293,6 +348,8 @@ pub struct ConnectionManager {
     capabilities: Capabilities,
     state: std::sync::Mutex<ConnectionState>,
     active: Mutex<Option<ActiveConnection>>,
+    /// The terminal channel, opened lazily on the first terminal.
+    terminal: Mutex<Option<Arc<TerminalChannel>>>,
     /// Set by [`ConnectionManager::disconnect`] and cleared by an explicit connect.
     ///
     /// The single flag that separates "the link dropped" from "the operator ended it".
@@ -314,6 +371,7 @@ impl ConnectionManager {
             capabilities,
             state: std::sync::Mutex::new(ConnectionState::Offline),
             active: Mutex::new(None),
+            terminal: Mutex::new(None),
             intentional_disconnect: std::sync::atomic::AtomicBool::new(false),
             backoff: BackoffPolicy::default(),
         }
@@ -454,6 +512,9 @@ impl ConnectionManager {
         // endpoint underneath the connection that was just established.
         std::mem::forget(connector);
 
+        // Any terminal channel belonged to a previous connection.
+        *self.terminal.lock().await = None;
+
         *self.active.lock().await = Some(ActiveConnection {
             connection,
             writer,
@@ -542,6 +603,93 @@ impl ConnectionManager {
         }
     }
 
+    /// Open a terminal on the connected server and start forwarding its output.
+    ///
+    /// The terminal channel is opened once per connection and shared by every terminal;
+    /// a stream per tab would multiply QUIC streams for no benefit, since the messages
+    /// already name their session.
+    ///
+    /// Returns the agent's answer to the open request — an `Opened` or an `Error` — so
+    /// the caller can report precisely what happened.
+    ///
+    /// # Errors
+    /// [`TransportError::Closed`] when nothing is connected, or the underlying transport
+    /// failure.
+    pub async fn open_terminal(
+        &self,
+        terminal_id: TerminalId,
+        request: TerminalClientMessage,
+        sink: TerminalSink,
+    ) -> Result<TerminalAgentMessage, TransportError> {
+        let channel = self.ensure_terminal_channel(sink).await?;
+
+        // Registered before the request is sent: the agent may answer faster than this
+        // side can prepare to listen, and a reply arriving first would be dropped.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        channel.pending_opens.lock().await.insert(terminal_id, tx);
+
+        if let Err(err) = channel.writer.lock().await.send(&request).await {
+            channel.pending_opens.lock().await.remove(&terminal_id);
+            return Err(err);
+        }
+
+        // Bounded: a server that never answers must not leave the UI waiting forever.
+        let deadline = std::time::Duration::from_secs(TERMINAL_OPEN_TIMEOUT_SECS);
+        // A dropped sender and an elapsed deadline mean the same thing to the caller:
+        // no answer arrived.
+        let Ok(Ok(message)) = tokio::time::timeout(deadline, rx).await else {
+            channel.pending_opens.lock().await.remove(&terminal_id);
+            return Err(TransportError::HandshakeTimeout);
+        };
+        Ok(message)
+    }
+
+    /// Send a message on an already-open terminal channel.
+    ///
+    /// # Errors
+    /// [`TransportError::Closed`] if no terminal channel is open.
+    pub async fn send_terminal(
+        &self,
+        message: &TerminalClientMessage,
+    ) -> Result<(), TransportError> {
+        let channel = self.terminal.lock().await;
+        let channel = channel.as_ref().ok_or(TransportError::Closed {
+            reason: "no terminal is open".to_owned(),
+        })?;
+
+        channel.writer.lock().await.send(message).await
+    }
+
+    /// Open the terminal channel if it is not already open.
+    async fn ensure_terminal_channel(
+        &self,
+        sink: TerminalSink,
+    ) -> Result<Arc<TerminalChannel>, TransportError> {
+        let mut slot = self.terminal.lock().await;
+
+        if let Some(existing) = slot.as_ref() {
+            return Ok(Arc::clone(existing));
+        }
+
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let (writer, reader) =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Terminal).await?;
+        drop(guard);
+
+        let channel = Arc::new(TerminalChannel {
+            writer: Mutex::new(writer),
+            pending_opens: Mutex::new(std::collections::HashMap::new()),
+        });
+
+        spawn_terminal_reader(Arc::clone(&channel), reader, sink);
+        *slot = Some(Arc::clone(&channel));
+        Ok(channel)
+    }
+
     /// Disconnect deliberately.
     ///
     /// Sets the flag that suppresses automatic reconnection. That is the entire point:
@@ -550,6 +698,10 @@ impl ConnectionManager {
         self.intentional_disconnect
             .store(true, std::sync::atomic::Ordering::Release);
         self.set_state(ConnectionState::Disconnecting);
+
+        // The terminal channel belongs to the connection being closed; a later
+        // connection opens a fresh one rather than writing into a dead stream.
+        *self.terminal.lock().await = None;
 
         if let Some(mut active) = self.active.lock().await.take() {
             // Best-effort: tell the agent why, so its audit trail records an intentional
