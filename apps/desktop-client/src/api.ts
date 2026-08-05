@@ -170,9 +170,174 @@ export function getRecentAuditEvents(limit = 50): Promise<AuditEntry[]> {
 /**
  * Check that a typed pairing code *could* be a code.
  *
- * This validates format only. It proves nothing about correctness — completing a
- * pairing requires the network transport, which arrives in phase 3.
+ * Format only. It gives immediate feedback while the operator types; it proves
+ * nothing about whether the code is correct, which only the server can decide.
  */
 export function checkPairingCodeFormat(code: string): Promise<boolean> {
   return call('check_pairing_code_format', z.boolean(), { code });
+}
+
+/**
+ * A server seen on the local network.
+ *
+ * Every field here is **untrusted**: anyone on the LAN can broadcast an announcement
+ * claiming any device id and name. It is shown so the operator can pick a machine to
+ * pair with; the connection that follows authenticates regardless. `claimedFingerprint`
+ * is named for what it is, and is never treated as the pinned value.
+ */
+export const discoveredAgentSchema = z.object({
+  deviceId: z.string().min(1),
+  displayName: untrustedText(64),
+  address: z.string().min(1),
+  claimedFingerprint: z.string().nullable(),
+  alreadySaved: z.boolean(),
+});
+
+export type DiscoveredAgent = z.infer<typeof discoveredAgentSchema>;
+
+/** Search the local network for servers. An empty list is a normal outcome. */
+export function discoverAgents(): Promise<DiscoveredAgent[]> {
+  return call('discover_agents', z.array(discoveredAgentSchema));
+}
+
+/** What a completed pairing produced. */
+export const pairedServerSchema = z.object({
+  deviceId: z.string().min(1),
+  displayName: untrustedText(128),
+  /** Grouped for reading aloud against what the server printed. */
+  identityFingerprint: z.string().min(1),
+  role: roleSchema,
+});
+
+export type PairedServer = z.infer<typeof pairedServerSchema>;
+
+/**
+ * Pair with a server and save it.
+ *
+ * The code is sent to the backend and is never returned, logged or stored. It is used
+ * once to derive a proof and then dropped.
+ */
+export function pairWithServer(
+  address: string,
+  code: string,
+  displayName: string,
+): Promise<PairedServer> {
+  return call('pair_with_server', pairedServerSchema, {
+    input: { address, code, displayName },
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Connection                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** Why a server refused this device, as far as the client can tell. */
+export const refusalReasonSchema = z.enum([
+  'identity_changed',
+  'not_authorized',
+  'protocol_mismatch',
+  'throttled',
+]);
+
+export type RefusalReason = z.infer<typeof refusalReasonSchema>;
+
+/**
+ * Where the connection is in its lifecycle.
+ *
+ * A discriminated union on `state`, so the UI switches on one field rather than
+ * inferring the situation from a combination of booleans.
+ */
+export const connectionStateSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('offline') }),
+  z.object({ state: z.literal('discovering') }),
+  z.object({ state: z.literal('connecting'), address: z.string() }),
+  z.object({ state: z.literal('authenticating') }),
+  z.object({
+    state: z.literal('connected'),
+    sessionId: z.string(),
+    address: z.string(),
+  }),
+  z.object({ state: z.literal('disconnecting') }),
+  z.object({ state: z.literal('reconnecting'), attempt: z.number().int() }),
+  z.object({
+    state: z.literal('waiting_to_retry'),
+    attempt: z.number().int(),
+    retryInMs: z.number().int(),
+  }),
+  z.object({
+    state: z.literal('refused'),
+    reason: refusalReasonSchema,
+    message: z.string(),
+  }),
+  z.object({ state: z.literal('failed'), message: z.string() }),
+]);
+
+export type ConnectionState = z.infer<typeof connectionStateSchema>;
+
+/** Human labels for each connection state. */
+export function describeConnectionState(state: ConnectionState): string {
+  switch (state.state) {
+    case 'offline':
+      return 'Not connected';
+    case 'discovering':
+      return 'Searching the local network…';
+    case 'connecting':
+      return `Connecting to ${state.address}…`;
+    case 'authenticating':
+      return 'Verifying the server’s identity…';
+    case 'connected':
+      return `Connected — ${state.address}`;
+    case 'disconnecting':
+      return 'Disconnecting…';
+    case 'reconnecting':
+      return `Reconnecting (attempt ${String(state.attempt)})…`;
+    case 'waiting_to_retry':
+      return `Retrying in ${String(Math.round(state.retryInMs / 100) / 10)}s…`;
+    case 'refused':
+      return state.message;
+    case 'failed':
+      return state.message;
+  }
+}
+
+/** Whether a state means a live, usable session. */
+export function isConnected(state: ConnectionState): boolean {
+  return state.state === 'connected';
+}
+
+/** Whether a state means something is in progress. */
+export function isBusy(state: ConnectionState): boolean {
+  return (
+    state.state === 'discovering' ||
+    state.state === 'connecting' ||
+    state.state === 'authenticating' ||
+    state.state === 'disconnecting' ||
+    state.state === 'reconnecting' ||
+    state.state === 'waiting_to_retry'
+  );
+}
+
+/** Connect to a saved server. */
+export function connectToServer(deviceId: string): Promise<ConnectionState> {
+  return call('connect_to_server', connectionStateSchema, { deviceId });
+}
+
+/** Disconnect deliberately. Suppresses automatic reconnection. */
+export function disconnectFromServer(): Promise<ConnectionState> {
+  return call('disconnect_from_server', connectionStateSchema);
+}
+
+/** Reconnect to a saved server, applying the backoff. */
+export function reconnectToServer(deviceId: string): Promise<ConnectionState> {
+  return call('reconnect_to_server', connectionStateSchema, { deviceId });
+}
+
+/** The current connection state. */
+export function getConnectionState(): Promise<ConnectionState> {
+  return call('connection_state', connectionStateSchema);
+}
+
+/** Measure the round trip to the connected server, in milliseconds. */
+export function pingServer(): Promise<number> {
+  return call('ping_server', z.number().int().nonnegative());
 }

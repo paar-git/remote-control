@@ -58,6 +58,21 @@ pub struct TrustedDevice {
     pub revoked_at_ms: Option<i64>,
     /// Short transcript digest of the pairing that created this trust.
     pub pairing_transcript_digest: Option<String>,
+    /// The address the last successful connection used.
+    ///
+    /// Tried first on the next connect: on a home network it is nearly always still
+    /// right, which avoids a discovery round trip. It is only ever a *hint* — the
+    /// connection still pins the certificate — so a stale value costs one failed dial.
+    pub last_known_address: Option<std::net::SocketAddr>,
+    /// An operator-configured endpoint, used when neither the saved address nor
+    /// discovery finds the device.
+    pub remote_endpoint: Option<String>,
+    /// When a connection last succeeded.
+    pub last_connected_at_ms: Option<i64>,
+    /// MAC address for Wake-on-LAN, if one was recorded.
+    pub wake_on_lan_mac: Option<String>,
+    /// Whether the operator pinned this device to the top of the list.
+    pub favorite: bool,
 }
 
 impl TrustedDevice {
@@ -243,6 +258,80 @@ impl TrustRepository {
         .await?;
 
         row.map(TryInto::try_into).transpose()
+    }
+
+    /// Record the address a connection succeeded on.
+    ///
+    /// Stored so the next connect can try it before searching. It is written only after
+    /// a connection has *authenticated*, so an address that merely accepted a TCP
+    /// handshake never displaces a good one.
+    ///
+    /// # Errors
+    /// [`StorageError::NotFound`] if the device is unknown.
+    pub async fn record_successful_address(
+        &self,
+        device_id: DeviceId,
+        address: std::net::SocketAddr,
+    ) -> Result<()> {
+        let affected = sqlx::query(
+            "UPDATE trusted_device
+                SET last_known_address = ?, last_known_port = ?
+              WHERE device_id = ? AND revoked = 0",
+        )
+        .bind(address.ip().to_string())
+        .bind(i64::from(address.port()))
+        .bind(device_id.to_canonical_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if affected == 0 {
+            Err(StorageError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Set or clear the operator-configured endpoint.
+    ///
+    /// # Errors
+    /// [`StorageError::Invalid`] for an unusable value, [`StorageError::NotFound`] if
+    /// the device is unknown.
+    pub async fn set_remote_endpoint(
+        &self,
+        device_id: DeviceId,
+        endpoint: Option<&str>,
+    ) -> Result<()> {
+        // Bounded and free of control characters: the value is echoed back into the UI
+        // and into log lines.
+        if let Some(value) = endpoint {
+            if value.len() > 255 {
+                return Err(StorageError::Invalid {
+                    field: "remote_endpoint",
+                    reason: "is too long",
+                });
+            }
+            if value.chars().any(char::is_control) {
+                return Err(StorageError::Invalid {
+                    field: "remote_endpoint",
+                    reason: "must not contain control characters",
+                });
+            }
+        }
+
+        let affected =
+            sqlx::query("UPDATE trusted_device SET remote_endpoint = ? WHERE device_id = ?")
+                .bind(endpoint)
+                .bind(device_id.to_canonical_string())
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+
+        if affected == 0 {
+            Err(StorageError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     /// Decide whether a presenting peer may proceed, and with what authority.
@@ -441,6 +530,12 @@ struct TrustedDeviceRaw {
     revoked: i64,
     revoked_at_ms: Option<i64>,
     pairing_transcript_digest: Option<String>,
+    last_known_address: Option<String>,
+    last_known_port: Option<i64>,
+    remote_endpoint: Option<String>,
+    last_connected_at_ms: Option<i64>,
+    wake_on_lan_mac: Option<String>,
+    favorite: i64,
 }
 
 impl TryFrom<TrustedDeviceRaw> for TrustedDevice {
@@ -516,6 +611,32 @@ impl TryFrom<TrustedDeviceRaw> for TrustedDevice {
             revoked: raw.revoked != 0,
             revoked_at_ms: raw.revoked_at_ms,
             pairing_transcript_digest: raw.pairing_transcript_digest,
+            // A stored address that no longer parses is dropped rather than rejected:
+            // it is a hint, and losing it costs one discovery round trip, whereas
+            // refusing to load the row would make the server unreachable entirely.
+            last_known_address: parse_stored_address(
+                raw.last_known_address.as_deref(),
+                raw.last_known_port,
+            ),
+            remote_endpoint: raw.remote_endpoint,
+            last_connected_at_ms: raw.last_connected_at_ms,
+            wake_on_lan_mac: raw.wake_on_lan_mac,
+            favorite: raw.favorite != 0,
         })
     }
+}
+
+/// Rebuild a socket address from its stored parts.
+///
+/// Returns `None` unless both parts are present and valid. A half-written pair is not
+/// guessed at: dialling a remembered host on a default port would silently contact
+/// something other than what was recorded.
+fn parse_stored_address(host: Option<&str>, port: Option<i64>) -> Option<std::net::SocketAddr> {
+    let host = host?;
+    let port = u16::try_from(port?).ok()?;
+    if port == 0 {
+        return None;
+    }
+    let ip = host.parse::<std::net::IpAddr>().ok()?;
+    Some(std::net::SocketAddr::new(ip, port))
 }

@@ -35,15 +35,117 @@ pub struct CommandError {
 }
 
 impl CommandError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
         }
     }
 
+    /// The local database is unavailable.
+    pub(crate) fn no_database() -> Self {
+        Self::new("no_database", "The local database is unavailable.")
+    }
+
+    /// This installation has no device identity, so it cannot pair or connect.
+    pub(crate) fn no_identity() -> Self {
+        Self::new(
+            "no_identity",
+            "This device has no identity yet. Restart the application to create one.",
+        )
+    }
+
+    /// Local discovery could not run.
+    ///
+    /// Distinguished from "found nothing" on purpose: an empty network is a normal
+    /// outcome the operator should not be alarmed by, whereas a responder that will not
+    /// start is something to investigate.
+    pub(crate) fn discovery_failed() -> Self {
+        Self::new(
+            "discovery_failed",
+            "Could not search the local network. You can still connect by typing the \
+             server's address.",
+        )
+    }
+
+    /// Nothing answered at the given address.
+    pub(crate) fn unreachable(address: std::net::SocketAddr) -> Self {
+        Self::new(
+            "unreachable",
+            format!(
+                "Nothing answered at {address}. Check the address, that the agent is \
+                 running, and that the firewall allows it."
+            ),
+        )
+    }
+
+    /// Turn a transport failure into something the operator can act on.
+    ///
+    /// Each arm names the next step, because "something went wrong" is not an answer
+    /// anyone can do anything with.
+    pub(crate) fn from_transport(err: &rc_transport::TransportError) -> Self {
+        use rc_transport::TransportError as T;
+
+        match err {
+            T::FingerprintMismatch => Self::new(
+                "identity_changed",
+                "This server presented a different identity than the one you paired \
+                 with. It has been refused. If you reinstalled the server, remove the \
+                 saved entry and pair again; otherwise investigate before retrying.",
+            ),
+            T::NotTrusted | T::Revoked => Self::new(
+                "not_authorized",
+                "The server did not accept this device. Pair with it again from the \
+                 server console.",
+            ),
+            T::IncompatibleVersion => Self::new(
+                "protocol_mismatch",
+                "This client and that server speak different protocol versions. Update \
+                 both to the same release.",
+            ),
+            T::Throttled { retry_after_secs } => Self::new(
+                "throttled",
+                format!(
+                    "The server is rate-limiting this device. Try again in {retry_after_secs} seconds."
+                ),
+            ),
+            T::Connect { .. } | T::ConnectionLost { .. } | T::HandshakeTimeout => Self::new(
+                "unreachable",
+                "Could not reach the server. Check that it is on and on the same network.",
+            ),
+            other => {
+                tracing::warn!(%other, "transport failure");
+                Self::new(
+                    "connection_failed",
+                    "The connection failed. Check the application log for details.",
+                )
+            }
+        }
+    }
+
+    /// Turn a pairing failure into an operator-facing message.
+    pub(crate) fn pairing_failed(err: &rc_transport::TransportError) -> Self {
+        use rc_transport::TransportError as T;
+
+        match err {
+            T::PairingClosed => Self::new(
+                "not_pairing",
+                "That server is not in pairing mode. Run `rc-agent pair` on the server \
+                 and try again while the code is displayed.",
+            ),
+            // A wrong code and a tampered exchange are reported identically by the
+            // agent, on purpose: telling them apart would make it an oracle.
+            T::Security(_) | T::Closed { .. } => Self::new(
+                "pairing_rejected",
+                "The server did not accept that pairing code. Check the code and that \
+                 it has not expired, then try again.",
+            ),
+            other => Self::from_transport(other),
+        }
+    }
+
     /// An unexpected internal failure. Detail goes to the log, not the webview.
-    fn internal(context: &str, err: &dyn std::fmt::Display) -> Self {
+    pub(crate) fn internal(context: &str, err: &dyn std::fmt::Display) -> Self {
         tracing::error!(%err, context, "command failed");
         Self::new(
             "internal",

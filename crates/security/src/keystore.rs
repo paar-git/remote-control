@@ -117,6 +117,24 @@ struct KeystoreEnvelope {
     identity_public_key: String,
     /// Base64 payload: a DPAPI blob, or raw PKCS#8 under file-permission protection.
     payload: String,
+    /// Base64 DER of the device's certificate.
+    ///
+    /// Stored rather than reissued on load. Peers pin the certificate fingerprint, and
+    /// a certificate reissued from the same key is a *different* certificate with a
+    /// different fingerprint — so regenerating it on every start would make every
+    /// paired peer refuse this device after an ordinary reboot, reporting the loudest
+    /// failure the system has.
+    ///
+    /// Absent in a format-version-1 keystore written before this was understood; such
+    /// a keystore is upgraded in place on first load.
+    #[serde(default)]
+    certificate_der: String,
+    /// When the stored certificate becomes valid.
+    #[serde(default)]
+    certificate_not_before_ms: i64,
+    /// When the stored certificate expires.
+    #[serde(default)]
+    certificate_not_after_ms: i64,
     integrity: String,
 }
 
@@ -140,6 +158,9 @@ impl KeystoreEnvelope {
         push(self.subject_name.as_bytes());
         push(self.identity_public_key.as_bytes());
         push(self.payload.as_bytes());
+        push(self.certificate_der.as_bytes());
+        push(&self.certificate_not_before_ms.to_be_bytes());
+        push(&self.certificate_not_after_ms.to_be_bytes());
         buf
     }
 
@@ -204,7 +225,16 @@ impl Keystore {
     /// would change the device identity and break every existing pairing.
     pub fn load_or_create(&self, subject_name: &str, clock: &dyn Clock) -> Result<DeviceIdentity> {
         if self.exists() {
-            self.load(clock)
+            let identity = self.load(clock)?;
+
+            // A keystore written before certificates were persisted has just had one
+            // issued. Writing it back now is what makes the *next* start stable; without
+            // this the upgrade would happen again on every boot, and the certificate
+            // fingerprint would keep changing.
+            if !self.has_stored_certificate() {
+                self.store(&identity, subject_name, clock)?;
+            }
+            Ok(identity)
         } else {
             let identity = DeviceIdentity::generate(subject_name, clock)?;
             self.store(&identity, subject_name, clock)?;
@@ -215,6 +245,17 @@ impl Keystore {
             );
             Ok(identity)
         }
+    }
+
+    /// Whether the keystore on disk already carries a certificate.
+    ///
+    /// Used to decide whether a load needs writing back. A file that cannot be read or
+    /// parsed answers `false`, which at worst causes one redundant write.
+    fn has_stored_certificate(&self) -> bool {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<KeystoreEnvelope>(&text).ok())
+            .is_some_and(|envelope| !envelope.certificate_der.is_empty())
     }
 
     /// Load the identity from disk.
@@ -245,13 +286,31 @@ impl Keystore {
         let protected = decode_base64(&envelope.payload)?;
         let pkcs8 = unprotect(envelope.protection, &protected)?;
 
-        let identity = DeviceIdentity::from_pkcs8(
-            &pkcs8,
-            &envelope.subject_name,
-            envelope.device_created_at_ms,
-            envelope.certificate_version,
-            clock,
-        )?;
+        let identity = if envelope.certificate_der.is_empty() {
+            // A keystore written before certificates were persisted. Reissuing here is
+            // a one-time event on upgrade, not something that happens on every start;
+            // the caller writes the result back, so the next load is stable.
+            tracing::info!(
+                "keystore has no stored certificate; issuing one and upgrading the file"
+            );
+            DeviceIdentity::from_pkcs8(
+                &pkcs8,
+                &envelope.subject_name,
+                envelope.device_created_at_ms,
+                envelope.certificate_version,
+                clock,
+            )?
+        } else {
+            DeviceIdentity::from_stored(
+                &pkcs8,
+                decode_base64(&envelope.certificate_der)?,
+                &envelope.subject_name,
+                envelope.device_created_at_ms,
+                envelope.certificate_version,
+                envelope.certificate_not_before_ms,
+                envelope.certificate_not_after_ms,
+            )?
+        };
 
         // The plaintext public key recorded in the envelope must match the key we just
         // decrypted. A mismatch means the file was assembled from two different
@@ -303,6 +362,9 @@ impl Keystore {
             subject_name: subject_name.to_string(),
             identity_public_key: hex::encode(identity.public().identity_public_key),
             payload: encode_base64(&payload),
+            certificate_der: encode_base64(&identity.public().certificate_der),
+            certificate_not_before_ms: identity.public().certificate_not_before_ms,
+            certificate_not_after_ms: identity.public().certificate_not_after_ms,
             integrity: String::new(),
         };
         envelope.integrity = envelope.compute_integrity();
@@ -856,6 +918,105 @@ mod tests {
     }
 
     #[test]
+    fn a_reloaded_identity_presents_the_very_same_certificate() {
+        // The bug this pins: reissuing the certificate on load gives it new validity
+        // dates and therefore a new fingerprint, so every paired peer would refuse this
+        // device after an ordinary restart — reporting an identity change, the loudest
+        // failure the system has.
+        let dir = secure_dir();
+        let keystore = Keystore::in_data_dir(dir.path());
+        let clock = TestClock::default();
+
+        let first = keystore.load_or_create("test-device", &clock).unwrap();
+        let second = keystore.load_or_create("test-device", &clock).unwrap();
+
+        assert_eq!(
+            first.public().certificate_fingerprint,
+            second.public().certificate_fingerprint,
+            "the certificate fingerprint must survive a restart"
+        );
+        assert_eq!(
+            first.public().certificate_der,
+            second.public().certificate_der,
+            "the certificate bytes must be the stored ones, not reissued ones"
+        );
+        assert_eq!(first.device_id(), second.device_id());
+        assert_eq!(
+            first.public().certificate_not_after_ms,
+            second.public().certificate_not_after_ms,
+            "the validity window must not move on load"
+        );
+    }
+
+    #[test]
+    fn a_keystore_without_a_stored_certificate_is_upgraded_once() {
+        // Keystores written before certificates were persisted must keep working, and
+        // must become stable rather than reissuing on every start.
+        let dir = secure_dir();
+        let keystore = Keystore::in_data_dir(dir.path());
+        let clock = TestClock::default();
+
+        let original = keystore.load_or_create("test-device", &clock).unwrap();
+
+        // Strip the stored certificate, as a version-1 file would be.
+        let text = std::fs::read_to_string(keystore.path()).unwrap();
+        let mut envelope: KeystoreEnvelope = serde_json::from_str(&text).unwrap();
+        envelope.certificate_der = String::new();
+        envelope.certificate_not_before_ms = 0;
+        envelope.certificate_not_after_ms = 0;
+        envelope.integrity = envelope.compute_integrity();
+        std::fs::write(
+            keystore.path(),
+            serde_json::to_string_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let upgraded = keystore.load_or_create("test-device", &clock).unwrap();
+        let after = keystore.load_or_create("test-device", &clock).unwrap();
+
+        // The identity is preserved through the upgrade...
+        assert_eq!(original.device_id(), upgraded.device_id());
+        assert_eq!(
+            original.public().identity_fingerprint,
+            upgraded.public().identity_fingerprint
+        );
+
+        // ...and from then on the certificate is stable.
+        assert_eq!(
+            upgraded.public().certificate_fingerprint,
+            after.public().certificate_fingerprint,
+            "the upgrade must happen once, not on every start"
+        );
+    }
+
+    #[test]
+    fn a_keystore_whose_certificate_belongs_to_another_key_is_refused() {
+        // A file assembled from two identities could otherwise present a certificate
+        // peers pin while holding a different private key.
+        let dir = secure_dir();
+        let keystore = Keystore::in_data_dir(dir.path());
+        let clock = TestClock::default();
+
+        keystore.load_or_create("test-device", &clock).unwrap();
+        let stranger = DeviceIdentity::generate("stranger", &clock).unwrap();
+
+        let text = std::fs::read_to_string(keystore.path()).unwrap();
+        let mut envelope: KeystoreEnvelope = serde_json::from_str(&text).unwrap();
+        envelope.certificate_der = encode_base64(&stranger.public().certificate_der);
+        envelope.integrity = envelope.compute_integrity();
+        std::fs::write(
+            keystore.path(),
+            serde_json::to_string_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            keystore.load(&clock).is_err(),
+            "a certificate that does not match the stored key must be refused"
+        );
+    }
+
+    #[test]
     fn integrity_input_is_unambiguous_across_field_boundaries() {
         // Length-prefixing means moving a character between adjacent fields changes
         // the hash; simple concatenation would not.
@@ -868,6 +1029,9 @@ mod tests {
             subject_name: "ab".into(),
             identity_public_key: "c".into(),
             payload: String::new(),
+            certificate_der: String::new(),
+            certificate_not_before_ms: 0,
+            certificate_not_after_ms: 0,
             integrity: String::new(),
         };
         let shifted = KeystoreEnvelope {

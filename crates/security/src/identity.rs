@@ -182,6 +182,65 @@ impl DeviceIdentity {
         )
     }
 
+    /// Rebuild an identity from a stored key **and its stored certificate**.
+    ///
+    /// # Why the certificate has to be stored rather than reissued
+    ///
+    /// Peers pin the certificate fingerprint at the TLS layer. Reissuing the
+    /// certificate from the same key on every load produces a *different* certificate
+    /// — different validity dates, different serial, different DER — and therefore a
+    /// different fingerprint. Every paired peer would then refuse the agent after its
+    /// next restart, reporting an identity change, which is the loudest failure the
+    /// system has and would fire on an ordinary reboot.
+    ///
+    /// So the certificate is persisted alongside the key and reused verbatim. Reissuing
+    /// is a deliberate act ([`DeviceIdentity::renew_certificate`]), not a side effect of
+    /// starting up.
+    ///
+    /// # Errors
+    /// [`SecurityError::MalformedIdentity`] if the key cannot be parsed, or if the
+    /// stored certificate does not carry the public key belonging to that private key —
+    /// which would mean the two halves came from different identities.
+    pub fn from_stored(
+        pkcs8_der: &[u8],
+        certificate_der: Vec<u8>,
+        subject_name: &str,
+        created_at_ms: i64,
+        certificate_version: u32,
+        not_before_ms: i64,
+        not_after_ms: i64,
+    ) -> Result<Self> {
+        validate_subject_name(subject_name)?;
+
+        let signing_key =
+            SigningKey::from_pkcs8_der(pkcs8_der).map_err(|_| SecurityError::MalformedIdentity)?;
+        let identity_public_key = signing_key.verifying_key().to_bytes();
+
+        // The stored certificate must contain the public key of the stored private key.
+        // Without this check, a keystore assembled from two sources could present a
+        // certificate whose fingerprint peers pin while holding a different key.
+        if !certificate_embeds_public_key(&certificate_der, &identity_public_key) {
+            tracing::error!("the stored certificate does not match the stored private key");
+            return Err(SecurityError::MalformedIdentity);
+        }
+
+        Ok(Self {
+            public: DeviceIdentityPublic {
+                device_id: derive_device_id(&identity_public_key),
+                identity_fingerprint: Fingerprint::of_public_key(&identity_public_key),
+                certificate_fingerprint: Fingerprint::of_certificate_der(&certificate_der),
+                identity_public_key,
+                certificate_pem: pem_of(&certificate_der),
+                certificate_der,
+                certificate_not_before_ms: not_before_ms,
+                certificate_not_after_ms: not_after_ms,
+                certificate_version,
+            },
+            signing_key,
+            created_at_ms,
+        })
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     fn from_key_pair(
         // Taken by value even though only borrowed: `rcgen::KeyPair` holds private key
@@ -383,6 +442,49 @@ fn validate_subject_name(name: &str) -> Result<()> {
 /// Convert milliseconds since the Unix epoch into the type `rcgen` expects.
 fn offset_from_ms(ms: i64) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()
+}
+
+/// Whether `certificate_der` carries `public_key` as its subject public key.
+///
+/// An Ed25519 `SubjectPublicKeyInfo` has one canonical DER encoding: the fixed
+/// twelve-byte header below, then the 32-byte key. Searching for that exact sequence
+/// is therefore an equality test on a structure with no encoding freedom, not a
+/// heuristic — a certificate for a different key cannot contain it, and one for this
+/// key must.
+///
+/// This is used instead of a full X.509 parse because the only question being asked is
+/// "is this the key I hold", and pulling in a parser to answer it would add an
+/// attack surface larger than the check.
+fn certificate_embeds_public_key(certificate_der: &[u8], public_key: &[u8; 32]) -> bool {
+    /// `SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING (256 bit) }`
+    const ED25519_SPKI_HEADER: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+
+    let mut expected = Vec::with_capacity(ED25519_SPKI_HEADER.len() + public_key.len());
+    expected.extend_from_slice(&ED25519_SPKI_HEADER);
+    expected.extend_from_slice(public_key);
+
+    certificate_der
+        .windows(expected.len())
+        .any(|window| window == expected.as_slice())
+}
+
+/// PEM-encode a DER certificate.
+fn pem_of(certificate_der: &[u8]) -> String {
+    use base64::Engine as _;
+
+    let body = base64::engine::general_purpose::STANDARD.encode(certificate_der);
+
+    let mut pem = String::with_capacity(body.len() + 80);
+    pem.push_str("-----BEGIN CERTIFICATE-----\n");
+    // 64 characters per line, as PEM requires.
+    for chunk in body.as_bytes().chunks(64) {
+        pem.push_str(&String::from_utf8_lossy(chunk));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
 #[cfg(test)]

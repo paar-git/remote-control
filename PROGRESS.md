@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-07-31 · **Phase 2 of 9 complete.**
+Last updated: 2026-08-05 · **Phase 3 of 9 complete.**
 
 This document is the honest record of what runs today. Anything not listed as done is
 not built — there are no mock implementations or placeholder handlers anywhere in the
@@ -14,17 +14,22 @@ All figures below were produced by running the commands, not estimated.
 |---|---|---|
 | Rust format | `cargo fmt --all -- --check` | clean |
 | Rust lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (pedantic enabled) |
-| Rust tests | `cargo test --workspace` | **343 passed**, 0 failed |
+| Rust tests | `cargo test --workspace` | **506 passed**, 0 failed |
 | TS typecheck | `pnpm -r typecheck` | clean (strict, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
 | TS lint | `pnpm lint` | clean |
 | TS format | `pnpm format:check` | clean |
-| TS tests | `pnpm -r test:run` | **75 passed**, 0 failed |
+| TS tests | `pnpm -r test:run` | **85 passed**, 0 failed |
 | Frontend build | `pnpm --filter @rc/desktop-client build` | succeeds |
 | Full gate | `scripts/verify.ps1` | `All checks passed.` |
 
-Rust test distribution: security 173, protocol 54, storage 49, host-agent 31,
-platform 23, desktop-client backend 7, coordination-server 6.
-TypeScript: shared-types 51, desktop-client 24.
+Rust test distribution: security 185, transport 61 + 15 end-to-end, protocol 62,
+storage 49, host-agent 58 + 8 two-process integration, desktop-client backend 39,
+platform 23, coordination-server 6.
+TypeScript: shared-types 51, desktop-client 34.
+
+The 8 integration tests spawn the **real `rc-agent` binary** as a separate process and
+drive a real client against it over QUIC. They are what makes the claims below about
+pairing, connecting and restarting statements of fact rather than of intent.
 
 ## Phase 1 — Foundation ✅
 
@@ -198,36 +203,133 @@ path goes through the maintained `windows-dpapi` wrapper rather than raw FFI.
 - No integration tests yet — they need two processes that can talk, so they arrive with
   Phase 3.
 
+## Phase 3 — Networking ✅
+
+The agent listens, a client pairs with it over the network, and the two connect,
+disconnect and reconnect. Verified by spawning the real agent binary.
+
+### `rc-transport`
+
+- **QUIC + mutually-authenticated TLS 1.3**, ALPN `rc/1`, self-signed device
+  certificates pinned by fingerprint. Hostname verification is deliberately absent -
+  peers are identified by key, not by name. Certificate chains are refused under every
+  policy, because a chain implies a CA there is none of.
+- **`peer_certificate_fingerprint`** reads the peer's certificate from the *connection*.
+  The endpoint-wide `ObservedPeer` is shared by every concurrent handshake, so
+  authorizing against it could match one client against another client's certificate.
+  Pinned by a concurrency test that runs two clients at once.
+- **Channels**: one bidirectional QUIC stream per channel, tagged with a channel byte,
+  frame ceilings enforced from the header before allocation.
+- **Handshake**: `Opening` states whether a connection is a session or a pairing
+  exchange. Postcard is not self-describing, so inferring it by attempting two decodes
+  would let the peer choose the branch. `TrustDirectory` is async and reads through to
+  the database on every connection, which is what makes revocation immediate.
+- **Pairing over the wire**: the four-message exchange, with both certificate
+  fingerprints taken from TLS and never from a message body. Trust is persisted
+  *before* the confirmation is sent, so a storage failure cannot leave a client
+  believing in a pairing the agent has no record of.
+- **Discovery**: mDNS advertise and browse. Everything discovered is an untrusted hint
+  about where to dial; nothing is ever pinned from it, and discovery being unavailable
+  never prevents connecting.
+
+### `rc-host-agent`
+
+- Binds the listener, accepts connections, and routes each by its `Opening`.
+- **Session cap as a reservation released on `Drop`**, so no error path can leak a slot
+  and leave the agent refusing everything until it is restarted.
+- **Loopback control endpoint**: `GET /health` unauthenticated, `POST /pairing` behind a
+  local-control token. The token is a *filesystem capability* - it lives in the agent's
+  data directory under the same protection as the keystore - so the set of callers that
+  can create trust is exactly the set that could already read the keystore.
+- `rc-agent pair` is a client of that endpoint. It previously opened a window in its own
+  process, which no client could ever have completed: the proof arrives at the agent,
+  whose manager had never heard of it.
+- Audit records for every connection outcome, with unknown and revoked reported
+  identically on the wire and distinctly in the local trail.
+
+### Desktop client
+
+- **Connection manager** with the full state machine - offline, discovering, connecting,
+  authenticating, connected, disconnecting, reconnecting, waiting-to-retry, refused,
+  failed - exponential backoff with full jitter, and address selection that tries the
+  last working address first.
+- **Automatic reconnect happens only after an accident.** Pressing Disconnect sets a
+  flag that every retry path checks. Refusals are never retried at all.
+- Real pairing and connect/disconnect/reconnect commands, and a Devices screen where
+  every button performs the operation it names.
+
+### The bug the integration test found
+
+`DeviceIdentity::from_pkcs8` **reissued the certificate on every load**. The key was
+stable, so the device id and identity fingerprint were stable - but the certificate DER
+was not, and peers pin the certificate fingerprint at the TLS layer. Every paired client
+would have refused the agent after an ordinary reboot, reporting an identity change:
+the loudest failure the system has, firing on a routine restart.
+
+Phase 2 could not have caught this, because nothing connected. The two-process restart
+test caught it on its first run.
+
+The fix persists the certificate in the keystore and reuses it verbatim, with a one-time
+in-place upgrade for keystores written before this. A stored certificate that does not
+carry the stored key's public key is refused, so a file assembled from two identities
+cannot present a fingerprint peers pin while holding a different key.
+
+### Security decisions made in Phase 3
+
+1. **The listener pins nothing.** It serves many paired clients and a single pin could
+   only ever match one. Admission is the handshake's job, and the handshake reads live
+   trust state on every connection.
+2. **Fingerprints in the pairing transcript come from TLS, never from a message.** This
+   is the whole anti-relay property; a fingerprint a peer can choose binds nothing.
+3. **The local pairing route is gated by a file, not a password.** The operating
+   system's permissions make the access decision; the token only carries it over a
+   socket, and is regenerated on every start.
+4. **A refusal ends a reconnect loop.** Retrying would turn a loud failure into a quiet
+   loop nobody sees - the exact failure mode a fingerprint mismatch exists to prevent.
+5. **Session ids are identifiers, not credentials.** A session is authenticated by its
+   TLS connection, which cannot be transplanted; nothing is authorized by presenting an
+   id, and the UI never displays one as though it were a secret.
+
+### Known limitations after Phase 3
+
+- **Certificate renewal breaks pinning until the client pairs again.** Clients pin the
+  certificate fingerprint at the TLS layer, so when an agent renews - after roughly 398
+  days - its peers will refuse it. The stored `identity_fingerprint` and
+  `record_certificate_rotation` exist for exactly this, but nothing yet performs the
+  rotation over the network. Phase 9.
+- **Sessions carry no application traffic yet.** The control channel answers `Ping`;
+  metrics, terminal, files and video return a typed `Unsupported` rather than an empty
+  answer that would put unmeasured figures on a dashboard. Phases 4 to 6.
+- **Automatic reconnect is driven by the UI, not by a background supervisor.** The
+  policy, the backoff and the intentional-disconnect suppression are implemented and
+  tested; nothing yet watches a dropped connection and starts the loop unprompted.
+- **Wake-on-LAN, favourites and per-server reconnect preferences** have database columns
+  and are read back, but nothing writes them yet. Phase 7.
+- The `#[cfg(unix)]` permission tests still did not execute, since this workspace was
+  verified on Windows.
+
 ## Remaining phases
 
 | Phase | Scope | Status |
 |---|---|---|
-| 3 | QUIC transport, mDNS discovery, connect/disconnect/reconnect lifecycle, connection-state UI | next |
-| 4 | Real PTY sessions, system metrics, dashboard, privilege separation | pending |
+| 3 | QUIC transport, mDNS discovery, connect/disconnect/reconnect lifecycle, connection-state UI | done |
+| 4 | Real PTY sessions, system metrics, dashboard, privilege separation | next |
 | 5 | File manager: browsing, resumable transfers, checksums, transfer queue | pending |
 | 6 | Screen capture, encoding, streaming, input forwarding, monitor and quality controls | pending |
 | 7 | Process and service management, power actions, confirmations, audit events | pending |
 | 8 | Coordination service signalling, NAT traversal, relay fallback, E2E verification | pending |
 | 9 | Installers, update architecture, full threat model, security review, documentation | pending |
 
-## Next: Phase 3 — Networking
+## Next: Phase 4 — Terminal and monitoring
 
-1. QUIC transport with mutually-authenticated TLS 1.3, using the Phase 2 device
-   certificates and pinned fingerprints.
-2. Bind the agent listener; wire `complete_pairing` to a real pairing endpoint that is
-   reachable only while the operator has a window open.
-3. Connection lifecycle: connect, disconnect, reconnect with the existing backoff
-   policy; `DisconnectReason::permits_auto_reconnect` already governs whether a retry is
-   allowed.
-4. mDNS discovery on the local network.
-5. Connection-state UI, replacing the disabled Phase 3 affordances on the Devices
-   screen.
-6. Session tokens: issued on authentication, stored hashed, short-lived, rotating.
-7. Integration tests across two real processes — the first phase where they are
-   possible.
+1. Real PTY sessions: ConPTY on Windows, `openpty` on Linux, over the terminal channel.
+2. System metrics collection, and a dashboard fed by measured values only.
+3. The privileged-operation split: a separate privileged service on Windows reached over
+   authenticated local IPC, and the sudoers/polkit path on Linux.
+4. Capability checks on every terminal and metrics request, audited.
 
 The security assumptions this phase must preserve are listed in
-[`docs/threat-model.md`](docs/threat-model.md#security-assumptions-phase-3-networking-must-preserve).
-The two that are easiest to break by accident: the transcript's certificate
-fingerprints must come from the observed TLS connection rather than the message body,
-and revocation must be re-checked per connection rather than trusted from cached state.
+[`docs/threat-model.md`](docs/threat-model.md). The two most easily broken by accident:
+a PTY must never be spawned without a capability check against the *live* session, and
+the privileged helper must validate every request against the allowlist itself rather
+than trusting that its caller already did.

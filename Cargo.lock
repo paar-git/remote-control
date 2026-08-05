@@ -3502,10 +3502,12 @@ dependencies = [
 name = "rc-desktop-client"
 version = "0.1.0"
 dependencies = [
+ "quinn",
  "rc-platform",
  "rc-protocol",
  "rc-security",
  "rc-storage",
+ "rc-transport",
  "serde",
  "serde_json",
  "tauri",

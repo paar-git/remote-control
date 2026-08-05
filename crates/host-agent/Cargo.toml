@@ -39,6 +39,7 @@ tracing-appender = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rc-transport = { workspace = true }
 
 [lints]
 workspace = true

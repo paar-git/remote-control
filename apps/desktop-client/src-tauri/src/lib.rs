@@ -13,6 +13,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod commands;
+mod connect_commands;
+mod connection;
 
 use std::sync::{Arc, Mutex};
 
@@ -48,7 +50,12 @@ pub struct AppState {
     /// what went wrong, rather than showing a window that never appears.
     pub database: Option<rc_storage::Database>,
     /// This client's cryptographic identity, loaded from the keystore.
-    pub identity: Option<DeviceIdentity>,
+    ///
+    /// Shared rather than owned because the connection manager holds it for the life
+    /// of every connection it makes; a `DeviceIdentity` is deliberately not `Clone`,
+    /// since duplicating a private key is not something that should be easy to do by
+    /// accident.
+    pub identity: Option<Arc<DeviceIdentity>>,
     /// Owner account repository.
     pub owner: Option<rc_storage::OwnerRepository>,
     /// Trusted-device repository.
@@ -57,6 +64,11 @@ pub struct AppState {
     pub audit_repo: Option<rc_storage::AuditRepository>,
     /// The authenticated session, if the application is unlocked.
     pub session: Mutex<Option<OwnerSession>>,
+    /// The connection to a saved server, when this client has an identity to use.
+    ///
+    /// `None` only when the keystore could not be loaded, in which case the window
+    /// still opens so the user can be told why rather than watching nothing happen.
+    pub connection: Option<Arc<connection::ConnectionManager>>,
     /// Time source. Injected so tests can control it.
     pub clock: Arc<dyn Clock>,
 }
@@ -186,6 +198,7 @@ async fn initialise() -> Arc<AppState> {
         trust: None,
         audit_repo: None,
         session: Mutex::new(None),
+        connection: None,
         clock: Arc::clone(&clock),
     };
 
@@ -217,7 +230,7 @@ async fn initialise() -> Arc<AppState> {
                 certificate_version = identity.public().certificate_version,
                 "client identity ready"
             );
-            Some(identity)
+            Some(Arc::new(identity))
         }
         Err(err) => {
             tracing::error!(%err, "could not load or create the client identity");
@@ -244,6 +257,18 @@ async fn initialise() -> Arc<AppState> {
         )
     });
 
+    // The connection manager needs an identity: without one this client cannot
+    // authenticate to anything, and offering a Connect button that could only fail
+    // would be worse than not offering it.
+    let connection = identity.as_ref().map(|identity| {
+        let descriptor = connection::client_descriptor(identity, &host);
+        Arc::new(connection::ConnectionManager::new(
+            Arc::clone(identity),
+            descriptor,
+            connection::client_capabilities(),
+        ))
+    });
+
     Arc::new(AppState {
         host,
         paths,
@@ -253,6 +278,7 @@ async fn initialise() -> Arc<AppState> {
         trust,
         audit_repo,
         session: Mutex::new(None),
+        connection,
         clock,
     })
 }
@@ -302,6 +328,13 @@ pub fn run() {
             commands::revoke_trusted_device,
             commands::recent_audit_events,
             commands::check_pairing_code_format,
+            connect_commands::discover_agents,
+            connect_commands::pair_with_server,
+            connect_commands::connect_to_server,
+            connect_commands::disconnect_from_server,
+            connect_commands::reconnect_to_server,
+            connect_commands::connection_state,
+            connect_commands::ping_server,
         ])
         .run(tauri::generate_context!());
 
