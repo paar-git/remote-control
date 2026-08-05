@@ -1,0 +1,44 @@
+[package]
+name = "rc-transport"
+description = "QUIC transport, mutually-authenticated TLS with pinned identities, and the connection lifecycle."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rc-protocol = { path = "../protocol" }
+rc-security = { path = "../security" }
+
+# Transport.
+quinn = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+
+# Async.
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+
+# Local discovery.
+mdns-sd = { workspace = true }
+
+# Encoding.
+bytes = { workspace = true }
+hex = { workspace = true }
+
+serde = { workspace = true }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+async-trait = { workspace = true }

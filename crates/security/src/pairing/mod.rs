@@ -71,7 +71,9 @@ pub use session::{
     AgentConfirmation, ClientIdentityClaim, ClientProof, OpenedPairing, PairingChallenge,
     PairingManager, PairingOutcome, PairingPolicy, PairingState,
 };
-pub use transcript::{RequestedPermissions, Transcript, TranscriptInputs};
+pub use transcript::{
+    RequestedPermissions, Transcript, TranscriptInputs, role_from_wire, role_to_wire,
+};
 
 #[cfg(test)]
 mod tests;

@@ -112,6 +112,55 @@ impl RequestedPermissions {
         Ok(())
     }
 
+    /// The wire form of this request.
+    ///
+    /// Capability names are emitted in canonical (sorted, deduplicated) order, so the
+    /// value a peer receives is the value the transcript commits to.
+    #[must_use]
+    pub fn to_wire(&self) -> rc_protocol::pairing::PermissionRequest {
+        let mut names: Vec<String> = self
+            .capabilities
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+
+        rc_protocol::pairing::PermissionRequest {
+            role: role_to_wire(self.role),
+            capabilities: names,
+        }
+    }
+
+    /// Read a request off the wire.
+    ///
+    /// Capability names this build does not recognise are **dropped**, not rejected: a
+    /// peer running a newer version may name capabilities that do not exist here, and
+    /// dropping them fails closed. The role, by contrast, must be one this build knows
+    /// — an unrecognised role has no safe interpretation.
+    ///
+    /// # Errors
+    /// [`SecurityError::Invalid`] if the role is unrecognised.
+    pub fn from_wire(wire: &rc_protocol::pairing::PermissionRequest) -> Result<Self> {
+        let role = role_from_wire(wire.role).ok_or(SecurityError::Invalid {
+            field: "requested role",
+            reason: "is not a role this build recognises",
+        })?;
+
+        let capabilities = wire
+            .capabilities
+            .iter()
+            .filter_map(|name| {
+                Capability::all()
+                    .iter()
+                    .copied()
+                    .find(|c| c.name() == name.as_str())
+            })
+            .collect();
+
+        Ok(Self { role, capabilities })
+    }
+
     /// Canonical encoding: sorted, deduplicated, comma-joined capability names.
     ///
     /// Sorting matters. Without it, the same permission set in a different order would
@@ -123,6 +172,36 @@ impl RequestedPermissions {
         names.sort_unstable();
         names.dedup();
         names.join(",")
+    }
+}
+
+/// Map a role onto its wire representation.
+///
+/// Written as an exhaustive `match` in both directions so that adding a role is a
+/// compile error here rather than a value that silently fails to cross the wire.
+#[must_use]
+pub const fn role_to_wire(role: Role) -> rc_protocol::pairing::RoleRequest {
+    use rc_protocol::pairing::RoleRequest;
+    match role {
+        Role::Owner => RoleRequest::Owner,
+        Role::Operator => RoleRequest::Operator,
+        Role::ViewOnly => RoleRequest::ViewOnly,
+    }
+}
+
+/// Map a wire role onto the local one.
+///
+/// Returns `None` for a variant this build does not know. `RoleRequest` is
+/// `#[non_exhaustive]`, and guessing at an unknown role could only ever guess too
+/// permissively.
+#[must_use]
+pub fn role_from_wire(role: rc_protocol::pairing::RoleRequest) -> Option<Role> {
+    use rc_protocol::pairing::RoleRequest;
+    match role {
+        RoleRequest::Owner => Some(Role::Owner),
+        RoleRequest::Operator => Some(Role::Operator),
+        RoleRequest::ViewOnly => Some(Role::ViewOnly),
+        _ => None,
     }
 }
 
@@ -640,6 +719,71 @@ mod tests {
         let transcript = Transcript::build(&inputs()).unwrap();
         let digest = hex::encode(transcript.digest());
         assert!(!digest.contains(&hex::encode(VERIFIER)));
+    }
+
+    #[test]
+    fn permissions_survive_a_round_trip_through_the_wire_form() {
+        for role in Role::all() {
+            let original = RequestedPermissions::full(*role);
+            let back = RequestedPermissions::from_wire(&original.to_wire()).unwrap();
+            assert_eq!(
+                original.canonical(),
+                back.canonical(),
+                "the capability set must survive the wire for {}",
+                role.name()
+            );
+            assert_eq!(original.role, back.role);
+        }
+    }
+
+    #[test]
+    fn the_wire_form_is_already_canonical() {
+        // The transcript commits to the canonical order, so the bytes a peer sees must
+        // already be in it — otherwise the two sides could disagree.
+        let mut caps = Capability::all().to_vec();
+        caps.reverse();
+        let wire = RequestedPermissions {
+            role: Role::Owner,
+            capabilities: caps,
+        }
+        .to_wire();
+
+        let mut sorted = wire.capabilities.clone();
+        sorted.sort_unstable();
+        assert_eq!(wire.capabilities, sorted);
+    }
+
+    #[test]
+    fn an_unknown_capability_name_is_dropped_not_trusted() {
+        let wire = rc_protocol::pairing::PermissionRequest {
+            role: rc_protocol::pairing::RoleRequest::Operator,
+            capabilities: vec!["terminal".into(), "become_root_somehow".into()],
+        };
+        let parsed = RequestedPermissions::from_wire(&wire).unwrap();
+        assert_eq!(parsed.capabilities, vec![Capability::Terminal]);
+    }
+
+    #[test]
+    fn every_role_maps_both_ways() {
+        for role in Role::all() {
+            assert_eq!(role_from_wire(role_to_wire(*role)), Some(*role));
+        }
+    }
+
+    #[test]
+    fn a_transcript_built_from_wire_permissions_matches_the_original() {
+        // The property that matters: sending permissions over the wire and rebuilding
+        // them must not change the transcript, or pairing would never verify.
+        let original = Transcript::build(&inputs()).unwrap();
+        let round_tripped = Transcript::build(&TranscriptInputs {
+            requested_permissions: RequestedPermissions::from_wire(
+                &inputs().requested_permissions.to_wire(),
+            )
+            .unwrap(),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(original, round_tripped);
     }
 
     #[test]

@@ -97,6 +97,29 @@ pub struct Hello {
     pub sent_at_ms: i64,
 }
 
+/// The very first message on a control stream.
+///
+/// A connection is opened for exactly one of two purposes: running a session as an
+/// already-trusted device, or running a first-time pairing exchange. Which one it is
+/// has to be **stated**, not inferred.
+///
+/// Inferring it would mean attempting to decode the same bytes as two different types
+/// and taking whichever succeeded. The wire format ([`postcard`]) is not
+/// self-describing, so that is not merely fragile — a byte string that decodes cleanly
+/// as one type frequently decodes cleanly as the other, and the peer would choose which
+/// by construction. An explicit tag makes the agent's first branch — *is this connection
+/// even allowed to pair?* — one it decides rather than one the peer decides for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Opening {
+    /// The peer claims to be trusted already and wants a session.
+    Hello(Box<Hello>),
+    /// The peer is not trusted and wants to run the pairing exchange. Permitted only
+    /// while the operator has a pairing window open.
+    Pairing(Box<crate::pairing::PairingMessage>),
+}
+
 /// Response to [`Hello`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloAck {
@@ -111,6 +134,16 @@ pub struct HelloAck {
     /// Whether the initiator is already a trusted, non-revoked device. When `false`
     /// the connection may only be used to run the pairing exchange.
     pub already_paired: bool,
+    /// Identifier the agent assigned to this session.
+    ///
+    /// Not a credential. Authentication is the mutually-authenticated TLS connection
+    /// itself, which cannot be transplanted onto another connection; this value exists
+    /// so both sides, the audit trail and the operator's "active sessions" list all
+    /// name the same session. Nothing is authorized by presenting it.
+    pub session_id: SessionId,
+    /// Seconds of inactivity after which the agent will end the session, or `0` when
+    /// no idle timeout applies.
+    pub idle_timeout_secs: u32,
 }
 
 /// Why a connection was refused. Kept deliberately vague to avoid acting as an oracle.
@@ -334,6 +367,47 @@ mod tests {
         assert!(!caps.terminal);
         assert!(!caps.power_control);
         assert_eq!(caps.display_count, 0);
+    }
+
+    #[test]
+    fn an_opening_states_its_purpose_rather_than_being_guessed_at() {
+        // Both variants must round-trip through the real wire format, and the tag must
+        // be what distinguishes them — not a decode attempt.
+        let hello = Opening::Hello(Box::new(Hello {
+            version: crate::CURRENT_VERSION,
+            role: PeerRole::Client,
+            descriptor: crate::test_support::sample_descriptor(),
+            capabilities: Capabilities::default(),
+            sent_at_ms: 0,
+        }));
+        let pairing = Opening::Pairing(Box::new(crate::pairing::PairingMessage::Failed(
+            crate::pairing::PairFailure::CodeExpired,
+        )));
+
+        for message in [hello, pairing] {
+            let bytes = postcard::to_stdvec(&message).unwrap();
+            let back: Opening = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(message, back);
+        }
+    }
+
+    #[test]
+    fn the_two_opening_variants_do_not_share_a_leading_byte() {
+        // The discriminator has to actually discriminate on the wire.
+        let hello = postcard::to_stdvec(&Opening::Hello(Box::new(Hello {
+            version: crate::CURRENT_VERSION,
+            role: PeerRole::Client,
+            descriptor: crate::test_support::sample_descriptor(),
+            capabilities: Capabilities::default(),
+            sent_at_ms: 0,
+        })))
+        .unwrap();
+        let pairing = postcard::to_stdvec(&Opening::Pairing(Box::new(
+            crate::pairing::PairingMessage::Failed(crate::pairing::PairFailure::CodeExpired),
+        )))
+        .unwrap();
+
+        assert_ne!(hello.first(), pairing.first());
     }
 
     #[test]

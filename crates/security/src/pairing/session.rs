@@ -271,6 +271,32 @@ impl PairingManager {
         self.sessions.lock().map_or(0, |s| s.len())
     }
 
+    /// Every session that is still usable, newest first.
+    ///
+    /// The agent needs this to answer a client that connected without naming a session
+    /// id — the ordinary case, since the operator types a code, not a UUID. When more
+    /// than one window is open the caller must **refuse** rather than pick: guessing
+    /// would let a client aim its attempt at a window whose code it was not given, and
+    /// spend that window's attempt budget.
+    #[must_use]
+    pub fn open_session_ids(&self, clock: &dyn Clock) -> Vec<PairingSessionId> {
+        let now = clock.now_ms();
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return Vec::new();
+        };
+
+        let mut open: Vec<(PairingSessionId, i64)> = sessions
+            .iter_mut()
+            .filter_map(|(id, session)| {
+                session.refresh(now);
+                (!session.state.is_terminal()).then_some((*id, session.created_at_ms))
+            })
+            .collect();
+
+        open.sort_by_key(|(_, created_at)| std::cmp::Reverse(*created_at));
+        open.into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Open a pairing window and generate a code.
     ///
     /// # Errors

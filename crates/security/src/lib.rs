@@ -30,7 +30,7 @@ pub mod throttle;
 pub use clock::{Clock, OsRandom, RandomSource, RandomSourceExt, SystemClock};
 pub use error::{Result, SecurityError};
 pub use fingerprint::Fingerprint;
-pub use identity::{DeviceIdentity, DeviceIdentityPublic};
+pub use identity::{DeviceIdentity, DeviceIdentityPublic, derive_device_id};
 pub use keystore::Keystore;
 pub use pairing::{
     PairingClient, PairingCode, PairingManager, PairingPolicy, PairingState, RequestedPermissions,
