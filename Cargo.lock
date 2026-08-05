@@ -3578,6 +3578,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc-file-transfer"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "parking_lot",
+ "rc-protocol",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rc-host-agent"
 version = "0.1.0"
 dependencies = [

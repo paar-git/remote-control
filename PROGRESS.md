@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-05 · **Phases 1–3 of 9 complete; phase 4 partly done.**
+Last updated: 2026-08-05 · **Phases 1–3 of 9 complete; phases 4 and 5 in progress.**
 
 This document is the honest record of what runs today. Anything not listed as done is
 not built — there are no mock implementations or placeholder handlers anywhere in the
@@ -14,7 +14,7 @@ All figures below were produced by running the commands, not estimated.
 |---|---|---|
 | Rust format | `cargo fmt --all -- --check` | clean |
 | Rust lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (pedantic enabled) |
-| Rust tests | `cargo test --workspace` | **574 passed**, 0 failed |
+| Rust tests | `cargo test --workspace` | **638 passed**, 0 failed |
 | TS typecheck | `pnpm -r typecheck` | clean (strict, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
 | TS lint | `pnpm lint` | clean |
 | TS format | `pnpm format:check` | clean |
@@ -381,13 +381,56 @@ yet, so this phase is **not** finished; see the limitations below.
 - Command history, terminal search, output export and the destructive-command
   confirmation templates from the specification are not built.
 
+## Phase 5 — File manager ⚠ in progress
+
+The safety-critical core exists and is tested. The wiring — a file channel on the
+agent, commands on the client, and a two-pane UI — does not.
+
+### `rc-file-transfer`
+
+- **Path resolution against three attack classes.** Traversal is closed by lexical
+  normalisation before any I/O; symlink escape by canonicalising and re-checking; and
+  Windows device names (`CON`, `NUL`, and any name ending in a space or dot) by an
+  explicit refusal list. `CON.txt` does not create a file — it opens the console — so a
+  transfer to one would appear to succeed and write nowhere.
+- **The check runs twice, and both passes are necessary.** The lexical pass alone misses
+  a symlink pointing out of a root. The canonical pass alone cannot run on a path that
+  does not exist yet, which is every upload destination — for those the *parent* is
+  canonicalised and checked instead, so a file cannot be planted through a symlinked
+  parent.
+- **Traversal and symlink escape report the identical error.** Distinguishing them would
+  tell a peer whether a path exists and whether it is a link: a map of a filesystem it
+  was just refused access to.
+- **Listings report symlinks, never follow them.** A link to a 40 GB file elsewhere would
+  otherwise be listed as a 40 GB file sitting in the directory, which is not what is
+  there.
+- **Transfers are verified, not assumed.** A completed upload whose BLAKE3 digest does
+  not match is *discarded*. A file that is silently wrong is worse than a transfer that
+  failed: the failure is found now, by whoever can retry it; the corruption is found
+  later, by whoever depended on it.
+- **Resuming verifies the prefix** against a digest over the same range. A resume that
+  trusted the offset alone would splice two different files together and pass no check
+  until the final digest.
+- **Uploads are written beside the destination and renamed in only after verification**,
+  so a failed transfer leaves the original file intact and leaves a partial with an
+  obviously incomplete name.
+
+### Known limitations after this instalment
+
+- **Nothing is wired up.** The agent does not serve the file channel, the client has no
+  file commands, and there is no two-pane UI. `rc-file-transfer` is a tested library
+  with no callers yet.
+- **Downloads are not implemented** — only the upload direction, checksums and listing.
+- Copy, move, rename, delete, recycle-bin support, the transfer queue, conflict
+  resolution, disk-space validation, previews and archive handling are all still to do.
+
 ## Remaining phases
 
 | Phase | Scope | Status |
 |---|---|---|
 | 3 | QUIC transport, mDNS discovery, connect/disconnect/reconnect lifecycle, connection-state UI | done |
 | 4 | Real PTY sessions, system metrics, dashboard, privilege separation | partly done |
-| 5 | File manager: browsing, resumable transfers, checksums, transfer queue | pending |
+| 5 | File manager: browsing, resumable transfers, checksums, transfer queue | in progress |
 | 6 | Screen capture, encoding, streaming, input forwarding, monitor and quality controls | pending |
 | 7 | Process and service management, power actions, confirmations, audit events | pending |
 | 8 | Coordination service signalling, NAT traversal, relay fallback, E2E verification | pending |
