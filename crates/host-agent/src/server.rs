@@ -667,6 +667,22 @@ impl AgentServer {
                             service.run(&mut reader).await;
                         });
                     }
+                    rc_protocol::Channel::FileTransfer => {
+                        let service = crate::file_service::FileService::new(
+                            writer,
+                            server.file_policy(),
+                            server.config.features.max_transfer_bytes,
+                            authorization.clone(),
+                            server.database.clone(),
+                            device_id,
+                            session_id,
+                            Arc::clone(&server.clock),
+                            server.config.features.file_transfer,
+                        );
+                        tokio::spawn(async move {
+                            service.run(&mut reader).await;
+                        });
+                    }
                     other => {
                         // A channel this build does not serve is closed rather than left
                         // open: a client waiting on a stream nobody reads would appear
@@ -678,6 +694,37 @@ impl AgentServer {
                     }
                 }
             }
+        })
+    }
+
+    /// Where connected clients may read and write files.
+    ///
+    /// Built from the configured roots on every connection rather than cached, so an
+    /// operator narrowing the roots and restarting gets the narrower policy, and a
+    /// misconfigured root that cannot be used fails closed to *no* file access rather
+    /// than silently to unconfined access.
+    fn file_policy(&self) -> rc_file_transfer::PathPolicy {
+        let roots = &self.config.features.file_transfer_roots;
+
+        if roots.is_empty() {
+            // Documented in the configuration: an empty list means the whole
+            // filesystem, which is the right default for a server the operator
+            // administers.
+            return rc_file_transfer::PathPolicy::unconfined();
+        }
+
+        let paths: Vec<std::path::PathBuf> = roots.iter().map(std::path::PathBuf::from).collect();
+
+        rc_file_transfer::PathPolicy::confined_to(paths).unwrap_or_else(|err| {
+            // Configuration validation already rejects a relative root, so this is
+            // unreachable in practice. If it were ever reached, failing closed to a
+            // policy that permits nothing is the only safe reading of "the operator
+            // asked for confinement and it could not be applied".
+            tracing::error!(%err, "the configured file-transfer roots are unusable");
+            rc_file_transfer::PathPolicy::confined_to([std::path::PathBuf::from(
+                NOTHING_IS_PERMITTED,
+            )])
+            .unwrap_or_default()
         })
     }
 
@@ -869,6 +916,16 @@ const fn reason_name(reason: DisconnectReason) -> &'static str {
         _ => "unknown",
     }
 }
+
+/// A root that cannot match any real path.
+///
+/// Used only when confinement was asked for and could not be applied, so the failure
+/// mode is "no file access" rather than "all file access".
+const NOTHING_IS_PERMITTED: &str = if cfg!(windows) {
+    r"C:\rc-no-file-access-configured"
+} else {
+    "/rc-no-file-access-configured"
+};
 
 /// Refuse a request the connection's authorization does not cover.
 ///

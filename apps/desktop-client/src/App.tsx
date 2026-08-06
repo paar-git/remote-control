@@ -20,6 +20,7 @@ import {
 } from './api.js';
 import { Button, type Toast, ToastBar } from './components';
 import DevicesScreen from './DevicesScreen';
+import FilesScreen from './FilesScreen';
 import MonitoringScreen from './MonitoringScreen';
 import TerminalScreen from './TerminalScreen';
 import { isTauriAvailable } from './ipc.js';
@@ -36,7 +37,7 @@ const NAV_ITEMS: readonly NavItem[] = [
   { id: 'devices', label: 'Devices', availableInPhase: null },
   { id: 'remote-desktop', label: 'Remote Desktop', availableInPhase: 6 },
   { id: 'terminal', label: 'Terminal', availableInPhase: null },
-  { id: 'files', label: 'Files', availableInPhase: 5 },
+  { id: 'files', label: 'Files', availableInPhase: null },
   { id: 'processes', label: 'Processes', availableInPhase: 7 },
   { id: 'services', label: 'Services', availableInPhase: 7 },
   { id: 'monitoring', label: 'Monitoring', availableInPhase: null },
@@ -369,6 +370,8 @@ function Section({
       return <MonitoringScreen />;
     case 'terminal':
       return <TerminalScreen onToast={onToast} />;
+    case 'files':
+      return <FilesScreen onToast={onToast} />;
     default:
       return <HomeScreen />;
   }

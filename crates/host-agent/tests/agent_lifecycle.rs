@@ -95,16 +95,28 @@ impl RunningAgent {
     }
 
     /// Block until the agent reports itself healthy, or fail the test.
+    ///
+    /// The budget is generous because these tests run in parallel and each one spawns a
+    /// real agent process: on a loaded machine, startup competes with a dozen siblings
+    /// for CPU. A tight deadline here would make the suite fail for reasons that have
+    /// nothing to do with the code under test.
     async fn wait_until_healthy(&self) {
-        for _ in 0..100 {
+        const ATTEMPTS: u32 = 600;
+        const INTERVAL_MS: u64 = 100;
+
+        for _ in 0..ATTEMPTS {
             if let Some(body) = self.get("/health").await
                 && body.contains("\"status\":\"ok\"")
             {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(INTERVAL_MS)).await;
         }
-        panic!("the agent did not become healthy within 10 seconds");
+
+        panic!(
+            "the agent did not become healthy within {} seconds",
+            u64::from(ATTEMPTS) * INTERVAL_MS / 1000
+        );
     }
 
     /// The address a client dials.
@@ -719,6 +731,283 @@ async fn a_session_can_open_a_real_terminal_and_run_a_command() {
         .send(&TerminalClientMessage::Close { terminal_id })
         .await
         .unwrap();
+
+    connection.close(0u32.into(), b"done");
+}
+
+/// Open the file channel on an authenticated connection.
+async fn open_file_channel(
+    connection: &quinn::Connection,
+) -> (rc_transport::ChannelWriter, rc_transport::ChannelReader) {
+    rc_transport::open_channel(connection, rc_protocol::Channel::FileTransfer)
+        .await
+        .expect("the agent must serve the file channel")
+}
+
+/// Read the next file message, failing the test if none arrives.
+async fn next_file_message(
+    reader: &mut rc_transport::ChannelReader,
+) -> rc_protocol::files::FileAgentMessage {
+    tokio::time::timeout(Duration::from_secs(20), reader.next_message())
+        .await
+        .expect("the agent must answer within the deadline")
+        .expect("the file channel must stay open")
+        .expect("the agent must send a message")
+}
+
+#[tokio::test]
+async fn a_session_can_browse_the_servers_files() {
+    use rc_protocol::files::{FileAgentMessage, FileClientMessage};
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    let (connection, _ack, _control_writer, _control_reader) =
+        connect(&agent, &identity, &paired).await.unwrap();
+    let (mut writer, mut reader) = open_file_channel(&connection).await;
+
+    // A directory the test owns, with known contents.
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("readme.txt"), b"hello").unwrap();
+    std::fs::create_dir(workspace.path().join("subdir")).unwrap();
+
+    writer
+        .send(&FileClientMessage::List {
+            path: workspace.path().to_string_lossy().into_owned(),
+            include_hidden: false,
+        })
+        .await
+        .unwrap();
+
+    match next_file_message(&mut reader).await {
+        FileAgentMessage::Listing { entries, .. } => {
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"readme.txt"), "got {names:?}");
+            assert!(names.contains(&"subdir"), "got {names:?}");
+        }
+        other => panic!("expected a listing, got {other:?}"),
+    }
+
+    connection.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn a_file_uploads_and_downloads_with_its_checksum_verified() {
+    // The round trip across two processes: bytes go up, come back, and match.
+    use rc_protocol::files::{
+        Checksum, ChecksumAlgorithm, ConflictPolicy, FileAgentMessage, FileClientMessage,
+    };
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    let (connection, _ack, _control_writer, _control_reader) =
+        connect(&agent, &identity, &paired).await.unwrap();
+    let (mut writer, mut reader) = open_file_channel(&connection).await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let destination = workspace.path().join("uploaded.bin");
+    let content: Vec<u8> = (0..5000u32).map(|index| (index % 251) as u8).collect();
+    let checksum = Checksum {
+        algorithm: ChecksumAlgorithm::Blake3,
+        digest: blake3::hash(&content).as_bytes().to_vec(),
+    };
+
+    // ---- upload ----
+    let transfer_id = rc_protocol::TransferId::generate();
+    writer
+        .send(&FileClientMessage::UploadBegin {
+            transfer_id,
+            destination: destination.to_string_lossy().into_owned(),
+            total_bytes: content.len() as u64,
+            checksum: checksum.clone(),
+            conflict: ConflictPolicy::Overwrite,
+        })
+        .await
+        .unwrap();
+
+    match next_file_message(&mut reader).await {
+        FileAgentMessage::UploadReady { resume_offset, .. } => {
+            assert_eq!(resume_offset, 0, "a fresh upload starts at the beginning");
+        }
+        other => panic!("expected the agent to be ready, got {other:?}"),
+    }
+
+    let mut offset = 0u64;
+    for chunk in content.chunks(1024) {
+        writer
+            .send(&FileClientMessage::UploadChunk {
+                transfer_id,
+                offset,
+                data: chunk.to_vec(),
+            })
+            .await
+            .unwrap();
+        offset += chunk.len() as u64;
+    }
+
+    writer
+        .send(&FileClientMessage::UploadEnd { transfer_id })
+        .await
+        .unwrap();
+
+    match next_file_message(&mut reader).await {
+        FileAgentMessage::TransferComplete {
+            bytes_transferred, ..
+        } => {
+            assert_eq!(bytes_transferred, content.len() as u64);
+        }
+        other => panic!("expected the upload to complete, got {other:?}"),
+    }
+
+    // The file is really on disk, with the right bytes.
+    assert_eq!(std::fs::read(&destination).unwrap(), content);
+
+    // ---- download it back ----
+    let download_id = rc_protocol::TransferId::generate();
+    writer
+        .send(&FileClientMessage::DownloadBegin {
+            transfer_id: download_id,
+            source: destination.to_string_lossy().into_owned(),
+            start_offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let mut received = Vec::new();
+    let mut announced = None;
+
+    loop {
+        match next_file_message(&mut reader).await {
+            FileAgentMessage::DownloadBegin {
+                total_bytes,
+                checksum,
+                ..
+            } => {
+                assert_eq!(total_bytes, content.len() as u64);
+                announced = Some(checksum);
+            }
+            FileAgentMessage::DownloadChunk { offset, data, .. } => {
+                assert_eq!(offset, received.len() as u64, "chunks must arrive in order");
+                received.extend_from_slice(&data);
+            }
+            FileAgentMessage::TransferComplete { .. } => break,
+            other => panic!("unexpected message during download: {other:?}"),
+        }
+    }
+
+    assert_eq!(received, content, "the round trip must be byte-exact");
+    assert_eq!(
+        announced
+            .expect("the agent must announce a checksum")
+            .digest,
+        checksum.digest,
+        "the announced digest must match what was uploaded"
+    );
+
+    connection.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn an_upload_that_fails_its_checksum_is_discarded() {
+    // A file that is silently wrong is worse than a transfer that failed.
+    use rc_protocol::files::{
+        Checksum, ChecksumAlgorithm, ConflictPolicy, FileAgentMessage, FileClientMessage,
+    };
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    let (connection, _ack, _control_writer, _control_reader) =
+        connect(&agent, &identity, &paired).await.unwrap();
+    let (mut writer, mut reader) = open_file_channel(&connection).await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let destination = workspace.path().join("corrupt.bin");
+    let transfer_id = rc_protocol::TransferId::generate();
+
+    writer
+        .send(&FileClientMessage::UploadBegin {
+            transfer_id,
+            destination: destination.to_string_lossy().into_owned(),
+            total_bytes: 4,
+            // A digest of something else entirely.
+            checksum: Checksum {
+                algorithm: ChecksumAlgorithm::Blake3,
+                digest: blake3::hash(b"good").as_bytes().to_vec(),
+            },
+            conflict: ConflictPolicy::Overwrite,
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        next_file_message(&mut reader).await,
+        FileAgentMessage::UploadReady { .. }
+    ));
+
+    writer
+        .send(&FileClientMessage::UploadChunk {
+            transfer_id,
+            offset: 0,
+            data: b"BAD!".to_vec(),
+        })
+        .await
+        .unwrap();
+    writer
+        .send(&FileClientMessage::UploadEnd { transfer_id })
+        .await
+        .unwrap();
+
+    match next_file_message(&mut reader).await {
+        FileAgentMessage::TransferFailed { .. } => {}
+        other => panic!("a corrupt upload must fail, got {other:?}"),
+    }
+
+    assert!(
+        !destination.exists(),
+        "nothing must be left at the destination"
+    );
+
+    connection.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn a_path_traversal_is_refused_over_the_wire() {
+    // The path checks are library-tested; this proves they are actually reached by a
+    // real message on a real connection.
+    use rc_protocol::files::{FileAgentMessage, FileClientMessage};
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    let (connection, _ack, _control_writer, _control_reader) =
+        connect(&agent, &identity, &paired).await.unwrap();
+    let (mut writer, mut reader) = open_file_channel(&connection).await;
+
+    for hostile in ["relative/path", "", "/tmp/CON"] {
+        writer
+            .send(&FileClientMessage::List {
+                path: hostile.to_owned(),
+                include_hidden: false,
+            })
+            .await
+            .unwrap();
+
+        match next_file_message(&mut reader).await {
+            FileAgentMessage::Error { message, .. } => {
+                assert!(
+                    !message.contains(hostile) || hostile.is_empty(),
+                    "an error must not echo the path it was given: {message}"
+                );
+            }
+            other => panic!("{hostile:?} must be refused, got {other:?}"),
+        }
+    }
 
     connection.close(0u32.into(), b"done");
 }

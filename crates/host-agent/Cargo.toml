@@ -20,6 +20,7 @@ rc-storage = { workspace = true }
 rc-transport = { workspace = true }
 rc-terminal = { workspace = true }
 rc-monitoring = { workspace = true }
+rc-file-transfer = { workspace = true }
 sysinfo = { workspace = true }
 uuid = { workspace = true }
 quinn = { workspace = true }
@@ -44,6 +45,7 @@ tracing-appender = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 rc-transport = { workspace = true }
+blake3 = { workspace = true }
 
 [lints]
 workspace = true

@@ -338,6 +338,140 @@ fn verify_resume_point(partial: &Path, offset: u64, expected: &Checksum) -> Resu
     Ok(())
 }
 
+/// A download in progress: a file being read out to a peer.
+///
+/// Reads are streamed, never buffered whole. The whole point of a file transfer is
+/// files that do not fit in memory, and a download that read its source into a `Vec`
+/// would let a peer choose how much the agent allocates by choosing which file to ask
+/// for.
+pub struct Download {
+    id: TransferId,
+    file: std::fs::File,
+    /// Offset of the next chunk to send.
+    offset: u64,
+    total_bytes: u64,
+    /// Bytes sent in this session, excluding any resumed prefix.
+    sent: u64,
+}
+
+impl std::fmt::Debug for Download {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The source path is deliberately absent: this is rendered into logs, and the
+        // path came from a peer.
+        f.debug_struct("Download")
+            .field("id", &self.id)
+            .field("offset", &self.offset)
+            .field("total_bytes", &self.total_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Download {
+    /// Open a file for reading out.
+    ///
+    /// Returns the download, the total size and the whole-file checksum, so the peer can
+    /// verify what it receives end to end.
+    ///
+    /// # Errors
+    /// [`FileError::NotFound`], [`FileError::PermissionDenied`],
+    /// [`FileError::WrongKind`] for a directory, or [`FileError::TooLarge`].
+    pub fn begin(
+        id: TransferId,
+        source: &Path,
+        start_offset: u64,
+        max_bytes: u64,
+    ) -> Result<(Self, u64, Checksum)> {
+        // `symlink_metadata` rather than `metadata`: a request to download a symlink is
+        // answered about the link, and following it is a decision that belongs to
+        // `PathPolicy`, which has already run by the time this is called.
+        let metadata = std::fs::symlink_metadata(source).map_err(|err| FileError::from_io(&err))?;
+        if metadata.is_dir() {
+            return Err(FileError::WrongKind);
+        }
+
+        let total_bytes = metadata.len();
+        if total_bytes > max_bytes {
+            return Err(FileError::TooLarge);
+        }
+        // A resume point past the end of the file describes a file the peer has not
+        // got; continuing from it would send nothing and report success.
+        if start_offset > total_bytes {
+            return Err(FileError::ResumeMismatch);
+        }
+
+        // Hashed before any chunk is sent, so the peer knows what it should end up with
+        // rather than being told afterwards what it happens to have.
+        let checksum = checksum_file(source)?;
+
+        let mut file = std::fs::File::open(source).map_err(|err| FileError::from_io(&err))?;
+        file.seek(SeekFrom::Start(start_offset))
+            .map_err(|err| FileError::from_io(&err))?;
+
+        Ok((
+            Self {
+                id,
+                file,
+                offset: start_offset,
+                total_bytes,
+                sent: 0,
+            },
+            total_bytes,
+            checksum,
+        ))
+    }
+
+    /// This transfer's id.
+    #[must_use]
+    pub const fn id(&self) -> TransferId {
+        self.id
+    }
+
+    /// Bytes sent in this session.
+    #[must_use]
+    pub const fn bytes_sent(&self) -> u64 {
+        self.sent
+    }
+
+    /// Whether every byte has been read out.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.offset >= self.total_bytes
+    }
+
+    /// Read the next chunk, or `None` at end of file.
+    ///
+    /// Returns the chunk's offset alongside its bytes so the receiver can place it
+    /// without tracking a running total of its own.
+    ///
+    /// # Errors
+    /// [`FileError::Io`] or [`FileError::PermissionDenied`] if the read fails.
+    pub fn next_chunk(&mut self) -> Result<Option<(u64, Vec<u8>)>> {
+        if self.is_complete() {
+            return Ok(None);
+        }
+
+        let mut buffer = vec![0u8; CHUNK_BYTES];
+        let read = self
+            .file
+            .read(&mut buffer)
+            .map_err(|err| FileError::from_io(&err))?;
+
+        if read == 0 {
+            // The file shrank while it was being read. Reporting the end here is right;
+            // the peer's checksum will fail, which is what should happen when the file
+            // it was promised is not the file that exists.
+            return Ok(None);
+        }
+
+        buffer.truncate(read);
+        let offset = self.offset;
+        self.offset += read as u64;
+        self.sent += read as u64;
+
+        Ok(Some((offset, buffer)))
+    }
+}
+
 /// Every transfer belonging to one connection.
 ///
 /// Bounded, and dropped with the connection — which is what stops a client from
@@ -990,5 +1124,137 @@ mod tests {
     #[test]
     fn a_registry_cap_of_zero_is_treated_as_one() {
         assert_eq!(TransferRegistry::new(0).max_transfers, 1);
+    }
+
+    // -- downloads -----------------------------------------------------------
+
+    #[test]
+    fn a_download_reads_a_whole_file_in_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.bin");
+        let content: Vec<u8> = (0..(CHUNK_BYTES * 2 + 17))
+            .map(|index| u8::try_from(index % 251).unwrap_or(0))
+            .collect();
+        std::fs::write(&path, &content).unwrap();
+
+        let (mut download, total, checksum) =
+            Download::begin(TransferId::generate(), &path, 0, NO_LIMIT).unwrap();
+
+        assert_eq!(total, content.len() as u64);
+        assert_eq!(checksum, digest_of(&content));
+
+        let mut received = Vec::new();
+        while let Some((offset, chunk)) = download.next_chunk().unwrap() {
+            assert_eq!(
+                offset,
+                received.len() as u64,
+                "chunks must arrive in order at the offset they claim"
+            );
+            received.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(received, content);
+        assert!(download.is_complete());
+        assert_eq!(download.bytes_sent(), content.len() as u64);
+    }
+
+    #[test]
+    fn a_download_resumes_from_an_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.bin");
+        std::fs::write(&path, b"0123456789").unwrap();
+
+        let (mut download, total, _) =
+            Download::begin(TransferId::generate(), &path, 4, NO_LIMIT).unwrap();
+
+        assert_eq!(total, 10, "the total is the file's size, not what is left");
+
+        let (offset, chunk) = download.next_chunk().unwrap().unwrap();
+        assert_eq!(offset, 4);
+        assert_eq!(chunk, b"456789");
+        assert_eq!(
+            download.bytes_sent(),
+            6,
+            "only the bytes sent this time are counted"
+        );
+    }
+
+    #[test]
+    fn a_download_of_an_empty_file_completes_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+
+        let (mut download, total, _) =
+            Download::begin(TransferId::generate(), &path, 0, NO_LIMIT).unwrap();
+
+        assert_eq!(total, 0);
+        assert!(download.is_complete());
+        assert!(download.next_chunk().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_resume_point_past_the_end_of_the_file_is_refused() {
+        // Continuing from it would send nothing and report success, leaving the peer
+        // with a file it never received.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.bin");
+        std::fs::write(&path, b"short").unwrap();
+
+        assert_eq!(
+            Download::begin(TransferId::generate(), &path, 999, NO_LIMIT).err(),
+            Some(FileError::ResumeMismatch)
+        );
+    }
+
+    #[test]
+    fn downloading_a_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Download::begin(TransferId::generate(), dir.path(), 0, NO_LIMIT).err(),
+            Some(FileError::WrongKind)
+        );
+    }
+
+    #[test]
+    fn downloading_a_missing_file_reports_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Download::begin(
+                TransferId::generate(),
+                &dir.path().join("nothing"),
+                0,
+                NO_LIMIT
+            )
+            .err(),
+            Some(FileError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_refused_before_it_is_hashed() {
+        // Hashing a file the transfer will refuse anyway is work the operator did not
+        // ask for, on a machine they are trying not to load.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        assert_eq!(
+            Download::begin(TransferId::generate(), &path, 0, 1024).err(),
+            Some(FileError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_download_debug_line_does_not_carry_the_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret-report.pdf");
+        std::fs::write(&path, b"x").unwrap();
+
+        let (download, _, _) = Download::begin(TransferId::generate(), &path, 0, NO_LIMIT).unwrap();
+        let rendered = format!("{download:?}");
+
+        assert!(!rendered.contains("secret-report"));
+        assert!(rendered.contains("Download"));
     }
 }

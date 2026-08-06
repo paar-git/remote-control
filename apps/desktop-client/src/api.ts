@@ -556,3 +556,156 @@ function bytesToBase64(bytes: Uint8Array): string {
 function base64ToBinaryString(encoded: string): string {
   return atob(encoded);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Files                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** What a directory entry is. */
+export const entryKindSchema = z.enum(['file', 'directory', 'symlink', 'other']);
+export type EntryKind = z.infer<typeof entryKindSchema>;
+
+/**
+ * One entry in a file listing.
+ *
+ * `name` and `symlinkTarget` originate on a remote machine — or on this one, from a
+ * directory anyone could have written to — so both go through `untrustedText`, which
+ * strips control characters and bidirectional overrides before anything renders them.
+ * Without that, a file called `co<U+202E>gnp.exe` displays as `codexe.png`.
+ */
+export const fileEntrySchema = z.object({
+  name: untrustedText(255),
+  kind: entryKindSchema,
+  sizeBytes: z.number().nonnegative(),
+  modifiedMs: z.number().int().nullable(),
+  hidden: z.boolean(),
+  readable: z.boolean(),
+  writable: z.boolean(),
+  permissions: untrustedText(32),
+  symlinkTarget: untrustedText(4096).nullable(),
+});
+
+export type FileEntry = z.infer<typeof fileEntrySchema>;
+
+/** A directory listing. */
+export const listingSchema = z.object({
+  /** The path actually listed, after the server resolved it. */
+  path: untrustedText(4096),
+  entries: z.array(fileEntrySchema),
+  truncated: z.boolean(),
+});
+
+export type Listing = z.infer<typeof listingSchema>;
+
+/** How a transfer ended. */
+export const transferResultSchema = z.object({
+  bytesTransferred: z.number().nonnegative(),
+  path: untrustedText(4096),
+});
+
+export type TransferResult = z.infer<typeof transferResultSchema>;
+
+/** What to do when the destination already exists. */
+export type ConflictChoice = 'fail' | 'overwrite' | 'resume' | 'rename';
+
+/** List a directory on the connected server. */
+export function listRemoteDirectory(path: string, includeHidden: boolean): Promise<Listing> {
+  return call('list_remote_directory', listingSchema, { path, includeHidden });
+}
+
+/** List a directory on this machine. */
+export function listLocalDirectory(path: string, includeHidden: boolean): Promise<Listing> {
+  return call('list_local_directory', listingSchema, { path, includeHidden });
+}
+
+/** The directory the local pane opens on. */
+export function getDefaultLocalDirectory(): Promise<string> {
+  return call('default_local_directory', z.string().min(1));
+}
+
+/** Create a directory on the server. */
+export function createRemoteDirectory(path: string): Promise<null> {
+  return call('create_remote_directory', z.null(), { path });
+}
+
+/**
+ * Delete a path on the server.
+ *
+ * There is no recycle bin: this is permanent, and the confirmation dialog says so.
+ */
+export function deleteRemotePath(path: string, recursive: boolean): Promise<null> {
+  return call('delete_remote_path', z.null(), { path, recursive });
+}
+
+/** Rename or move a path on the server. */
+export function renameRemotePath(from: string, to: string): Promise<null> {
+  return call('rename_remote_path', z.null(), { from, to });
+}
+
+/**
+ * Upload a local file to the server.
+ *
+ * The bytes never pass through the webview — the backend reads the file and streams it.
+ * This call therefore takes as long as the transfer does.
+ */
+export function uploadFile(
+  localPath: string,
+  remotePath: string,
+  conflict: ConflictChoice,
+): Promise<TransferResult> {
+  return call('upload_file', transferResultSchema, {
+    input: { localPath, remotePath, conflict },
+  });
+}
+
+/** Download a file from the server to this machine. */
+export function downloadFile(
+  localPath: string,
+  remotePath: string,
+  conflict: ConflictChoice,
+): Promise<TransferResult> {
+  return call('download_file', transferResultSchema, {
+    input: { localPath, remotePath, conflict },
+  });
+}
+
+/**
+ * Join a directory and a name into a path for the given platform.
+ *
+ * Done here rather than by string concatenation at each call site because the two
+ * panes can be on different platforms — a Windows client browsing a Linux server is the
+ * ordinary case — and the separator has to follow the *pane*, not this machine.
+ */
+export function joinPath(directory: string, name: string): string {
+  const windows = directory.includes('\\') || /^[A-Za-z]:$/.test(directory);
+  const separator = windows ? '\\' : '/';
+  const trimmed = directory.endsWith(separator) ? directory.slice(0, -1) : directory;
+  return `${trimmed}${separator}${name}`;
+}
+
+/**
+ * The parent of a path, or `null` at the root.
+ *
+ * Returning `null` rather than the path itself is what lets the UI disable "up" at the
+ * top instead of offering a button that does nothing.
+ */
+export function parentPath(path: string): string | null {
+  const windows = path.includes('\\');
+  const separator = windows ? '\\' : '/';
+
+  // The POSIX root is its own trimmed form, and it has no parent. Returning it would
+  // give the UI an "up" button that appears live and does nothing.
+  if (path === '/') return null;
+
+  const trimmed = path.endsWith(separator) && path.length > 1 ? path.slice(0, -1) : path;
+  const cut = trimmed.lastIndexOf(separator);
+  if (cut < 0) return null;
+
+  // A POSIX top-level directory's parent is the root itself.
+  if (cut === 0) return windows ? null : '/';
+
+  // A Windows drive root is `C:\`, not `C:` — the latter means "the working directory
+  // on drive C", which is not what clicking "up" is asking for.
+  const parent = trimmed.slice(0, cut);
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}

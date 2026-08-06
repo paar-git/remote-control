@@ -18,6 +18,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod config;
+mod file_service;
 mod identity;
 mod local_api;
 mod logging;

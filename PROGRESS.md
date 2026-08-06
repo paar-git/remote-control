@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-05 · **Phases 1–3 of 9 complete; phases 4 and 5 in progress.**
+Last updated: 2026-08-06 · **Phases 1–3 complete; phases 4 and 5 mostly complete.**
 
 This document is the honest record of what runs today. Anything not listed as done is
 not built — there are no mock implementations or placeholder handlers anywhere in the
@@ -14,11 +14,11 @@ All figures below were produced by running the commands, not estimated.
 |---|---|---|
 | Rust format | `cargo fmt --all -- --check` | clean |
 | Rust lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (pedantic enabled) |
-| Rust tests | `cargo test --workspace` | **638 passed**, 0 failed |
+| Rust tests | `cargo test --workspace` | **666 passed**, 0 failed |
 | TS typecheck | `pnpm -r typecheck` | clean (strict, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
 | TS lint | `pnpm lint` | clean |
 | TS format | `pnpm format:check` | clean |
-| TS tests | `pnpm -r test:run` | **85 passed**, 0 failed |
+| TS tests | `pnpm -r test:run` | **101 passed**, 0 failed |
 | Frontend build | `pnpm --filter @rc/desktop-client build` | succeeds |
 | Full gate | `scripts/verify.ps1` | `All checks passed.` |
 
@@ -381,10 +381,10 @@ yet, so this phase is **not** finished; see the limitations below.
 - Command history, terminal search, output export and the destructive-command
   confirmation templates from the specification are not built.
 
-## Phase 5 — File manager ⚠ in progress
+## Phase 5 — File manager ⚠ mostly complete
 
-The safety-critical core exists and is tested. The wiring — a file channel on the
-agent, commands on the client, and a two-pane UI — does not.
+Browsing, uploading and downloading work end to end and are verified against a real
+agent. Folder transfers, a transfer queue and previews are not built; see below.
 
 ### `rc-file-transfer`
 
@@ -404,25 +404,65 @@ agent, commands on the client, and a two-pane UI — does not.
 - **Listings report symlinks, never follow them.** A link to a 40 GB file elsewhere would
   otherwise be listed as a 40 GB file sitting in the directory, which is not what is
   there.
-- **Transfers are verified, not assumed.** A completed upload whose BLAKE3 digest does
-  not match is *discarded*. A file that is silently wrong is worse than a transfer that
-  failed: the failure is found now, by whoever can retry it; the corruption is found
-  later, by whoever depended on it.
+- **Transfers are verified, not assumed.** A completed transfer whose BLAKE3 digest does
+  not match is *discarded*, in both directions. A file that is silently wrong is worse
+  than a transfer that failed: the failure is found now, by whoever can retry it; the
+  corruption is found later, by whoever depended on it.
 - **Resuming verifies the prefix** against a digest over the same range. A resume that
   trusted the offset alone would splice two different files together and pass no check
   until the final digest.
-- **Uploads are written beside the destination and renamed in only after verification**,
-  so a failed transfer leaves the original file intact and leaves a partial with an
-  obviously incomplete name.
+- **Written aside and renamed in** after verification, so a failed transfer leaves the
+  original file intact and leaves a partial with an obviously incomplete name.
 
-### Known limitations after this instalment
+### Agent
 
-- **Nothing is wired up.** The agent does not serve the file channel, the client has no
-  file commands, and there is no two-pane UI. `rc-file-transfer` is a tested library
-  with no callers yet.
-- **Downloads are not implemented** — only the upload direction, checksums and listing.
-- Copy, move, rename, delete, recycle-bin support, the transfer queue, conflict
-  resolution, disk-space validation, previews and archive handling are all still to do.
+- Serves the file channel: list, stat, checksum a range, create, rename, copy, delete,
+  upload and download.
+- **Two capabilities, checked per message against the live session.** Reading needs
+  `FileRead`; anything that changes the filesystem needs `FileWrite`. Which one a message
+  needs comes from an explicit list of read-only operations, so an operation added later
+  falls through to the write half — the safe side to default to.
+- Confinement comes from `features.file_transfer_roots`. An empty list means the whole
+  filesystem, which is the right default for a server the operator administers and is
+  stated rather than assumed. Roots that cannot be applied fail closed to *no* file
+  access.
+- Deletion never infers recursion, and removes a symlink as a link rather than following
+  it to a target that may be outside the roots.
+
+### Client
+
+- Two-pane file manager: this machine on the left, the server on the right, with
+  navigation, hidden-file toggle, conflict policy, new folder and delete.
+- **File bytes never enter the webview.** The backend reads and streams them. Passing a
+  gigabyte through a JavaScript string would be slow, would double its memory, and would
+  put file contents somewhere a rendering bug could reach.
+- Names are rendered as inert text after the schema strips control characters and
+  bidirectional overrides — without which `co<U+202E>gnp.exe` displays as `codexe.png`.
+- Deleting shows the full resolved path and says plainly that there is no recycle bin.
+
+### Security decisions made in Phase 5
+
+1. **Unmeasurable and unresolvable both fail closed.** A path that cannot be resolved is
+   refused; roots that cannot be applied permit nothing.
+2. **A failed checksum discards the file**, on both sides, rather than keeping it with a
+   warning.
+3. **An unrecognised conflict policy means "stop and ask".** Every other option
+   overwrites or renames something, so defaulting to one of those would make a UI bug
+   destructive.
+4. **The local pane is resolved too.** It is not "safe because it is local": paths still
+   arrive from a webview, and a NUL or a reserved name is refused before it reaches an
+   `open`.
+
+### Known limitations after Phase 5
+
+- **No folder upload or download.** Only individual files; a recursive transfer needs a
+  queue with progress and a cancel path.
+- **No transfer queue, pause, or per-transfer progress in the UI.** The library resumes
+  correctly and the agent offers a resume point, but nothing drives it from the
+  interface yet — a transfer is one blocking call that reports when it finishes.
+- **No recycle bin, previews, archive handling, drag-and-drop, or disk-space
+  validation.** A full disk is reported when the write fails rather than predicted.
+- Copying a directory is refused rather than partially performed.
 
 ## Remaining phases
 
@@ -430,23 +470,31 @@ agent, commands on the client, and a two-pane UI — does not.
 |---|---|---|
 | 3 | QUIC transport, mDNS discovery, connect/disconnect/reconnect lifecycle, connection-state UI | done |
 | 4 | Real PTY sessions, system metrics, dashboard, privilege separation | partly done |
-| 5 | File manager: browsing, resumable transfers, checksums, transfer queue | in progress |
-| 6 | Screen capture, encoding, streaming, input forwarding, monitor and quality controls | pending |
+| 5 | File manager: browsing, resumable transfers, checksums, transfer queue | mostly done |
+| 6 | Screen capture, encoding, streaming, input forwarding, monitor and quality controls | next |
 | 7 | Process and service management, power actions, confirmations, audit events | pending |
 | 8 | Coordination service signalling, NAT traversal, relay fallback, E2E verification | pending |
 | 9 | Installers, update architecture, full threat model, security review, documentation | pending |
 
-## Next: finish Phase 4, then Phase 5 — File manager
+## Next: Phase 6 — Remote desktop
 
-Remaining in Phase 4:
+1. Screen capture on both platforms, with a software encoder and a hardware path where
+   one is available.
+2. Video streaming over the video channel, with adaptive quality driven by measured
+   throughput rather than a fixed guess.
+3. Input forwarding, gated on `RemoteInput` and disabled the moment authorization is
+   lost.
+4. Monitor enumeration and switching, and the connection statistics the specification
+   asks for.
 
-1. The privileged-operation split: a separate privileged service on Windows reached over
-   authenticated local IPC, and a restricted sudoers/polkit path on Linux. Elevated
-   terminals depend on it, as does every later phase that changes host state.
-2. Pushed metrics on the metrics channel, for a dashboard that updates without polling.
+Still outstanding from earlier phases, and worth doing before or alongside Phase 6:
 
-Then Phase 5: browsing, resumable transfers with checksums, a transfer queue, conflict
-handling, and path-traversal and symlink-escape protection.
+- **The privileged-operation split** (Phase 4). A separate privileged service on Windows
+  reached over authenticated local IPC, and a restricted sudoers or polkit path on
+  Linux. Elevated terminals are refused until it exists, and Phase 7's service and power
+  controls depend on it.
+- **Pushed metrics** on the metrics channel, so a dashboard updates without polling.
+- **A transfer queue** with progress and pause/resume in the file manager UI.
 
 The security assumptions these must preserve are in
 [`docs/threat-model.md`](docs/threat-model.md). The one most easily broken by accident:

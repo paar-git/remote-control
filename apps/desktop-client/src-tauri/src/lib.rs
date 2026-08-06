@@ -15,6 +15,7 @@
 mod commands;
 mod connect_commands;
 mod connection;
+mod file_commands;
 mod session_commands;
 
 use std::sync::{Arc, Mutex};
@@ -342,6 +343,14 @@ pub fn run() {
             session_commands::send_terminal_input,
             session_commands::resize_terminal,
             session_commands::close_terminal,
+            file_commands::list_remote_directory,
+            file_commands::list_local_directory,
+            file_commands::default_local_directory,
+            file_commands::create_remote_directory,
+            file_commands::delete_remote_path,
+            file_commands::rename_remote_path,
+            file_commands::upload_file,
+            file_commands::download_file,
         ])
         .run(tauri::generate_context!());
 

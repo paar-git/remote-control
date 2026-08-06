@@ -25,6 +25,7 @@ rc-platform = { workspace = true }
 rc-security = { workspace = true }
 rc-storage = { workspace = true }
 rc-transport = { workspace = true }
+rc-file-transfer = { workspace = true }
 quinn = { workspace = true }
 base64 = { workspace = true }
 tauri = { version = "2", features = [] }

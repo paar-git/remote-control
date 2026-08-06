@@ -48,6 +48,7 @@ use rc_protocol::control::{
     Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResult,
     DeviceDescriptor, Disconnect, DisconnectReason,
 };
+use rc_protocol::files::{FileAgentMessage, FileClientMessage};
 use rc_protocol::terminal::{TerminalAgentMessage, TerminalClientMessage};
 use rc_protocol::{DeviceId, RequestId, SessionId, TerminalId};
 use rc_security::{DeviceIdentity, Fingerprint};
@@ -66,6 +67,28 @@ pub const DISCOVERY_TIMEOUT_SECS: u64 = 3;
 /// Generous, because the server resolves a shell and spawns a process. Bounded, because
 /// a server that never answers must not leave the UI waiting forever.
 pub const TERMINAL_OPEN_TIMEOUT_SECS: u64 = 20;
+
+/// How long to wait for the server to answer a file request.
+///
+/// Generous: hashing a large file before a download begins is real work on the server.
+/// Bounded: a server that never answers must not leave the UI waiting forever.
+pub const FILE_REPLY_TIMEOUT_SECS: u64 = 120;
+
+/// Most messages one file request may draw before the client gives up.
+///
+/// A download of a very large file legitimately produces many chunks; this is a ceiling
+/// on a server streaming without end, not a limit on ordinary transfers.
+const MAX_FILE_REPLIES: usize = 200_000;
+
+/// The file channel, shared by every file operation on one connection.
+///
+/// Both halves live behind one lock because file messages carry no request id: two
+/// overlapping requests would produce replies nothing could attribute. Serialising is
+/// what makes a reply belong to its request.
+struct FileChannel {
+    writer: ChannelWriter,
+    reader: ChannelReader,
+}
 
 /// Where terminal output and lifecycle messages are delivered.
 ///
@@ -350,6 +373,8 @@ pub struct ConnectionManager {
     active: Mutex<Option<ActiveConnection>>,
     /// The terminal channel, opened lazily on the first terminal.
     terminal: Mutex<Option<Arc<TerminalChannel>>>,
+    /// The file channel, opened lazily on the first file operation.
+    files: Mutex<Option<Arc<Mutex<FileChannel>>>>,
     /// Set by [`ConnectionManager::disconnect`] and cleared by an explicit connect.
     ///
     /// The single flag that separates "the link dropped" from "the operator ended it".
@@ -372,6 +397,7 @@ impl ConnectionManager {
             state: std::sync::Mutex::new(ConnectionState::Offline),
             active: Mutex::new(None),
             terminal: Mutex::new(None),
+            files: Mutex::new(None),
             intentional_disconnect: std::sync::atomic::AtomicBool::new(false),
             backoff: BackoffPolicy::default(),
         }
@@ -512,8 +538,9 @@ impl ConnectionManager {
         // endpoint underneath the connection that was just established.
         std::mem::forget(connector);
 
-        // Any terminal channel belonged to a previous connection.
+        // Any channels belonged to a previous connection.
         *self.terminal.lock().await = None;
+        *self.files.lock().await = None;
 
         *self.active.lock().await = Some(ActiveConnection {
             connection,
@@ -660,6 +687,97 @@ impl ConnectionManager {
         channel.writer.lock().await.send(message).await
     }
 
+    /// Send a file request and collect the agent's reply.
+    ///
+    /// The file channel is request/response for most operations but streams for
+    /// transfers, so the caller says how many messages to gather with `until`: it is
+    /// given each reply and returns whether that was the last one.
+    ///
+    /// # Errors
+    /// [`TransportError::Closed`] when nothing is connected, or the underlying transport
+    /// failure. A reply that never arrives fails on the deadline rather than hanging.
+    pub async fn file_request(
+        &self,
+        request: &FileClientMessage,
+        until: impl Fn(&FileAgentMessage) -> bool,
+    ) -> Result<Vec<FileAgentMessage>, TransportError> {
+        let channel = self.ensure_file_channel().await?;
+
+        // One request at a time on this channel. The messages carry a transfer id but
+        // not a request id, so two overlapping listings would be indistinguishable;
+        // serialising here is what keeps a reply attributable to its request.
+        let mut guard = channel.lock().await;
+
+        guard.writer.send(request).await?;
+
+        let mut replies = Vec::new();
+        loop {
+            let deadline = std::time::Duration::from_secs(FILE_REPLY_TIMEOUT_SECS);
+            let message = tokio::time::timeout(deadline, guard.reader.next_message())
+                .await
+                .map_err(|_| TransportError::HandshakeTimeout)?
+                .and_then(|message| {
+                    message.ok_or(TransportError::ConnectionLost {
+                        reason: "the server closed the file channel".to_owned(),
+                    })
+                })?;
+
+            let done = until(&message);
+            replies.push(message);
+
+            if done {
+                return Ok(replies);
+            }
+
+            // Bounded: a server streaming without end must not grow this without limit.
+            if replies.len() > MAX_FILE_REPLIES {
+                return Err(TransportError::Protocol(
+                    rc_protocol::ProtocolError::MalformedBody,
+                ));
+            }
+        }
+    }
+
+    /// Send a file message that draws no reply.
+    ///
+    /// Upload chunks are the only such message: the agent answers when the transfer is
+    /// ended, not per chunk, because a round trip per chunk would halve the throughput
+    /// of every transfer for no added safety — the checksum already covers the result.
+    ///
+    /// # Errors
+    /// [`TransportError::Closed`] when nothing is connected.
+    pub async fn send_file_message(
+        &self,
+        message: &FileClientMessage,
+    ) -> Result<(), TransportError> {
+        let channel = self.ensure_file_channel().await?;
+        let mut guard = channel.lock().await;
+        guard.writer.send(message).await
+    }
+
+    /// Open the file channel if it is not already open.
+    async fn ensure_file_channel(&self) -> Result<Arc<Mutex<FileChannel>>, TransportError> {
+        let mut slot = self.files.lock().await;
+
+        if let Some(existing) = slot.as_ref() {
+            return Ok(Arc::clone(existing));
+        }
+
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let (writer, reader) =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::FileTransfer)
+                .await?;
+        drop(guard);
+
+        let channel = Arc::new(Mutex::new(FileChannel { writer, reader }));
+        *slot = Some(Arc::clone(&channel));
+        Ok(channel)
+    }
+
     /// Open the terminal channel if it is not already open.
     async fn ensure_terminal_channel(
         &self,
@@ -699,9 +817,10 @@ impl ConnectionManager {
             .store(true, std::sync::atomic::Ordering::Release);
         self.set_state(ConnectionState::Disconnecting);
 
-        // The terminal channel belongs to the connection being closed; a later
-        // connection opens a fresh one rather than writing into a dead stream.
+        // Both channels belong to the connection being closed; a later connection opens
+        // fresh ones rather than writing into a dead stream.
         *self.terminal.lock().await = None;
+        *self.files.lock().await = None;
 
         if let Some(mut active) = self.active.lock().await.take() {
             // Best-effort: tell the agent why, so its audit trail records an intentional

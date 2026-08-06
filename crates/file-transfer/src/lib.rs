@@ -29,4 +29,7 @@ pub mod transfer;
 pub use error::{FileError, Result};
 pub use listing::{list_directory, stat};
 pub use path::{PathPolicy, validate_file_name};
-pub use transfer::{CHUNK_BYTES, TransferRegistry, Upload, checksum_file, checksum_range};
+pub use transfer::{
+    CHUNK_BYTES, Download, MAX_CONCURRENT_TRANSFERS, TransferRegistry, Upload, checksum_file,
+    checksum_range,
+};

@@ -140,6 +140,18 @@ pub mod actions {
     pub const TERMINAL_CLOSED: &str = "terminal.closed";
     /// A client subscribed to periodic system metrics.
     pub const METRICS_SUBSCRIBED: &str = "monitoring.subscribed";
+    /// A file was uploaded to the server.
+    pub const FILE_UPLOADED: &str = "file.uploaded";
+    /// A file was downloaded from the server.
+    pub const FILE_DOWNLOADED: &str = "file.downloaded";
+    /// A file or directory was deleted.
+    pub const FILE_DELETED: &str = "file.deleted";
+    /// A file or directory was renamed or moved.
+    pub const FILE_RENAMED: &str = "file.renamed";
+    /// A file was copied.
+    pub const FILE_COPIED: &str = "file.copied";
+    /// A directory was created.
+    pub const DIRECTORY_CREATED: &str = "file.directory_created";
 }
 
 /// Metadata keys that must never appear in an audit record.
