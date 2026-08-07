@@ -25,6 +25,13 @@
 //! `format_version` exists so a future change can migrate rather than guess. A file
 //! written by a newer build is refused outright ([`SecurityError::KeystoreVersionUnsupported`]).
 //!
+//! The certificate fields were added to this envelope while `format_version` stayed at
+//! `1`, so a file written before that change carries an `integrity` tag over the
+//! shorter field list. A tag matching that older layout is accepted for an envelope
+//! that carries no certificate, which is then upgraded in place; see
+//! [`KeystoreEnvelope::verify_integrity`]. Any future field must bump the version
+//! instead of relying on the same allowance.
+//!
 //! `integrity` is a BLAKE3 keyed hash over a canonical encoding of every other field.
 //! It detects truncation, bit-rot and partial writes. It is **not** a defence against
 //! an attacker who can write the file: the key is a fixed domain constant, not a
@@ -138,10 +145,24 @@ struct KeystoreEnvelope {
     integrity: String,
 }
 
+/// Which set of fields an integrity tag covers.
+///
+/// The certificate fields were added to the envelope without bumping
+/// `format_version`, so a file written by an older build carries a tag over the
+/// shorter list. Both layouts must be computable to tell "older file" apart from
+/// "damaged file".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegrityLayout {
+    /// Every field, including the certificate. What this build writes.
+    Current,
+    /// Stops before `certificate_der`. What builds predating stored certificates wrote.
+    PreCertificate,
+}
+
 impl KeystoreEnvelope {
     /// Canonical bytes covered by the integrity hash: every field except `integrity`,
     /// each length-prefixed so no two different envelopes can produce the same input.
-    fn integrity_input(&self) -> Vec<u8> {
+    fn integrity_input(&self, layout: IntegrityLayout) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut push = |bytes: &[u8]| {
             buf.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
@@ -158,26 +179,58 @@ impl KeystoreEnvelope {
         push(self.subject_name.as_bytes());
         push(self.identity_public_key.as_bytes());
         push(self.payload.as_bytes());
-        push(self.certificate_der.as_bytes());
-        push(&self.certificate_not_before_ms.to_be_bytes());
-        push(&self.certificate_not_after_ms.to_be_bytes());
+        if layout == IntegrityLayout::Current {
+            push(self.certificate_der.as_bytes());
+            push(&self.certificate_not_before_ms.to_be_bytes());
+            push(&self.certificate_not_after_ms.to_be_bytes());
+        }
         buf
     }
 
+    fn compute_integrity_with(&self, layout: IntegrityLayout) -> String {
+        hex::encode(blake3::keyed_hash(INTEGRITY_KEY, &self.integrity_input(layout)).as_bytes())
+    }
+
     fn compute_integrity(&self) -> String {
-        hex::encode(blake3::keyed_hash(INTEGRITY_KEY, &self.integrity_input()).as_bytes())
+        self.compute_integrity_with(IntegrityLayout::Current)
+    }
+
+    /// Whether this envelope carries no certificate at all — the shape a build
+    /// predating stored certificates wrote, and the only shape whose tag may have been
+    /// computed over the shorter field list.
+    fn predates_stored_certificates(&self) -> bool {
+        self.certificate_der.is_empty()
+            && self.certificate_not_before_ms == 0
+            && self.certificate_not_after_ms == 0
     }
 
     /// Verify the integrity tag in constant time.
+    ///
+    /// A tag over the pre-certificate layout is accepted *only* for an envelope that
+    /// carries no certificate; `load` then issues one and rewrites the file with a
+    /// current tag. Without this an older keystore is indistinguishable from a damaged
+    /// one, and the upgrade path below it is unreachable — the operator is told their
+    /// key was tampered with when nothing touched it.
     fn verify_integrity(&self) -> Result<()> {
         use subtle::ConstantTimeEq as _;
 
-        let expected = self.compute_integrity();
-        if expected.as_bytes().ct_eq(self.integrity.as_bytes()).into() {
-            Ok(())
-        } else {
-            Err(SecurityError::KeystoreCorrupt)
+        let matches = |layout| -> bool {
+            self.compute_integrity_with(layout)
+                .as_bytes()
+                .ct_eq(self.integrity.as_bytes())
+                .into()
+        };
+
+        if matches(IntegrityLayout::Current) {
+            return Ok(());
         }
+        if self.predates_stored_certificates() && matches(IntegrityLayout::PreCertificate) {
+            tracing::info!(
+                "keystore integrity matches the pre-certificate layout; upgrading the file"
+            );
+            return Ok(());
+        }
+        Err(SecurityError::KeystoreCorrupt)
     }
 }
 
@@ -726,6 +779,78 @@ mod tests {
         let mut envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
         envelope["subject_name"] = serde_json::Value::String("attacker".into());
         std::fs::write(keystore.path(), envelope.to_string()).unwrap();
+
+        assert!(matches!(
+            keystore.load(&clock),
+            Err(SecurityError::KeystoreCorrupt)
+        ));
+    }
+
+    /// Rewrite `keystore` as a build predating the stored certificate would have left
+    /// it: the three certificate fields absent from the JSON, and the integrity tag
+    /// computed over the shorter field list.
+    fn downgrade_to_pre_certificate(keystore: &Keystore) {
+        let text = std::fs::read_to_string(keystore.path()).unwrap();
+        let mut envelope: KeystoreEnvelope = serde_json::from_str(&text).unwrap();
+        envelope.certificate_der = String::new();
+        envelope.certificate_not_before_ms = 0;
+        envelope.certificate_not_after_ms = 0;
+        envelope.integrity = envelope.compute_integrity_with(IntegrityLayout::PreCertificate);
+
+        let mut value = serde_json::to_value(&envelope).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("certificate_der");
+        object.remove("certificate_not_before_ms");
+        object.remove("certificate_not_after_ms");
+        std::fs::write(keystore.path(), value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_keystore_written_before_certificates_were_stored_is_upgraded_not_rejected() {
+        // The certificate fields joined the integrity input without a format-version
+        // bump, so an older file's tag is computed over fewer fields. Recomputing it
+        // the current way and calling the difference "corrupt" would strand every
+        // existing installation on upgrade.
+        let dir = secure_dir();
+        let clock = TestClock::default();
+        let keystore = Keystore::in_data_dir(dir.path());
+        let original = keystore.load_or_create("host", &clock).unwrap();
+        downgrade_to_pre_certificate(&keystore);
+
+        let upgraded = keystore.load_or_create("host", &clock).unwrap();
+
+        // The identity must survive. Regenerating would change the device id and break
+        // every existing pairing, which is exactly what this path must not do.
+        assert_eq!(upgraded.public().device_id, original.public().device_id);
+        assert_eq!(
+            upgraded.public().identity_public_key,
+            original.public().identity_public_key
+        );
+
+        // The upgrade must stick: the next start must be an ordinary load, not another
+        // upgrade issuing yet another certificate.
+        assert!(keystore.has_stored_certificate());
+        let reloaded = keystore.load(&clock).unwrap();
+        assert_eq!(
+            reloaded.public().certificate_fingerprint,
+            upgraded.public().certificate_fingerprint
+        );
+    }
+
+    #[test]
+    fn accepting_the_legacy_layout_does_not_accept_a_damaged_legacy_file() {
+        // The compatibility path must stay a *layout* allowance, not a hole: a file
+        // with no certificate fields and a wrong tag is still corrupt.
+        let dir = secure_dir();
+        let clock = TestClock::default();
+        let keystore = Keystore::in_data_dir(dir.path());
+        keystore.load_or_create("host", &clock).unwrap();
+        downgrade_to_pre_certificate(&keystore);
+
+        let text = std::fs::read_to_string(keystore.path()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value["subject_name"] = serde_json::Value::String("attacker".into());
+        std::fs::write(keystore.path(), value.to_string()).unwrap();
 
         assert!(matches!(
             keystore.load(&clock),
