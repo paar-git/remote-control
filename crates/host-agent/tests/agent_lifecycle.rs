@@ -1011,3 +1011,200 @@ async fn a_path_traversal_is_refused_over_the_wire() {
 
     connection.close(0u32.into(), b"done");
 }
+
+/// A session with a metrics channel open and a subscription already accepted.
+///
+/// The control streams come back with it because dropping them ends the session, and
+/// with it the push the caller is about to measure.
+struct Subscribed {
+    connection: quinn::Connection,
+    control_writer: rc_transport::ChannelWriter,
+    control_reader: rc_transport::ChannelReader,
+    metrics_reader: rc_transport::ChannelReader,
+    /// Held open for the life of the session: dropping it closes the metrics channel.
+    _metrics_writer: rc_transport::ChannelWriter,
+    session_id: rc_protocol::SessionId,
+    /// The interval the agent actually accepted, after clamping.
+    interval_ms: u32,
+}
+
+/// Connect, open the metrics channel, and subscribe.
+///
+/// `requested_ms` is deliberately allowed to be below the floor so callers can assert
+/// that the answer carries the clamped figure rather than what was asked for.
+async fn subscribe_to_metrics(
+    agent: &RunningAgent,
+    identity: &DeviceIdentity,
+    paired: &rc_security::pairing::PairedAgent,
+    requested_ms: u32,
+) -> Subscribed {
+    let (connection, ack, mut control_writer, mut control_reader) =
+        connect(agent, identity, paired).await.unwrap();
+
+    // Opened before subscribing here, but the agent creates the subscription handle
+    // before either exists, so the other order works too.
+    let (metrics_writer, metrics_reader) =
+        rc_transport::open_channel(&connection, rc_protocol::Channel::Metrics)
+            .await
+            .unwrap();
+
+    let request_id = rc_protocol::RequestId::generate();
+    control_writer
+        .send(&rc_protocol::control::ControlRequest {
+            request_id,
+            session_id: ack.session_id,
+            sent_at_ms: rc_protocol::now_ms(),
+            nonce: [7u8; 16],
+            payload: ControlRequestPayload::SubscribeMetrics {
+                interval_ms: requested_ms,
+            },
+        })
+        .await
+        .unwrap();
+
+    let response: rc_protocol::control::ControlResponse =
+        control_reader.next_message().await.unwrap().unwrap();
+    assert_eq!(response.request_id, request_id);
+
+    let interval_ms = match response.result {
+        ControlResult::Ok(rc_protocol::control::ControlResponsePayload::MetricsSubscribed {
+            interval_ms,
+        }) => interval_ms,
+        other => panic!("expected a subscription, got {other:?}"),
+    };
+
+    Subscribed {
+        connection,
+        control_writer,
+        control_reader,
+        metrics_reader,
+        _metrics_writer: metrics_writer,
+        session_id: ack.session_id,
+        interval_ms,
+    }
+}
+
+#[tokio::test]
+async fn a_subscription_pushes_real_readings_without_being_polled() {
+    // The whole point of pushed metrics, across two processes: the client asks once on
+    // the control channel and readings arrive on the metrics channel unprompted.
+    use rc_protocol::system::MetricsAgentMessage;
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    // Below the floor on purpose: a client asking for 1 ms would cost a sample a
+    // thousand times a second on the machine it is supposed to be observing.
+    let mut session = subscribe_to_metrics(&agent, &identity, &paired, 1).await;
+    assert_eq!(
+        session.interval_ms,
+        rc_monitoring::MIN_SAMPLE_INTERVAL_MS,
+        "an interval below the floor must be clamped, not honoured"
+    );
+
+    // Two ticks, so this proves a *stream* rather than a single reply that happened to
+    // arrive on another channel.
+    let mut ticks = Vec::new();
+    let pushed = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Ok(Some(message)) = session
+            .metrics_reader
+            .next_message::<MetricsAgentMessage>()
+            .await
+        {
+            match message {
+                MetricsAgentMessage::Update(update) => {
+                    ticks.push(*update);
+                    if ticks.len() == 2 {
+                        return true;
+                    }
+                }
+                other => panic!("the stream must not stop while subscribed: {other:?}"),
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(pushed, "the agent must push without being polled");
+
+    // Real readings, not a plausible-looking empty answer.
+    for tick in &ticks {
+        assert!(tick.memory.total_bytes > 0, "a running host has memory");
+        assert!(
+            !tick.cpu.per_core_percent.is_empty(),
+            "a running host has cores"
+        );
+        assert!(tick.captured_at_ms > 0);
+    }
+
+    let gap = ticks[1].captured_at_ms - ticks[0].captured_at_ms;
+    assert!(gap >= 0, "ticks must advance in time");
+    assert!(
+        gap >= i64::from(session.interval_ms) / 2,
+        "ticks arrived {gap} ms apart, faster than the {} ms the agent accepted",
+        session.interval_ms
+    );
+
+    session.connection.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn an_unsubscribe_stops_the_stream_and_says_so() {
+    // A dashboard that stops updating without being told cannot distinguish an idle
+    // server from one that stopped answering, and would keep showing its last reading
+    // as though it were current.
+    use rc_protocol::system::{MetricsAgentMessage, MetricsStopReason};
+
+    let agent = RunningAgent::start().await;
+    let identity = client_identity("client");
+    let paired = pair(&agent, &identity).await;
+
+    let mut session = subscribe_to_metrics(&agent, &identity, &paired, 200).await;
+
+    let request_id = rc_protocol::RequestId::generate();
+    session
+        .control_writer
+        .send(&rc_protocol::control::ControlRequest {
+            request_id,
+            session_id: session.session_id,
+            sent_at_ms: rc_protocol::now_ms(),
+            nonce: [8u8; 16],
+            payload: ControlRequestPayload::UnsubscribeMetrics,
+        })
+        .await
+        .unwrap();
+
+    let response: rc_protocol::control::ControlResponse = session
+        .control_reader
+        .next_message()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request_id, response.request_id);
+
+    let told = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Ok(Some(message)) = session
+            .metrics_reader
+            .next_message::<MetricsAgentMessage>()
+            .await
+        {
+            // Ticks already in flight when the unsubscribe arrived are not a failure.
+            if let MetricsAgentMessage::Stopped { reason } = message {
+                assert_eq!(reason, MetricsStopReason::Unsubscribed);
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(
+        told,
+        "an unsubscribe must be acknowledged on the metrics channel, not answered with silence"
+    );
+
+    session.connection.close(0u32.into(), b"done");
+}

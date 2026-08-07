@@ -76,6 +76,12 @@ pub struct AgentServer {
     /// measured across an interval, so several collectors would each pay for their own
     /// process enumeration and none would agree with the others.
     metrics: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
+    /// Talks to the privileged helper, when one is configured and reachable.
+    ///
+    /// `None` means no helper is installed. Operations needing Administrator or root
+    /// are then refused with a message saying so, rather than failing with an obscure
+    /// operating-system error the operator cannot act on.
+    privileged: Option<Arc<rc_privileged::PrivilegedClient>>,
     /// Set once the QUIC listener is bound, cleared when it stops.
     ///
     /// Read by the health endpoint, which must be able to distinguish "the process is
@@ -105,8 +111,37 @@ impl AgentServer {
             metrics: Arc::new(tokio::sync::Mutex::new(
                 rc_monitoring::MetricsCollector::new(),
             )),
+            privileged: None,
             listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Attach a privileged helper client.
+    ///
+    /// Separate from `new` because connecting involves reading a token file, which is
+    /// I/O the constructor should not be doing — and because an agent with no helper is
+    /// a supported configuration rather than a failure.
+    #[must_use]
+    pub fn with_privileged_helper(
+        mut self,
+        client: Option<rc_privileged::PrivilegedClient>,
+    ) -> Self {
+        self.privileged = client.map(Arc::new);
+        self
+    }
+
+    /// The privileged helper, if one is attached.
+    ///
+    /// Returning `None` is a supported state, not an error: the caller refuses the
+    /// operation with a message naming the cause.
+    // Reached only from tests until phase 7 adds the service and power handlers. The
+    // allow is scoped and deliberate: the accessor is exercised by
+    // `the_helper_is_absent_by_default`, and deleting it to satisfy dead-code analysis
+    // would mean writing it again in a fortnight without that coverage.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn privileged(&self) -> Option<Arc<rc_privileged::PrivilegedClient>> {
+        self.privileged.as_ref().map(Arc::clone)
     }
 
     /// The live session registry, shared with the health endpoint.
@@ -139,19 +174,25 @@ impl AgentServer {
 
     /// What this build of this agent, with this configuration, can actually do.
     ///
-    /// Derived from the feature switches rather than hard-coded, so an operator running
-    /// a monitoring-only agent has that reflected in what the client offers to do.
+    /// Derived from the feature switches *and* from what is actually installed, so an
+    /// operator running a monitoring-only agent, or one with no privileged helper, has
+    /// that reflected in what the client offers to do. A capability advertised but
+    /// unavailable is a button that fails when pressed.
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
         let features = &self.config.features;
+        // Service and power control go through the privileged helper. Without one the
+        // agent genuinely cannot perform them, whatever the configuration says.
+        let privileged_available = self.privileged.is_some();
+
         Capabilities {
             remote_desktop: features.remote_desktop,
             terminal: features.terminal,
             file_transfer: features.file_transfer,
             monitoring: true,
             process_management: features.process_management,
-            service_management: features.service_management,
-            power_control: features.power_control,
+            service_management: features.service_management && privileged_available,
+            power_control: features.power_control && privileged_available,
             clipboard: features.clipboard_sync,
             wake_on_lan: false,
             display_count: 0,
@@ -421,14 +462,31 @@ impl AgentServer {
         // request rather than assumed for the life of the session.
         let authorization = AuthorizationContext::new(peer.role);
 
+        // A metrics subscription is asked for on the control channel and delivered on
+        // the metrics channel, so the two need a handle in common. Created here, before
+        // either exists, so neither ordering loses the subscription.
+        let (subscription, subscribed) = tokio::sync::watch::channel(None);
+
         // Terminals live on their own channel. Serving it in a task lets a shell
         // produce output while the control channel is idle, and dropping the task's
         // registry when the connection ends is what stops shells outliving it.
-        let terminals =
-            self.spawn_channel_server(connection, authorization.clone(), device_id, session_id);
+        let terminals = self.spawn_channel_server(
+            connection,
+            authorization.clone(),
+            device_id,
+            session_id,
+            subscribed,
+        );
 
         let reason = self
-            .run_session(connection, reader, writer, &slot, &authorization)
+            .run_session(
+                connection,
+                reader,
+                writer,
+                &slot,
+                &authorization,
+                &subscription,
+            )
             .await;
 
         terminals.abort();
@@ -460,6 +518,7 @@ impl AgentServer {
         writer: &mut ChannelWriter,
         slot: &SessionSlot,
         authorization: &AuthorizationContext,
+        subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> DisconnectReason {
         let idle_timeout = self.config.session.idle_timeout_secs;
 
@@ -489,7 +548,9 @@ impl AgentServer {
 
             let response = ControlResponse {
                 request_id: request.request_id,
-                result: self.answer(&request.payload, authorization).await,
+                result: self
+                    .answer(&request.payload, authorization, subscription)
+                    .await,
             };
 
             if let Err(err) = writer.send(&response).await {
@@ -508,6 +569,7 @@ impl AgentServer {
         &self,
         payload: &ControlRequestPayload,
         authorization: &AuthorizationContext,
+        subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> ControlResult {
         match payload {
             ControlRequestPayload::Ping { token } => {
@@ -555,14 +617,31 @@ impl AgentServer {
                     return denied("view this server's status");
                 }
                 // Clamped rather than honoured: a client asking for 10 ms would cost a
-                // full process enumeration a hundred times a second on the machine it is
-                // supposed to be observing.
-                ControlResult::Ok(ControlResponsePayload::MetricsSubscribed {
-                    interval_ms: rc_monitoring::MetricsCollector::clamp_interval(*interval_ms),
-                })
+                // sample a hundred times a second on the machine it is supposed to be
+                // observing.
+                let interval_ms = rc_monitoring::MetricsCollector::clamp_interval(*interval_ms);
+
+                // The metrics-channel task is the receiver. A send failing means that
+                // task is gone, which for a live session means the connection is on its
+                // way out — reported rather than answered with a success the client
+                // would wait on forever.
+                if subscription.send(Some(interval_ms)).is_err() {
+                    return ControlResult::Err {
+                        code: rc_protocol::control::ErrorCode::Internal,
+                        message: "this session can no longer deliver metrics".to_owned(),
+                    };
+                }
+
+                // The clamped figure, not the requested one, so a client displays the
+                // rate it is actually getting.
+                ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms })
             }
 
             ControlRequestPayload::UnsubscribeMetrics => {
+                // Unsubscribing when nothing was subscribed is not an error: a client
+                // tidying up on the way out should not have to remember whether it ever
+                // started.
+                let _ = subscription.send(None);
                 ControlResult::Ok(ControlResponsePayload::Empty)
             }
 
@@ -637,6 +716,7 @@ impl AgentServer {
         authorization: AuthorizationContext,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
+        subscribed: tokio::sync::watch::Receiver<Option<u32>>,
     ) -> tokio::task::JoinHandle<()> {
         let server = Arc::clone(self);
         let connection = connection.clone();
@@ -682,6 +762,16 @@ impl AgentServer {
                         tokio::spawn(async move {
                             service.run(&mut reader).await;
                         });
+                    }
+                    rc_protocol::Channel::Metrics => {
+                        let service = crate::metrics_service::MetricsService::new(
+                            writer,
+                            authorization.clone(),
+                            Arc::clone(&server.metrics),
+                            Arc::clone(&server.clock),
+                            subscribed.clone(),
+                        );
+                        tokio::spawn(service.run());
                     }
                     other => {
                         // A channel this build does not serve is closed rather than left
@@ -1001,6 +1091,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_helper_is_absent_by_default() {
+        // An agent with no helper is a supported configuration, not a failure.
+        let server = server().await;
+        assert!(server.privileged().is_none());
+    }
+
+    #[tokio::test]
+    async fn power_and_service_control_are_not_advertised_without_a_helper() {
+        // A capability advertised but unavailable is a button that fails when pressed.
+        let server = server().await;
+        let capabilities = server.capabilities();
+
+        assert!(
+            !capabilities.power_control,
+            "no helper is attached, so the agent cannot perform power actions"
+        );
+        assert!(!capabilities.service_management);
+        // Everything that does not need the helper is unaffected.
+        assert!(capabilities.monitoring);
+        assert!(capabilities.terminal);
+    }
+
+    #[tokio::test]
     async fn capabilities_follow_the_feature_switches() {
         // An operator who turned a feature off must not have the client offer it.
         let identity = Arc::new(DeviceIdentity::generate("test-agent", &SystemClock).unwrap());
@@ -1028,11 +1141,29 @@ mod tests {
         AuthorizationContext::new(rc_security::Role::Owner)
     }
 
+    /// A session's metrics-subscription handle.
+    ///
+    /// The receiver is returned rather than dropped because a `watch` sender with no
+    /// receivers fails to send — which is exactly how a real session reports that its
+    /// metrics task has gone, so a test that dropped it would be testing that path
+    /// instead of the one it named.
+    fn subscription() -> (
+        tokio::sync::watch::Sender<Option<u32>>,
+        tokio::sync::watch::Receiver<Option<u32>>,
+    ) {
+        tokio::sync::watch::channel(None)
+    }
+
     #[tokio::test]
     async fn a_ping_is_answered_with_the_token_it_carried() {
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::Ping { token: 42 }, &owner())
+            .answer(
+                &ControlRequestPayload::Ping { token: 42 },
+                &owner(),
+                &subscription,
+            )
             .await;
 
         match result {
@@ -1046,8 +1177,13 @@ mod tests {
     #[tokio::test]
     async fn a_snapshot_carries_values_the_agent_actually_measured() {
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::SystemSnapshot, &owner())
+            .answer(
+                &ControlRequestPayload::SystemSnapshot,
+                &owner(),
+                &subscription,
+            )
             .await;
 
         match result {
@@ -1068,8 +1204,9 @@ mod tests {
         // Sending the CPU model and kernel version on every tick would make them look
         // like live readings when they are not.
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::HostInfo, &owner())
+            .answer(&ControlRequestPayload::HostInfo, &owner(), &subscription)
             .await;
 
         match result {
@@ -1090,8 +1227,13 @@ mod tests {
         let server = server().await;
         let view_only = AuthorizationContext::new(rc_security::Role::ViewOnly);
 
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::SystemSnapshot, &view_only)
+            .answer(
+                &ControlRequestPayload::SystemSnapshot,
+                &view_only,
+                &subscription,
+            )
             .await;
         assert!(matches!(
             result,
@@ -1106,8 +1248,13 @@ mod tests {
         let server = server().await;
         let revoked = AuthorizationContext::revoked(rc_security::Role::Owner);
 
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::SystemSnapshot, &revoked)
+            .answer(
+                &ControlRequestPayload::SystemSnapshot,
+                &revoked,
+                &subscription,
+            )
             .await;
         assert!(
             matches!(
@@ -1126,10 +1273,12 @@ mod tests {
         // A client asking for 10 ms would cost a full process enumeration a hundred
         // times a second on the machine it is supposed to be observing.
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
             .answer(
                 &ControlRequestPayload::SubscribeMetrics { interval_ms: 1 },
                 &owner(),
+                &subscription,
             )
             .await;
 
@@ -1142,10 +1291,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribing_arms_the_handle_the_metrics_channel_reads() {
+        // The subscription is asked for on the control channel and delivered on the
+        // metrics channel. If the answer did not reach the handle, a client would be
+        // told it had subscribed and then receive nothing at all.
+        let server = server().await;
+        let (subscription, receiver) = subscription();
+
+        assert_eq!(*receiver.borrow(), None, "nothing is pushed unasked");
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms: 2_000 })
+        ));
+        assert_eq!(
+            *receiver.borrow(),
+            Some(2_000),
+            "the metrics channel must see the interval the client was promised"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribing_disarms_the_handle() {
+        let server = server().await;
+        let (subscription, receiver) = subscription();
+
+        server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
+                &owner(),
+                &subscription,
+            )
+            .await;
+        server
+            .answer(
+                &ControlRequestPayload::UnsubscribeMetrics,
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert_eq!(
+            *receiver.borrow(),
+            None,
+            "a client that asked to stop must actually stop being sampled"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribing_without_a_subscription_is_not_an_error() {
+        // A client tidying up on the way out should not have to remember whether it
+        // ever started.
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::UnsubscribeMetrics,
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            ControlResult::Ok(ControlResponsePayload::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_revoked_device_cannot_subscribe_to_metrics() {
+        // Denial must leave the handle untouched: a refused subscription that still
+        // armed the pusher would stream readings to a device that was just refused.
+        let server = server().await;
+        let (subscription, receiver) = subscription();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
+                &AuthorizationContext::revoked(rc_security::Role::Owner),
+                &subscription,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            ControlResult::Err {
+                code: rc_protocol::control::ErrorCode::PermissionDenied,
+                ..
+            }
+        ));
+        assert_eq!(
+            *receiver.borrow(),
+            None,
+            "a refused subscription must not arm the pusher"
+        );
+    }
+
+    #[tokio::test]
     async fn a_request_this_build_does_not_implement_is_refused_not_faked() {
         // Returning an empty answer would put figures on the operator's dashboard that
         // the agent never measured.
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
             .answer(
                 &ControlRequestPayload::Disconnect(rc_protocol::control::Disconnect {
@@ -1153,6 +1409,7 @@ mod tests {
                     detail: None,
                 }),
                 &owner(),
+                &subscription,
             )
             .await;
 

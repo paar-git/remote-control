@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-06 · **Phases 1–3 complete; phases 4 and 5 mostly complete.**
+Last updated: 2026-08-07 · **Phases 1–4 complete; phase 5 mostly complete.**
 
 This document is the honest record of what runs today. Anything not listed as done is
 not built — there are no mock implementations or placeholder handlers anywhere in the
@@ -14,22 +14,28 @@ All figures below were produced by running the commands, not estimated.
 |---|---|---|
 | Rust format | `cargo fmt --all -- --check` | clean |
 | Rust lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (pedantic enabled) |
-| Rust tests | `cargo test --workspace` | **666 passed**, 0 failed |
+| Rust tests | `cargo test --workspace` | **727 passed**, 0 failed |
 | TS typecheck | `pnpm -r typecheck` | clean (strict, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
 | TS lint | `pnpm lint` | clean |
 | TS format | `pnpm format:check` | clean |
-| TS tests | `pnpm -r test:run` | **101 passed**, 0 failed |
+| TS tests | `pnpm -r test:run` | **107 passed**, 0 failed |
 | Frontend build | `pnpm --filter @rc/desktop-client build` | succeeds |
 | Full gate | `scripts/verify.ps1` | `All checks passed.` |
 
-Rust test distribution: security 185, transport 61 + 15 end-to-end, protocol 62,
-host-agent 66 + 10 two-process integration, storage 49, desktop-client backend 45,
-terminal 26, monitoring 24, platform 23, coordination-server 6.
-TypeScript: shared-types 51, desktop-client 34.
+Rust test distribution: security 185, transport 61 + 15 end-to-end, file-transfer 72,
+protocol 66, host-agent 89 + 16 two-process integration, storage 49,
+desktop-client backend 50, privileged 31 + 11 cross-process, monitoring 27, terminal 26,
+platform 23, coordination-server 6.
+TypeScript: shared-types 51, desktop-client 56.
 
-The 8 integration tests spawn the **real `rc-agent` binary** as a separate process and
-drive a real client against it over QUIC. They are what makes the claims below about
-pairing, connecting and restarting statements of fact rather than of intent.
+The 16 agent integration tests spawn the **real `rc-agent` binary** as a separate process
+and drive a real client against it over QUIC. They are what makes the claims below about
+pairing, connecting, restarting, terminals, file transfers and pushed metrics statements
+of fact rather than of intent.
+
+The 11 privileged tests run a **real helper on a real loopback socket**. Every test that
+asks for a refusal sends raw bytes rather than going through the client, precisely so
+what is measured is the helper's own enforcement and not the client's convenience checks.
 
 ## Phase 1 — Foundation ✅
 
@@ -308,10 +314,10 @@ cannot present a fingerprint peers pin while holding a different key.
 - The `#[cfg(unix)]` permission tests still did not execute, since this workspace was
   verified on Windows.
 
-## Phase 4 — Terminal and monitoring ⚠ partly complete
+## Phase 4 — Terminal and monitoring ✅
 
-Terminals and metrics work end to end. The privileged-operation split does not exist
-yet, so this phase is **not** finished; see the limitations below.
+Terminals and metrics work end to end, metrics are pushed rather than polled, and the
+privileged-operation split exists as a separate elevated process.
 
 ### `rc-monitoring`
 
@@ -351,6 +357,56 @@ yet, so this phase is **not** finished; see the limitations below.
 - A Monitoring screen with live readings, sparklines on a fixed 0–100 scale, and sections
   that are absent rather than zeroed when the server could not measure them.
 
+### `rc-privileged` — the privilege split
+
+A separate elevated process. The agent runs unelevated and *asks*; the helper runs as
+`LocalSystem` or root and *decides*. Compromising the network-facing agent yields the
+ability to request operations from a closed list, not to run arbitrary code as root.
+
+- **The helper re-validates every request itself**, never trusting that its caller
+  already did. The agent checks too, so a mistake is reported immediately without a round
+  trip, but that check is a convenience; the helper's is the control. Every refusal test
+  sends raw bytes past the client to prove it.
+- **An operation crosses the wire, never a command.** There is no field for a program, an
+  argument vector or a shell string, so there is nothing for an injection to inject into.
+  Resolution to `(program, argv)` happens inside the helper, from constants.
+- **Authorization is a file.** A 32-byte token, regenerated at every start and written
+  with the same atomic mode-0600 write the keystore uses. Being able to read it *is* the
+  authorization — the same model as the agent's own local control endpoint.
+- **Loopback only, and the address is not configurable**, so no configuration mistake can
+  put a privileged endpoint on the network. Bounded request size, request deadline and
+  command deadline.
+- **A helper is optional.** `network.privileged_port = 0` says none is installed. Without
+  a reachable, elevated helper the agent does not advertise `service_management` or
+  `power_control` at all, so the client never offers a button that would fail when
+  pressed. The state is probed with a `Ping` at startup and logged once.
+
+Documented in [`docs/privileged-operations.md`](docs/privileged-operations.md).
+
+### Pushed metrics
+
+`SubscribeMetrics` arrives on the control channel; readings go out on the metrics
+channel. The two are joined by a per-session `watch` handle created before either exists,
+so a client that subscribes before opening the channel does not lose the subscription.
+
+- **`MetricsUpdate` is deliberately lighter than `SystemSnapshot`**: only what changes
+  between samples. No process list, no CPU model, no core counts. A tick therefore skips
+  the process walk, which is the expensive part of sampling, and static facts are not
+  resent every two seconds looking like live readings.
+- **Authorization is re-checked every tick**, not captured at subscribe time. A dashboard
+  is the longest-lived thing a session holds; capturing the decision once would let a
+  device revoked at nine o'clock keep receiving readings all evening.
+- **Missed ticks are skipped, not queued.** A client that stops reading receives a current
+  sample when it resumes, never a burst of stale ones.
+- **A stream that ends says why.** `Stopped { reason }` rather than going quiet, because a
+  dashboard that silently stops updating cannot be told apart from an idle server and
+  would keep presenting its last reading as current.
+- **The client falls back to polling** if the subscription is refused — an older agent, or
+  a session that may not watch — so a downgraded pair still shows live figures. The badge
+  states which is in use and the interval the server actually accepted after clamping.
+- Idle when nobody is subscribed: an open metrics channel with no subscription costs a
+  parked task and no sampling at all.
+
 ### Security decisions made in Phase 4
 
 1. **Unmeasurable is absent, never zero.** An operator cannot distinguish a cold machine
@@ -363,16 +419,30 @@ yet, so this phase is **not** finished; see the limitations below.
    the person pressing it meant.
 4. **Elevation is refused, not downgraded.** Opening an unprivileged shell and labelling
    it elevated would be worse than saying no.
+5. **The helper is the decision-maker, and the agent's matching check is a convenience.**
+   If the client half were deleted entirely, nothing the helper permits would change.
+   This is the assumption `docs/threat-model.md` names as the one most easily broken by
+   accident, so it is pinned by tests that bypass the client deliberately.
+6. **A capability that cannot be performed is not advertised.** Service and power control
+   disappear from the agent's capabilities when no helper is reachable, rather than being
+   offered and failing.
+7. **A refusal from the helper carries a message.** An empty one would be a silent failure
+   wearing an error's clothes — the operator sees only the message.
+8. **A metrics stream that ends announces itself.** Silence is indistinguishable from an
+   idle server, and a frozen dashboard that still looks live is the worse failure.
 
 ### Known limitations after Phase 4
 
-- **The privileged-operation split is not built.** There is no separate privileged
-  service on Windows and no sudoers/polkit path on Linux, so elevated terminals are
-  refused with a specific error. This is the largest remaining piece of Phase 4.
-- **Metrics are polled by the screen showing them**, not pushed on a subscription. The
-  `SubscribeMetrics` request is accepted and clamped but no periodic push exists yet, so
-  a dashboard costs nothing while nobody is looking at it and updates only while someone
-  is.
+- **Elevated terminals are still refused.** The helper performs power and service
+  operations; it does not yet spawn an elevated PTY, which needs a token-duplication path
+  rather than a command allowlist. Refused with a specific error rather than downgraded.
+- **The agent does not yet audit privileged requests.** The helper logs every one; the
+  agent's own audit trail gains the corresponding entries with the Phase 7 handlers that
+  call it.
+- **No installer packaging for the helper.** It runs correctly when started by hand or by
+  a service definition, but neither the Windows service registration nor the systemd unit
+  is generated yet, and the data-directory ACLs it depends on are still the installer's
+  job. Phase 9.
 - **A terminal does not survive a reconnect.** Keeping a PTY alive with nobody watching
   needs an explicit lifetime and a way for the operator to see and end orphaned sessions
   before it is safe to offer.
@@ -469,7 +539,7 @@ agent. Folder transfers, a transfer queue and previews are not built; see below.
 | Phase | Scope | Status |
 |---|---|---|
 | 3 | QUIC transport, mDNS discovery, connect/disconnect/reconnect lifecycle, connection-state UI | done |
-| 4 | Real PTY sessions, system metrics, dashboard, privilege separation | partly done |
+| 4 | Real PTY sessions, system metrics, dashboard, privilege separation | done |
 | 5 | File manager: browsing, resumable transfers, checksums, transfer queue | mostly done |
 | 6 | Screen capture, encoding, streaming, input forwarding, monitor and quality controls | next |
 | 7 | Process and service management, power actions, confirmations, audit events | pending |
@@ -489,14 +559,17 @@ agent. Folder transfers, a transfer queue and previews are not built; see below.
 
 Still outstanding from earlier phases, and worth doing before or alongside Phase 6:
 
-- **The privileged-operation split** (Phase 4). A separate privileged service on Windows
-  reached over authenticated local IPC, and a restricted sudoers or polkit path on
-  Linux. Elevated terminals are refused until it exists, and Phase 7's service and power
-  controls depend on it.
-- **Pushed metrics** on the metrics channel, so a dashboard updates without polling.
-- **A transfer queue** with progress and pause/resume in the file manager UI.
+- **A transfer queue** with progress and pause/resume in the file manager UI, plus folder
+  transfers (Phase 5).
+- **Phase 7's service and power handlers**, which are now unblocked: the privileged helper
+  is built, reachable and proven, but nothing on the control channel calls it yet.
+- **A background reconnect supervisor** (Phase 3), so a dropped connection starts the
+  retry loop without the UI driving it.
 
 The security assumptions these must preserve are in
-[`docs/threat-model.md`](docs/threat-model.md). The one most easily broken by accident:
-the privileged helper must validate every request against the allowlist *itself* rather
-than trusting that its caller already did.
+[`docs/threat-model.md`](docs/threat-model.md). The one most easily broken by accident is
+now built and pinned by tests: the privileged helper validates every request against the
+allowlist *itself* rather than trusting that its caller already did. Phase 7 will add the
+handlers that call it, and the temptation there will be to let the agent's check stand in
+for the helper's. It must not — see
+[`docs/privileged-operations.md`](docs/privileged-operations.md).

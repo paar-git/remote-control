@@ -3606,6 +3606,7 @@ dependencies = [
  "rc-file-transfer",
  "rc-monitoring",
  "rc-platform",
+ "rc-privileged",
  "rc-protocol",
  "rc-security",
  "rc-storage",
@@ -3651,6 +3652,26 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rc-privileged"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "rc-platform",
+ "rc-protocol",
+ "rc-security",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

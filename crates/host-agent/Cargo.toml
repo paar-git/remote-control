@@ -21,6 +21,7 @@ rc-transport = { workspace = true }
 rc-terminal = { workspace = true }
 rc-monitoring = { workspace = true }
 rc-file-transfer = { workspace = true }
+rc-privileged = { workspace = true }
 sysinfo = { workspace = true }
 uuid = { workspace = true }
 quinn = { workspace = true }

@@ -45,10 +45,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rc_protocol::control::{
-    Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResult,
-    DeviceDescriptor, Disconnect, DisconnectReason,
+    Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
+    ControlResult, DeviceDescriptor, Disconnect, DisconnectReason,
 };
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
+use rc_protocol::system::MetricsAgentMessage;
 use rc_protocol::terminal::{TerminalAgentMessage, TerminalClientMessage};
 use rc_protocol::{DeviceId, RequestId, SessionId, TerminalId};
 use rc_security::{DeviceIdentity, Fingerprint};
@@ -95,6 +96,26 @@ struct FileChannel {
 /// A callback rather than a channel so the caller decides how to deliver them — the
 /// desktop client emits Tauri events; a test collects into a vector.
 pub type TerminalSink = Arc<dyn Fn(TerminalAgentMessage) + Send + Sync>;
+
+/// Where pushed metrics are delivered.
+///
+/// A callback for the same reason [`TerminalSink`] is one: the desktop client emits a
+/// Tauri event, and a test collects into a vector.
+pub type MetricsSink = Arc<dyn Fn(MetricsAgentMessage) + Send + Sync>;
+
+/// Forward pushed metrics to `sink` until the channel closes.
+///
+/// The metrics channel carries only agent-to-client pushes — a subscription is started
+/// and stopped on the *control* channel — so there is nothing to write here and no
+/// request to correlate a reply with.
+fn spawn_metrics_reader(mut reader: ChannelReader, sink: MetricsSink) {
+    tokio::spawn(async move {
+        while let Ok(Some(message)) = reader.next_message::<MetricsAgentMessage>().await {
+            sink(message);
+        }
+        tracing::debug!("the metrics channel closed");
+    });
+}
 
 /// The terminal channel, shared by every terminal on one connection.
 struct TerminalChannel {
@@ -375,6 +396,14 @@ pub struct ConnectionManager {
     terminal: Mutex<Option<Arc<TerminalChannel>>>,
     /// The file channel, opened lazily on the first file operation.
     files: Mutex<Option<Arc<Mutex<FileChannel>>>>,
+    /// The metrics channel, opened lazily on the first subscription.
+    ///
+    /// Holds the send half even though the client never writes on it: the metrics
+    /// channel carries only pushes, and dropping the writer would close the stream the
+    /// agent is pushing on. Kept for the life of the connection — the agent samples
+    /// nothing until a subscription exists, so an open channel with nobody watching
+    /// costs a parked task and no load on the server.
+    metrics: Mutex<Option<ChannelWriter>>,
     /// Set by [`ConnectionManager::disconnect`] and cleared by an explicit connect.
     ///
     /// The single flag that separates "the link dropped" from "the operator ended it".
@@ -398,6 +427,7 @@ impl ConnectionManager {
             active: Mutex::new(None),
             terminal: Mutex::new(None),
             files: Mutex::new(None),
+            metrics: Mutex::new(None),
             intentional_disconnect: std::sync::atomic::AtomicBool::new(false),
             backoff: BackoffPolicy::default(),
         }
@@ -616,10 +646,9 @@ impl ConnectionManager {
         let result = self.request(ControlRequestPayload::Ping { token }).await?;
 
         match result {
-            ControlResult::Ok(rc_protocol::control::ControlResponsePayload::Pong {
-                token: echoed,
-                ..
-            }) if echoed == token => {
+            ControlResult::Ok(ControlResponsePayload::Pong { token: echoed, .. })
+                if echoed == token =>
+            {
                 let elapsed = started.elapsed().as_millis();
                 Ok(u64::try_from(elapsed).unwrap_or(u64::MAX))
             }
@@ -778,6 +807,75 @@ impl ConnectionManager {
         Ok(channel)
     }
 
+    /// Start receiving pushed metrics, and return the interval the agent accepted.
+    ///
+    /// The answer is the agent's clamped figure, not what was asked for, so the screen
+    /// can say how often it is actually being updated rather than what it hoped for.
+    ///
+    /// The channel is opened *before* the subscription is requested. The agent tolerates
+    /// either order, but opening first means the first tick has somewhere to arrive.
+    ///
+    /// # Errors
+    /// The connection is gone, or the agent refused the subscription — which a
+    /// view-only-revoked device is entitled to be told rather than left waiting.
+    pub async fn subscribe_metrics(
+        &self,
+        interval_ms: u32,
+        sink: MetricsSink,
+    ) -> Result<u32, TransportError> {
+        self.ensure_metrics_channel(sink).await?;
+
+        let result = self
+            .request(ControlRequestPayload::SubscribeMetrics { interval_ms })
+            .await?;
+
+        match result {
+            ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms }) => {
+                Ok(interval_ms)
+            }
+            ControlResult::Err { message, .. } => Err(TransportError::Closed { reason: message }),
+            // An answer of another shape means the two builds disagree about what a
+            // subscription is. Reporting it beats waiting for pushes that never come.
+            ControlResult::Ok(_) => Err(TransportError::Closed {
+                reason: "the server did not accept the metrics subscription".to_owned(),
+            }),
+        }
+    }
+
+    /// Stop receiving pushed metrics.
+    ///
+    /// The channel is left open: subscribing again is then a single control request
+    /// rather than a new stream, and an open channel with no subscription costs nothing.
+    ///
+    /// # Errors
+    /// The connection is gone.
+    pub async fn unsubscribe_metrics(&self) -> Result<(), TransportError> {
+        self.request(ControlRequestPayload::UnsubscribeMetrics)
+            .await?;
+        Ok(())
+    }
+
+    /// Open the metrics channel if it is not already open.
+    async fn ensure_metrics_channel(&self, sink: MetricsSink) -> Result<(), TransportError> {
+        let mut slot = self.metrics.lock().await;
+        if slot.is_some() {
+            return Ok(());
+        }
+
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let (writer, reader) =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Metrics).await?;
+        drop(guard);
+
+        spawn_metrics_reader(reader, sink);
+        *slot = Some(writer);
+        Ok(())
+    }
+
     /// Open the terminal channel if it is not already open.
     async fn ensure_terminal_channel(
         &self,
@@ -817,10 +915,11 @@ impl ConnectionManager {
             .store(true, std::sync::atomic::Ordering::Release);
         self.set_state(ConnectionState::Disconnecting);
 
-        // Both channels belong to the connection being closed; a later connection opens
+        // Every channel belongs to the connection being closed; a later connection opens
         // fresh ones rather than writing into a dead stream.
         *self.terminal.lock().await = None;
         *self.files.lock().await = None;
+        *self.metrics.lock().await = None;
 
         if let Some(mut active) = self.active.lock().await.take() {
             // Best-effort: tell the agent why, so its audit trail records an intentional

@@ -432,6 +432,89 @@ export function getServerFacts(): Promise<ServerFacts> {
   return call('server_facts', serverFactsSchema);
 }
 
+/**
+ * One pushed reading.
+ *
+ * Deliberately a subset of {@link snapshotSchema}: the fields that change between
+ * samples. The process list and the CPU model come from a snapshot, once — sending them
+ * every tick would make fixed facts look like live readings, and would make a dashboard
+ * cost a full process walk several times a minute on the server it is watching.
+ */
+export const metricsTickSchema = z.object({
+  capturedAtMs: z.number().int(),
+  uptimeSecs: z.number().nonnegative(),
+  cpuPercent: z.number(),
+  cpuPerCore: z.array(z.number()),
+  memoryUsedBytes: z.number().nonnegative(),
+  memoryTotalBytes: z.number().nonnegative(),
+  swapUsedBytes: z.number().nonnegative(),
+  swapTotalBytes: z.number().nonnegative(),
+  disks: z.array(diskSchema),
+  networks: z.array(networkSchema),
+  temperatures: z.array(temperatureSchema),
+  loadAverage: z.tuple([z.number(), z.number(), z.number()]).nullable(),
+});
+
+export type MetricsTick = z.infer<typeof metricsTickSchema>;
+
+/** Why a metrics stream ended. */
+export const metricsStoppedSchema = z.object({
+  reason: z.string().min(1),
+  message: untrustedText(256),
+});
+
+export type MetricsStopped = z.infer<typeof metricsStoppedSchema>;
+
+/**
+ * Ask the server to push readings.
+ *
+ * Resolves to the interval the server actually accepted, which may be slower than the
+ * one requested — so a screen reports the rate it is getting rather than the rate it
+ * hoped for.
+ */
+export function subscribeMetrics(intervalMs: number): Promise<number> {
+  return call('subscribe_metrics', z.number().int().positive(), { input: { intervalMs } });
+}
+
+/** Ask the server to stop pushing readings. */
+export function unsubscribeMetrics(): Promise<void> {
+  return call('unsubscribe_metrics', z.void());
+}
+
+/**
+ * Subscribe to pushed readings.
+ *
+ * Returns the unlisten function, as Tauri's event API does.
+ */
+export async function listenMetricsUpdate(
+  handler: (tick: MetricsTick) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('metrics://update', (event) => {
+    const parsed = metricsTickSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}
+
+/**
+ * Subscribe to the end of a metrics stream.
+ *
+ * Worth listening for rather than assuming silence means idle: a dashboard that stopped
+ * being updated must say so instead of leaving its last reading on screen looking
+ * current.
+ */
+export async function listenMetricsStopped(
+  handler: (stopped: MetricsStopped) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('metrics://stopped', (event) => {
+    const parsed = metricsStoppedSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Terminal                                                                   */
 /* -------------------------------------------------------------------------- */

@@ -338,6 +338,8 @@ pub fn run() {
             connect_commands::connection_state,
             connect_commands::ping_server,
             session_commands::system_snapshot,
+            session_commands::subscribe_metrics,
+            session_commands::unsubscribe_metrics,
             session_commands::server_facts,
             session_commands::open_terminal,
             session_commands::send_terminal_input,
