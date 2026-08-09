@@ -11,8 +11,9 @@
 //! instead of in the field.
 
 use rc_updater::{
-    ManifestPolicy, ManifestSignaturePolicy, ManifestSignatureVerifier, ReleaseIndex,
-    ReleaseManifest,
+    Architecture, InstallationType, ManifestPolicy, ManifestSignaturePolicy,
+    ManifestSignatureVerifier, OperatingSystem, PackageFormat, PlatformInfo, PlatformKey,
+    ReleaseIndex, ReleaseManifest,
 };
 
 /// Public half of the release signing key, as embedded in shipped builds.
@@ -116,5 +117,79 @@ fn script_output_satisfies_the_strict_index_schema() {
     assert!(
         index.releases[0].manifest_url.starts_with("https://"),
         "release metadata must only be fetched over https",
+    );
+}
+
+/// A Windows machine on the previous version, as a shipped client sees itself.
+fn windows_client() -> PlatformInfo {
+    PlatformInfo {
+        os: OperatingSystem::Windows,
+        os_version: "10.0.26200".to_string(),
+        os_build: Some(26_200),
+        cpu_architecture: Architecture::X64,
+        installation_architecture: Architecture::X64,
+        key: PlatformKey("windows-x64".to_string()),
+        installation_type: InstallationType::WindowsMsi,
+        linux_kernel_version: None,
+        linux_glibc_version: None,
+        linux_distribution: None,
+    }
+}
+
+#[test]
+fn an_older_client_finds_the_published_release_in_the_index() {
+    let index = ReleaseIndex::parse(INDEX, &ManifestPolicy::default()).unwrap();
+
+    let entry = index
+        .select_latest_compatible(
+            &windows_client(),
+            "0.1.0",
+            env!("CARGO_PKG_VERSION"),
+            &ManifestPolicy::default(),
+        )
+        .expect("selection must not error")
+        .expect("a client on 0.1.0 must be offered the published release");
+
+    assert_eq!(entry.version, "0.1.1");
+    assert!(entry.manifest_url.ends_with("release-manifest.json"));
+}
+
+#[test]
+fn a_current_client_is_offered_nothing() {
+    let index = ReleaseIndex::parse(INDEX, &ManifestPolicy::default()).unwrap();
+
+    let entry = index
+        .select_latest_compatible(
+            &windows_client(),
+            "0.1.1",
+            env!("CARGO_PKG_VERSION"),
+            &ManifestPolicy::default(),
+        )
+        .expect("selection must not error");
+
+    assert!(
+        entry.is_none(),
+        "a client already on the published version must not be told to update",
+    );
+}
+
+#[test]
+fn the_selected_artifact_is_the_installer_for_the_running_platform() {
+    let manifest = ReleaseManifest::parse(MANIFEST, &ManifestPolicy::default()).unwrap();
+
+    let selection = manifest
+        .select_for_platform(&windows_client(), &ManifestPolicy::default())
+        .expect("a Windows MSI install must resolve to the MSI artifact");
+
+    assert_eq!(selection.package_format, PackageFormat::Msi);
+    assert!(selection.artifact.url.starts_with("https://"));
+    assert_eq!(
+        selection.artifact.sha256.len(),
+        64,
+        "an artifact must carry a full SHA-256 for verification",
+    );
+    assert!(
+        selection.artifact.size > 0,
+        "an artifact with no recorded size cannot be verified by byte count",
     );
 }

@@ -84,9 +84,20 @@ jobs:
           mkdir -p release-assets release-metadata
           node <<'NODE'
           const { createHash } = require('node:crypto');
-          const { copyFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
           const { basename, join } = require('node:path');
-          const root = 'apps/desktop-client/src-tauri/target/release/bundle';
+          // This is a Cargo workspace, so the target directory sits at the
+          // workspace root rather than beside the Tauri crate. Asking Cargo
+          // avoids hard-coding a path that silently does not exist.
+          const targetDirectory = JSON.parse(
+            execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], {
+              encoding: 'utf8',
+              maxBuffer: 64 * 1024 * 1024,
+            }),
+          ).target_directory;
+          const root = join(targetDirectory, 'release', 'bundle');
+          if (!existsSync(root)) throw new Error(`Bundle directory not found: ${root}`);
           const extension = process.env.EXTENSION;
           const files = [];
           function walk(dir) {
