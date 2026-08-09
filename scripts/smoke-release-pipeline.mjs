@@ -78,6 +78,27 @@ try {
     RELEASE_MANIFEST_PRIVATE_KEY_PEM: '',
     RELEASE_MANIFEST_PRIVATE_KEY_B64: privateKeyB64,
     RELEASE_MANIFEST_PUBLIC_KEY_B64: publicKeyB64,
+    // Optional release policy inputs, unset in the workflow and therefore
+    // delivered as empty strings. An empty minimumSupportedVersion is not "no
+    // minimum": the client parses it and rejects the manifest outright.
+    RELEASE_MINIMUM_SUPPORTED_VERSION: '',
+    RELEASE_MINIMUM_UPDATER_VERSION: '',
+    RELEASE_MINIMUM_OS_VERSION: '',
+    RELEASE_MANDATORY_UPDATE: '',
+  };
+
+  // Any blank value that survives into the metadata is a bug: the schema treats
+  // these fields as absent-or-meaningful, never as empty.
+  const assertNoBlankValues = (label, value, path = '') => {
+    if (typeof value === 'string') {
+      check(value.trim() !== '', `${label} must not contain a blank value at ${path || '(root)'}`);
+    } else if (Array.isArray(value)) {
+      value.forEach((entry, position) => assertNoBlankValues(label, entry, `${path}[${position}]`));
+    } else if (value !== null && typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value)) {
+        assertNoBlankValues(label, entry, path === '' ? key : `${path}.${key}`);
+      }
+    }
   };
 
   const run = (script, args) =>
@@ -127,6 +148,7 @@ try {
   }
 
   const parsedManifest = JSON.parse(readFileSync(manifest, 'utf8'));
+  assertNoBlankValues('manifest', parsedManifest);
   check(parsedManifest.version === VERSION, 'manifest must carry the requested version');
   check(
     parsedManifest.releaseNotes.trim() !== '',
@@ -138,6 +160,7 @@ try {
   );
 
   const parsedIndex = JSON.parse(readFileSync(index, 'utf8'));
+  assertNoBlankValues('index', parsedIndex);
   check(parsedIndex.releases.length === 1, 'index must list the release');
   check(
     parsedIndex.releases[0].manifestUrl.startsWith('https://'),

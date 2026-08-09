@@ -36,6 +36,16 @@ function normalizeFormat(format) {
   return FORMAT_ALIASES.get(format) ?? format;
 }
 
+// A workflow that maps an unset variable provides an empty string rather than
+// leaving it absent, so `?? undefined` keeps the "" and the later cleanup pass,
+// which only drops undefined, leaves it in the manifest. An empty
+// minimumSupportedVersion is not "no minimum": the client parses it as a
+// semantic version and rejects the whole manifest with InvalidVersion("").
+function optionalEnv(name) {
+  const value = process.env[name]?.trim();
+  return value ? value : undefined;
+}
+
 function optionalJsonEnv(name) {
   const value = process.env[name]?.trim();
   if (!value) return undefined;
@@ -145,8 +155,8 @@ async function main() {
   const manifest = {
     version,
     releaseDate,
-    minimumSupportedVersion: process.env.RELEASE_MINIMUM_SUPPORTED_VERSION ?? undefined,
-    minimumUpdaterVersion: process.env.RELEASE_MINIMUM_UPDATER_VERSION ?? undefined,
+    minimumSupportedVersion: optionalEnv('RELEASE_MINIMUM_SUPPORTED_VERSION'),
+    minimumUpdaterVersion: optionalEnv('RELEASE_MINIMUM_UPDATER_VERSION'),
     minimumOSVersion: optionalJsonEnv('RELEASE_MINIMUM_OS_VERSION'),
     mandatoryUpdate: process.env.RELEASE_MANDATORY_UPDATE === 'true',
     releaseNotes,
