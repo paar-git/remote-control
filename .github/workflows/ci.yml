@@ -47,6 +47,11 @@ jobs:
       - name: Unit tests
         run: pnpm test:run
 
+      # The release generators otherwise only run when a tag is pushed, so a
+      # defect in them surfaces as a failed release instead of a failed check.
+      - name: Release pipeline smoke test
+        run: pnpm release:smoke
+
   rust:
     # Conditional compilation means a symbol can be live on one platform and
     # dead on another, so lints and tests run on every platform the app ships

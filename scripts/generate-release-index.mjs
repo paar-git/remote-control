@@ -36,11 +36,23 @@ function publicKeyFromBase64(value) {
   return createPublicKey({ key: spki, format: 'der', type: 'spki' });
 }
 
+// A workflow that maps a secret which does not exist sets the variable to an
+// empty string rather than leaving it unset, and `??` only falls back on
+// null/undefined. Reading these with `??` meant an unset index-specific key
+// shadowed the manifest key that was actually configured, and signing failed
+// with "requires RELEASE_INDEX_PRIVATE_KEY_* or RELEASE_MANIFEST_PRIVATE_KEY_*"
+// while the manifest key sat right there.
+function env(...names) {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
 function privateKey() {
-  const pem =
-    process.env.RELEASE_INDEX_PRIVATE_KEY_PEM ?? process.env.RELEASE_MANIFEST_PRIVATE_KEY_PEM;
-  const b64 =
-    process.env.RELEASE_INDEX_PRIVATE_KEY_B64 ?? process.env.RELEASE_MANIFEST_PRIVATE_KEY_B64;
+  const pem = env('RELEASE_INDEX_PRIVATE_KEY_PEM', 'RELEASE_MANIFEST_PRIVATE_KEY_PEM');
+  const b64 = env('RELEASE_INDEX_PRIVATE_KEY_B64', 'RELEASE_MANIFEST_PRIVATE_KEY_B64');
   if (pem) return createPrivateKey(pem);
   if (b64)
     return createPrivateKey({ key: Buffer.from(b64, 'base64'), format: 'der', type: 'pkcs8' });
@@ -158,7 +170,7 @@ if (key) {
   const signature = sign(null, bytes, key);
   writeFileSync(`${output}.sig`, signature.toString('base64'));
   const publicKeyB64 = firstConfiguredKey(
-    process.env.RELEASE_INDEX_PUBLIC_KEY_B64 ?? process.env.RELEASE_MANIFEST_PUBLIC_KEY_B64,
+    env('RELEASE_INDEX_PUBLIC_KEY_B64', 'RELEASE_MANIFEST_PUBLIC_KEY_B64'),
   );
   if (publicKeyB64) {
     if (!verify(null, bytes, publicKeyFromBase64(publicKeyB64), signature)) {
