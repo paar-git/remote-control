@@ -472,40 +472,54 @@ mod tests {
         );
 
         let probe = "rc-terminal-probe";
-        let mut typed = false;
+        // CRLF on Windows, LF elsewhere: a terminal delivers the key the
+        // platform's shell expects, and cmd.exe ignores a bare LF. On a POSIX
+        // shell the quotes are removed before `echo` sees the word, so the
+        // echoed line does not contain the probe while the printed line does,
+        // and one match proves the command ran rather than proving the terminal
+        // echoes input. cmd.exe keeps quotes literally, so Windows uses the
+        // plain form and still requires both occurrences.
+        let command: &[u8] = if cfg!(windows) {
+            b"echo rc-terminal-probe\r\n"
+        } else {
+            b"echo rc-terminal-pro''be\n"
+        };
+        let required_matches = if cfg!(windows) { 2 } else { 1 };
 
         let deadline = std::time::Duration::from_secs(30);
         let seen = tokio::time::timeout(deadline, async {
             let mut collected = Vec::new();
+            let mut attempts = 0;
 
-            while let Some(chunk) = session.next_output().await {
+            loop {
+                // A quiet gap means the shell has finished writing its prompt.
+                // Typing on a byte count instead raced shell start-up: a command
+                // sent into a shell that is not yet reading is simply dropped,
+                // and the test then waited for output that never came.
+                let chunk = tokio::time::timeout(
+                    std::time::Duration::from_millis(750),
+                    session.next_output(),
+                )
+                .await;
+
+                let Ok(chunk) = chunk else {
+                    attempts += 1;
+                    if attempts > 4 {
+                        return false;
+                    }
+                    session.write_input(command).unwrap();
+                    continue;
+                };
+
+                let Some(chunk) = chunk else { return false };
+
                 answer_terminal_queries(&session, &chunk);
                 collected.extend_from_slice(&chunk);
                 let text = String::from_utf8_lossy(&collected);
-
-                // Wait for the shell to actually be ready before typing at it; a
-                // command sent into a shell that has not finished starting is dropped.
-                if !typed && text.len() > 8 {
-                    typed = true;
-                    // CRLF on Windows, LF elsewhere: a terminal delivers the key
-                    // the platform's shell expects, and cmd.exe ignores a bare LF.
-                    let command: &[u8] = if cfg!(windows) {
-                        b"echo rc-terminal-probe\r\n"
-                    } else {
-                        b"echo rc-terminal-probe\n"
-                    };
-                    session.write_input(command).unwrap();
-                    continue;
-                }
-
-                // Twice: once echoed as it is typed, once as the command output. One
-                // occurrence could just be the echo, which would not prove the shell
-                // ran anything.
-                if text.matches(probe).count() >= 2 {
+                if text.matches(probe).count() >= required_matches {
                     return true;
                 }
             }
-            false
         })
         .await;
 
