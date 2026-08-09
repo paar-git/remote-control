@@ -21,11 +21,17 @@ jobs:
             bundle: msi
             extension: .msi
             package_format: msi
-          - os: macos-13
+          # Intel macOS is cross-compiled from an Apple Silicon runner. The
+          # hosted Intel image (macos-13) has been retired, and a job requesting
+          # it now waits for a runner that never arrives, blocking the whole
+          # release. Cross-compiling does not depend on a particular image
+          # existing.
+          - os: macos-14
             platform: macos-x64
             bundle: dmg
             extension: .dmg
             package_format: dmg
+            rust_target: x86_64-apple-darwin
           - os: macos-14
             platform: macos-arm64
             bundle: dmg
@@ -72,9 +78,13 @@ jobs:
       - name: Check version sync
         run: pnpm version:check
 
+      - name: Add the cross-compilation target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
       - name: Build Tauri bundle
         working-directory: apps/desktop-client
-        run: pnpm tauri build --bundles ${{ matrix.bundle }}
+        run: pnpm tauri build --bundles ${{ matrix.bundle }} ${{ matrix.rust_target != '' && format('--target {0}', matrix.rust_target) || '' }}
         env:
           RC_UPDATE_MANIFEST_PUBLIC_KEYS_B64: ${{ vars.RELEASE_MANIFEST_PUBLIC_KEYS_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEY_B64 }}
 
@@ -96,7 +106,9 @@ jobs:
               maxBuffer: 64 * 1024 * 1024,
             }),
           ).target_directory;
-          const root = join(targetDirectory, 'release', 'bundle');
+          // A --target build nests its output under the target triple.
+          const rustTarget = process.env.RUST_TARGET ?? '';
+          const root = join(targetDirectory, ...(rustTarget === '' ? [] : [rustTarget]), 'release', 'bundle');
           if (!existsSync(root)) throw new Error(`Bundle directory not found: ${root}`);
           const extension = process.env.EXTENSION;
           const files = [];
@@ -130,6 +142,7 @@ jobs:
           EXTENSION: ${{ matrix.extension }}
           PLATFORM: ${{ matrix.platform }}
           PACKAGE_FORMAT: ${{ matrix.package_format }}
+          RUST_TARGET: ${{ matrix.rust_target }}
           SIGNATURE_REQUIRED: ${{ vars.RELEASE_ARTIFACT_SIGNATURE_REQUIRED || 'false' }}
 
       - uses: actions/upload-artifact@v4
