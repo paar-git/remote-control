@@ -91,4 +91,13 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude rc-host-agent
+
+      # The agent's end-to-end tests each stand up a real QUIC listener and
+      # client. Running sixteen of them at once on a two-core runner starves the
+      # network stack: a connection completes its handshake and is then lost
+      # before the client opens its first stream, failing whichever test loses
+      # the race. Serialising this one binary removes the contention without
+      # relaxing anything the tests assert.
+      - name: Agent end-to-end tests
+        run: cargo test -p rc-host-agent -- --test-threads=1
