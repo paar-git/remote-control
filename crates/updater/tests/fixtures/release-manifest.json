@@ -2,15 +2,59 @@
   "version": "0.1.1",
   "releaseDate": "2026-08-09",
   "mandatoryUpdate": false,
-  "releaseNotes": "Features\n- Ship a working update button and harden the update manager (#4)\n- Wire the file manager end to end -- agent channel, client, two-pane UI\n- Rc-file-transfer -- safe paths, honest listings, verified transfers\n- Monitoring and Terminal screens, backed by real readings and real PTYs\n- Real PTY sessions and measured system metrics\n- Real connect, disconnect and reconnect; fix certificate instability\n- Bind the listener, serve sessions, and open pairing windows in-process\n- QUIC pairing over the wire, mDNS discovery, per-connection identity\n- Secure pairing, device identity and trusted devices\n",
+  "releaseNotes": "Features\n- Ship a working update button and harden the update manager (#4)\n- Wire the file manager end to end -- agent channel, client, two-pane UI\n- Rc-file-transfer -- safe paths, honest listings, verified transfers\n- Monitoring and Terminal screens, backed by real readings and real PTYs\n- Real PTY sessions and measured system metrics\n- Real connect, disconnect and reconnect; fix certificate instability\n- Bind the listener, serve sessions, and open pairing windows in-process\n- QUIC pairing over the wire, mDNS discovery, per-connection identity\n- Secure pairing, device identity and trusted devices\n\nFixes\n- Omit unset minimum-version fields instead of emitting \"\"\n- Read release signing keys as blank-tolerant\n- Cross-compile the Intel macOS build instead of using macos-13\n- Find bundles in the workspace target directory\n",
   "platforms": {
+    "linux-x64": {
+      "artifacts": [
+        {
+          "format": "appimage",
+          "url": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/Remote%20Control_0.1.1_amd64.AppImage",
+          "sha256": "05f4a37ba23c981c2f0b02d6c881432aa592a6550bf4677c693dbf63ce923627",
+          "size": 81558008,
+          "filename": "Remote Control_0.1.1_amd64.AppImage",
+          "signatureRequired": false
+        },
+        {
+          "format": "deb",
+          "url": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/Remote%20Control_0.1.1_amd64.deb",
+          "sha256": "68039e3d8b36bff7ec5424c03401d4ddec2da24b4f5861f4d6290642874588c9",
+          "size": 7339516,
+          "filename": "Remote Control_0.1.1_amd64.deb",
+          "signatureRequired": false
+        }
+      ]
+    },
+    "macos-arm64": {
+      "artifacts": [
+        {
+          "format": "dmg",
+          "url": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/Remote%20Control_0.1.1_aarch64.dmg",
+          "sha256": "a3e76e5ef6d63b516a426c060075d081c3ba75a09ca23b9243d61573c81b45ad",
+          "size": 6414292,
+          "filename": "Remote Control_0.1.1_aarch64.dmg",
+          "signatureRequired": false
+        }
+      ]
+    },
+    "macos-x64": {
+      "artifacts": [
+        {
+          "format": "dmg",
+          "url": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/Remote%20Control_0.1.1_x64.dmg",
+          "sha256": "b7fd6773c4b5b1753a771d0d621594de7ae3f936d7923440dcdb6e9ef547d947",
+          "size": 6935351,
+          "filename": "Remote Control_0.1.1_x64.dmg",
+          "signatureRequired": false
+        }
+      ]
+    },
     "windows-x64": {
       "artifacts": [
         {
           "format": "msi",
           "url": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/Remote%20Control_0.1.1_x64_en-US.msi",
-          "sha256": "97b2a707743b8c9616651a6bd4a356a6bba2d2be7d8ff9f460f5084f42a301e4",
-          "size": 6578176,
+          "sha256": "6e8f453ac0750158d7570a55dae8099b58ab6c9e5308902f1dc5902657e36888",
+          "size": 6545408,
           "filename": "Remote Control_0.1.1_x64_en-US.msi",
           "signatureRequired": false
         }

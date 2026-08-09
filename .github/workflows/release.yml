@@ -89,55 +89,10 @@ jobs:
           RC_UPDATE_MANIFEST_PUBLIC_KEYS_B64: ${{ vars.RELEASE_MANIFEST_PUBLIC_KEYS_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEY_B64 }}
 
       - name: Collect artifact metadata
-        shell: bash
-        run: |
-          mkdir -p release-assets release-metadata
-          node <<'NODE'
-          const { createHash } = require('node:crypto');
-          const { execFileSync } = require('node:child_process');
-          const { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
-          const { basename, join } = require('node:path');
-          // This is a Cargo workspace, so the target directory sits at the
-          // workspace root rather than beside the Tauri crate. Asking Cargo
-          // avoids hard-coding a path that silently does not exist.
-          const targetDirectory = JSON.parse(
-            execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], {
-              encoding: 'utf8',
-              maxBuffer: 64 * 1024 * 1024,
-            }),
-          ).target_directory;
-          // A --target build nests its output under the target triple.
-          const rustTarget = process.env.RUST_TARGET ?? '';
-          const root = join(targetDirectory, ...(rustTarget === '' ? [] : [rustTarget]), 'release', 'bundle');
-          if (!existsSync(root)) throw new Error(`Bundle directory not found: ${root}`);
-          const extension = process.env.EXTENSION;
-          const files = [];
-          function walk(dir) {
-            for (const entry of readdirSync(dir, { withFileTypes: true })) {
-              const path = join(dir, entry.name);
-              if (entry.isDirectory()) walk(path);
-              else if (entry.name.endsWith(extension)) files.push(path);
-            }
-          }
-          walk(root);
-          if (files.length !== 1) throw new Error(`Expected one ${extension} artifact, found ${files.length}: ${files.join(', ')}`);
-          const source = files[0];
-          const filename = basename(source);
-          const target = join('release-assets', filename);
-          mkdirSync('release-assets', { recursive: true });
-          copyFileSync(source, target);
-          const bytes = readFileSync(target);
-          const metadata = {
-            platform: process.env.PLATFORM,
-            filename,
-            packageFormat: process.env.PACKAGE_FORMAT,
-            url: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.GITHUB_REF_NAME}/${encodeURIComponent(filename)}`,
-            sha256: createHash('sha256').update(bytes).digest('hex'),
-            size: statSync(target).size,
-            signatureRequired: process.env.SIGNATURE_REQUIRED === 'true',
-          };
-          writeFileSync(join('release-metadata', `${process.env.PLATFORM}-${process.env.PACKAGE_FORMAT}.json`), `${JSON.stringify(metadata, null, 2)}\n`);
-          NODE
+        run: >
+          node scripts/collect-release-artifact.mjs
+          --assets-dir release-assets
+          --output release-metadata/${{ matrix.platform }}-${{ matrix.package_format }}.json
         env:
           EXTENSION: ${{ matrix.extension }}
           PLATFORM: ${{ matrix.platform }}

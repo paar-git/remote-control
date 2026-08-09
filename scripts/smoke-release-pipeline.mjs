@@ -11,7 +11,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,30 +36,18 @@ try {
   const publicKeyB64 = spki.subarray(spki.length - 32).toString('base64');
   const privateKeyB64 = privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64');
 
-  // A stand-in installer. Only its bytes, size and hash matter here.
-  const artifact = join(workspace, 'remote-control-9.9.9-x64.msi');
+  // A stand-in bundle tree. The product name contains a space on purpose: that
+  // is what GitHub rewrites on upload, and a URL built from the unrewritten
+  // name 404s for every platform.
+  const bundleRoot = join(workspace, 'bundle');
+  mkdirSync(join(bundleRoot, 'msi'), { recursive: true });
+  const builtName = 'Remote Control_9.9.9_x64_en-US.msi';
   const bytes = Buffer.alloc(4096, 7);
-  writeFileSync(artifact, bytes);
+  writeFileSync(join(bundleRoot, 'msi', builtName), bytes);
 
   const metadataDir = join(workspace, 'metadata');
-  mkdirSync(metadataDir, { recursive: true });
-  writeFileSync(
-    join(metadataDir, 'windows-x64-msi.json'),
-    `${JSON.stringify(
-      {
-        platform: 'windows-x64',
-        filename: 'remote-control-9.9.9-x64.msi',
-        packageFormat: 'msi',
-        url: `https://github.com/${REPOSITORY}/releases/download/${TAG}/remote-control-9.9.9-x64.msi`,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        size: bytes.length,
-        signatureRequired: false,
-        path: artifact,
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  const assetsDir = join(workspace, 'assets');
+  const collected = join(metadataDir, 'windows-x64-msi.json');
 
   const notes = join(workspace, 'release-notes.md');
   const manifest = join(workspace, 'release-manifest.json');
@@ -101,8 +89,56 @@ try {
     }
   };
 
-  const run = (script, args) =>
-    execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8', stdio: 'pipe' });
+  const run = (script, args) => {
+    try {
+      return execFileSync(process.execPath, [script, ...args], {
+        env,
+        encoding: 'utf8',
+        stdio: 'pipe',
+      });
+    } catch (error) {
+      // Without this the script's own diagnostic is swallowed and the failure
+      // reads as an unrelated ENOENT further down.
+      fail(`${script} failed:\n${error.stderr || error.message}`);
+      return '';
+    }
+  };
+
+  run('scripts/collect-release-artifact.mjs', [
+    '--bundle-root',
+    bundleRoot,
+    '--extension',
+    '.msi',
+    '--platform',
+    'windows-x64',
+    '--package-format',
+    'msi',
+    '--assets-dir',
+    assetsDir,
+    '--output',
+    collected,
+  ]);
+
+  const artifactMetadata = JSON.parse(readFileSync(collected, 'utf8'));
+  check(
+    !artifactMetadata.filename.includes(' '),
+    'the recorded asset name must match what GitHub serves, which has no spaces',
+  );
+  check(
+    !artifactMetadata.url.includes('%20'),
+    `a URL encoding a space cannot resolve to the uploaded asset: ${artifactMetadata.url}`,
+  );
+  check(
+    existsSync(join(assetsDir, artifactMetadata.filename)),
+    'the uploaded file must be named exactly as the metadata records it',
+  );
+  check(
+    artifactMetadata.sha256 === createHash('sha256').update(bytes).digest('hex'),
+    'the recorded checksum must be the checksum of the copied installer',
+  );
+  // The publish job resolves each asset by its recorded filename.
+  artifactMetadata.path = join(assetsDir, artifactMetadata.filename);
+  writeFileSync(collected, `${JSON.stringify(artifactMetadata, null, 2)}\n`);
 
   run('scripts/generate-release-notes.mjs', ['--tag', 'HEAD', '--output', notes]);
   check(readFileSync(notes, 'utf8').trim() !== '', 'release notes must not be empty');
