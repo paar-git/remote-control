@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-09T00:32:19.707Z",
+  "releases": [
+    {
+      "version": "0.1.1",
+      "releaseDate": "2026-08-09",
+      "manifestUrl": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/release-manifest.json",
+      "manifestSha256": "f70165b9aa55264df5a58e60a668a0dd74d5d611a4ccac609e5ecf048b469ff8",
+      "platforms": {
+        "windows-x64": {
+          "formats": [
+            "msi"
+          ]
+        }
+      }
+    }
+  ]
+}

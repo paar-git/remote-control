@@ -792,3 +792,131 @@ export function parentPath(path: string): string | null {
   const parent = trimmed.slice(0, cut);
   return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Updates                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export const updateStateSchema = z.enum([
+  'idle',
+  'checking_for_updates',
+  'no_update_available',
+  'update_available',
+  'preparing_download',
+  'downloading',
+  'paused',
+  'waiting_for_network',
+  'resuming',
+  'verifying',
+  'ready_to_install',
+  'waiting_for_user_confirmation',
+  'installing',
+  'restart_required',
+  'completed',
+  'failed',
+  'recovering',
+]);
+export type UpdateState = z.infer<typeof updateStateSchema>;
+
+export const downloadQueueStateSchema = z.enum([
+  'queued',
+  'downloading',
+  'paused',
+  'waiting_for_network',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+export const packageFormatSchema = z.enum([
+  'exe',
+  'msi',
+  'dmg',
+  'pkg',
+  'appimage',
+  'deb',
+  'rpm',
+  'tar.gz',
+]);
+export type PackageFormat = z.infer<typeof packageFormatSchema>;
+
+export const updatePlatformSchema = z.object({
+  os: z.enum(['windows', 'macos', 'linux']),
+  osVersion: z.string(),
+  cpuArchitecture: z.enum(['x64', 'arm64']),
+  installationArchitecture: z.enum(['x64', 'arm64']),
+  key: z.string().min(1),
+  osBuild: z.number().int().nonnegative().nullable().optional(),
+  linuxKernelVersion: z.string().nullable().optional(),
+  linuxGlibcVersion: z.string().nullable().optional(),
+  linuxDistribution: z.string().nullable().optional(),
+  installationType: z.enum([
+    'windows-msi',
+    'windows-exe',
+    'macos-app-bundle',
+    'macos-pkg',
+    'linux-deb',
+    'linux-rpm',
+    'linux-app-image',
+    'portable-archive',
+    'unknown',
+  ]),
+});
+
+export const downloadProgressSchema = z.object({
+  key: z.string().min(1),
+  state: downloadQueueStateSchema,
+  downloadedBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  percent: z.number().min(0).max(100),
+  retryCount: z.number().int().nonnegative(),
+});
+export type DownloadProgress = z.infer<typeof downloadProgressSchema>;
+
+export const updateStatusSchema = z.object({
+  state: updateStateSchema,
+  manifestUrl: z.string().nullable(),
+  currentVersion: z.string().min(1),
+  availableVersion: z.string().nullable(),
+  releaseNotes: z.string().nullable(),
+  platform: updatePlatformSchema,
+  packageFormat: packageFormatSchema.nullable(),
+  download: downloadProgressSchema.nullable(),
+  readyPath: z.string().nullable(),
+  lastError: z.string().nullable(),
+});
+export type UpdateStatus = z.infer<typeof updateStatusSchema>;
+
+export const installResultSchema = z.object({
+  restartRequired: z.boolean(),
+  message: z.string().min(1),
+});
+export type InstallResult = z.infer<typeof installResultSchema>;
+
+export function getUpdateStatus(): Promise<UpdateStatus> {
+  return call('update_status', updateStatusSchema);
+}
+
+export function checkForUpdates(manifestUrl: string | null): Promise<UpdateStatus> {
+  return call('check_for_updates', updateStatusSchema, { request: { manifestUrl } });
+}
+
+export function downloadUpdate(): Promise<UpdateStatus> {
+  return call('download_update', updateStatusSchema);
+}
+
+export function pauseUpdateDownload(): Promise<UpdateStatus> {
+  return call('pause_update_download', updateStatusSchema);
+}
+
+export function resumeUpdateDownload(): Promise<UpdateStatus> {
+  return call('resume_update_download', updateStatusSchema);
+}
+
+export function cancelUpdateDownload(deletePartial: boolean): Promise<UpdateStatus> {
+  return call('cancel_update_download', updateStatusSchema, { deletePartial });
+}
+
+export function installUpdate(): Promise<InstallResult> {
+  return call('install_update', installResultSchema);
+}

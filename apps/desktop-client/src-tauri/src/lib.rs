@@ -17,6 +17,7 @@ mod connect_commands;
 mod connection;
 mod file_commands;
 mod session_commands;
+mod update_commands;
 
 use std::sync::{Arc, Mutex};
 
@@ -73,6 +74,8 @@ pub struct AppState {
     pub connection: Option<Arc<connection::ConnectionManager>>,
     /// Time source. Injected so tests can control it.
     pub clock: Arc<dyn Clock>,
+    /// Download, installer and update-manager runtime.
+    pub updater: update_commands::UpdateRuntime,
 }
 
 impl AppState {
@@ -193,7 +196,7 @@ async fn initialise() -> Arc<AppState> {
 
     let empty = |paths: AppPaths| AppState {
         host: host.clone(),
-        paths,
+        paths: paths.clone(),
         database: None,
         identity: None,
         owner: None,
@@ -202,6 +205,7 @@ async fn initialise() -> Arc<AppState> {
         session: Mutex::new(None),
         connection: None,
         clock: Arc::clone(&clock),
+        updater: update_commands::UpdateRuntime::new(paths.data_dir()),
     };
 
     let paths = match AppPaths::for_client() {
@@ -273,7 +277,7 @@ async fn initialise() -> Arc<AppState> {
 
     Arc::new(AppState {
         host,
-        paths,
+        paths: paths.clone(),
         database,
         identity,
         owner,
@@ -282,6 +286,7 @@ async fn initialise() -> Arc<AppState> {
         session: Mutex::new(None),
         connection,
         clock,
+        updater: update_commands::UpdateRuntime::new(paths.data_dir()),
     })
 }
 
@@ -353,6 +358,13 @@ pub fn run() {
             file_commands::rename_remote_path,
             file_commands::upload_file,
             file_commands::download_file,
+            update_commands::update_status,
+            update_commands::check_for_updates,
+            update_commands::download_update,
+            update_commands::pause_update_download,
+            update_commands::resume_update_download,
+            update_commands::cancel_update_download,
+            update_commands::install_update,
         ])
         .run(tauri::generate_context!());
 

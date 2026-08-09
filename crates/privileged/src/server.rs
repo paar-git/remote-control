@@ -74,7 +74,22 @@ impl HelperServer {
     ) -> std::io::Result<()> {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let listener = tokio::net::TcpListener::bind(address).await?;
+        self.serve_listener(listener, shutdown).await
+    }
 
+    /// Serve using an already-bound loopback listener until `shutdown` resolves.
+    ///
+    /// This is primarily useful for tests and launchers that need to bind port `0`
+    /// atomically and then communicate the actual selected port without dropping the
+    /// socket in between.
+    ///
+    /// # Errors
+    /// Fails if the listener address cannot be inspected.
+    pub async fn serve_listener(
+        self: Arc<Self>,
+        listener: tokio::net::TcpListener,
+        shutdown: impl Future<Output = ()> + Send,
+    ) -> std::io::Result<()> {
         tracing::info!(
             bound = %listener.local_addr()?,
             elevated = self.elevated,

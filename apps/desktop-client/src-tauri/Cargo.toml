@@ -26,8 +26,12 @@ rc-security = { workspace = true }
 rc-storage = { workspace = true }
 rc-transport = { workspace = true }
 rc-file-transfer = { workspace = true }
+rc-updater = { workspace = true }
 quinn = { workspace = true }
+reqwest = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
@@ -37,6 +41,12 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
+
+

@@ -681,18 +681,17 @@ fn validate_display_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{OsRandom, SystemClock};
+    use crate::clock::{DeterministicRandom, OsRandom, SystemClock, TestClock};
 
     use super::*;
 
     #[test]
     fn an_operator_chosen_window_is_honoured_within_the_build_limits() {
         let manager = PairingManager::with_defaults();
-        let clock = SystemClock;
+        let clock = TestClock::default();
+        let rng = DeterministicRandom::default();
 
-        let opened = manager
-            .begin_pairing_with_ttl(&clock, &OsRandom, 300)
-            .unwrap();
+        let opened = manager.begin_pairing_with_ttl(&clock, &rng, 300).unwrap();
 
         let remaining_secs = (opened.expires_at_ms - clock.now_ms()) / 1000;
         assert!(
@@ -706,10 +705,11 @@ mod tests {
         // A request is validated by the caller *and* clamped here, so no path can open
         // a window longer than this build allows.
         let manager = PairingManager::with_defaults();
-        let clock = SystemClock;
+        let clock = TestClock::default();
+        let rng = DeterministicRandom::default();
 
         let opened = manager
-            .begin_pairing_with_ttl(&clock, &OsRandom, u64::MAX)
+            .begin_pairing_with_ttl(&clock, &rng, u64::MAX)
             .unwrap();
 
         let remaining_secs = (opened.expires_at_ms - clock.now_ms()) / 1000;
@@ -722,15 +722,14 @@ mod tests {
     #[test]
     fn an_impossibly_short_window_is_raised_to_the_floor() {
         let manager = PairingManager::with_defaults();
-        let clock = SystemClock;
+        let clock = TestClock::default();
+        let rng = DeterministicRandom::default();
 
-        let opened = manager
-            .begin_pairing_with_ttl(&clock, &OsRandom, 0)
-            .unwrap();
+        let opened = manager.begin_pairing_with_ttl(&clock, &rng, 0).unwrap();
 
         let remaining_secs = (opened.expires_at_ms - clock.now_ms()) / 1000;
         assert!(
-            remaining_secs >= i64::try_from(MIN_PAIRING_TTL_SECS).unwrap() - 1,
+            remaining_secs >= i64::try_from(MIN_PAIRING_TTL_SECS).unwrap(),
             "a window that expires before it can be typed is not a window: got {remaining_secs}"
         );
     }

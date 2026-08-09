@@ -21,7 +21,10 @@
     "rust:fmt": "cargo fmt --all",
     "rust:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "rust:test": "cargo test --workspace",
-    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:run && pnpm rust:lint && pnpm rust:test"
+    "verify": "pnpm version:check && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:run && pnpm rust:lint && pnpm rust:test",
+    "version:check": "node scripts/check-version-sync.mjs",
+    "release:manifest": "node scripts/generate-release-manifest.mjs",
+    "release:index": "node scripts/generate-release-index.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

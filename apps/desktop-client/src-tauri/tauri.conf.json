@@ -31,7 +31,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "deb"],
+    "targets": ["msi", "dmg", "deb", "appimage"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "shortDescription": "Private remote access to your own servers",
     "longDescription": "Secure remote desktop, terminal, file management and monitoring for servers you own and administer.",

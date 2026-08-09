@@ -32,9 +32,10 @@ struct RunningHelper {
 
 impl RunningHelper {
     async fn start() -> Self {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
 
         let token = Token::generate();
         let server = Arc::new(HelperServer::new(token.clone()));
@@ -42,7 +43,7 @@ impl RunningHelper {
 
         let task = tokio::spawn(async move {
             let _ = server
-                .serve(port, async {
+                .serve_listener(listener, async {
                     let _ = wait.await;
                 })
                 .await;
