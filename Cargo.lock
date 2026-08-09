@@ -3583,7 +3583,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rc-coordination-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3602,7 +3602,7 @@ dependencies = [
 
 [[package]]
 name = "rc-desktop-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.0",
  "hex",
@@ -3632,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "rc-file-transfer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "parking_lot",
@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "rc-host-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3682,7 +3682,7 @@ dependencies = [
 
 [[package]]
 name = "rc-monitoring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parking_lot",
  "rc-protocol",
@@ -3693,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "rc-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "directories",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "rc-privileged"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3728,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "rc-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "hex",
@@ -3741,7 +3741,7 @@ dependencies = [
 
 [[package]]
 name = "rc-security"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "base64 0.23.0",
@@ -3770,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "rc-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hex",
@@ -3787,7 +3787,7 @@ dependencies = [
 
 [[package]]
 name = "rc-terminal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parking_lot",
  "portable-pty",
@@ -3799,7 +3799,7 @@ dependencies = [
 
 [[package]]
 name = "rc-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3820,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "rc-updater"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.0",
