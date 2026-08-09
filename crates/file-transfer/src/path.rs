@@ -358,7 +358,9 @@ mod tests {
         let policy = confined(root.path());
         let canonical = strip_verbatim_prefix(root.path().canonicalize().unwrap());
 
-        let resolved = policy.resolve(&as_str(&root.path().join("new.txt"))).unwrap();
+        let resolved = policy
+            .resolve(&as_str(&root.path().join("new.txt")))
+            .unwrap();
 
         assert_eq!(resolved, canonical.join("new.txt"));
     }
@@ -403,10 +405,7 @@ mod tests {
         std::fs::write(&stray, b"x").unwrap();
 
         assert!(
-            matches!(
-                policy.resolve(&as_str(&stray)),
-                Err(FileError::OutsideRoot)
-            ),
+            matches!(policy.resolve(&as_str(&stray)), Err(FileError::OutsideRoot)),
             "relaxing the lexical pre-check must not widen what is reachable",
         );
     }

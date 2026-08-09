@@ -349,9 +349,15 @@ fn convert_process(process: &sysinfo::Process, users: &sysinfo::Users) -> Proces
         // `None` when the agent may not read it, which is common for system processes
         // and for anything owned by another user. An empty string would be
         // indistinguishable from a process at the filesystem root.
+        //
+        // The empty case is filtered rather than assumed away: for a protected
+        // process sysinfo reports an empty path instead of nothing at all, which
+        // on Windows is common enough that several processes in any snapshot
+        // arrive that way.
         executable_path: process
             .exe()
-            .map(|path| path.to_string_lossy().into_owned()),
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|path| !path.is_empty()),
         // Resolved to a name, or absent. A numeric id the operator cannot act on is
         // not more useful than saying the owner is unknown.
         user: process

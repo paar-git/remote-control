@@ -661,12 +661,55 @@ async fn a_session_can_open_a_real_terminal_and_run_a_command() {
         .unwrap();
 
     let probe = "rc-integration-probe";
+    // The command is written so the line the shell echoes back does not contain
+    // the probe, while the line it prints does: on a POSIX shell the quotes are
+    // removed before `echo` ever sees the word. A single match then proves the
+    // command actually ran, rather than proving the terminal echoes input.
+    // `cmd.exe` keeps the quotes literally, so on Windows the original form is
+    // used and both occurrences are required.
+    let command: &[u8] = if cfg!(windows) {
+        b"echo rc-integration-probe\r\n"
+    } else {
+        b"echo rc-integration-pr''obe\n"
+    };
+    let required_matches = if cfg!(windows) { 2 } else { 1 };
+
     let mut opened = false;
-    let mut typed = false;
+    let mut attempts = 0;
     let mut collected = Vec::new();
 
     let saw_output = tokio::time::timeout(Duration::from_secs(40), async {
-        while let Ok(Some(message)) = reader.next_message::<TerminalAgentMessage>().await {
+        loop {
+            // A quiet gap means the shell has finished writing its prompt. Typing
+            // on a byte count instead raced shell start-up: on a slower runner the
+            // command went in before the shell was reading, and was simply lost.
+            let next =
+                tokio::time::timeout(Duration::from_millis(750), reader.next_message()).await;
+
+            let Ok(received) = next else {
+                if !opened {
+                    continue;
+                }
+                // Settled with no match yet, so type the command, or type it again
+                // if the first attempt landed while the shell was still starting.
+                attempts += 1;
+                if attempts > 4 {
+                    return false;
+                }
+                writer
+                    .send(&TerminalClientMessage::Input {
+                        terminal_id,
+                        data: command.to_vec(),
+                    })
+                    .await
+                    .unwrap();
+                continue;
+            };
+
+            let Ok(Some(message)) = received else {
+                return false;
+            };
+
             match message {
                 TerminalAgentMessage::Opened { pid, .. } => {
                     assert!(pid > 0, "a real shell has a process id");
@@ -687,26 +730,7 @@ async fn a_session_can_open_a_real_terminal_and_run_a_command() {
 
                     collected.extend_from_slice(&data);
                     let text = String::from_utf8_lossy(&collected);
-
-                    if opened && !typed && collected.len() > 8 {
-                        typed = true;
-                        let command: &[u8] = if cfg!(windows) {
-                            b"echo rc-integration-probe\r\n"
-                        } else {
-                            b"echo rc-integration-probe\n"
-                        };
-                        writer
-                            .send(&TerminalClientMessage::Input {
-                                terminal_id,
-                                data: command.to_vec(),
-                            })
-                            .await
-                            .unwrap();
-                        continue;
-                    }
-
-                    // Twice: once echoed as it is typed, once as the command's output.
-                    if text.matches(probe).count() >= 2 {
+                    if text.matches(probe).count() >= required_matches {
                         return true;
                     }
                 }
@@ -717,7 +741,6 @@ async fn a_session_can_open_a_real_terminal_and_run_a_command() {
                 _ => {}
             }
         }
-        false
     })
     .await;
 
