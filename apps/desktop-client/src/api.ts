@@ -432,6 +432,89 @@ export function getServerFacts(): Promise<ServerFacts> {
   return call('server_facts', serverFactsSchema);
 }
 
+/**
+ * One pushed reading.
+ *
+ * Deliberately a subset of {@link snapshotSchema}: the fields that change between
+ * samples. The process list and the CPU model come from a snapshot, once — sending them
+ * every tick would make fixed facts look like live readings, and would make a dashboard
+ * cost a full process walk several times a minute on the server it is watching.
+ */
+export const metricsTickSchema = z.object({
+  capturedAtMs: z.number().int(),
+  uptimeSecs: z.number().nonnegative(),
+  cpuPercent: z.number(),
+  cpuPerCore: z.array(z.number()),
+  memoryUsedBytes: z.number().nonnegative(),
+  memoryTotalBytes: z.number().nonnegative(),
+  swapUsedBytes: z.number().nonnegative(),
+  swapTotalBytes: z.number().nonnegative(),
+  disks: z.array(diskSchema),
+  networks: z.array(networkSchema),
+  temperatures: z.array(temperatureSchema),
+  loadAverage: z.tuple([z.number(), z.number(), z.number()]).nullable(),
+});
+
+export type MetricsTick = z.infer<typeof metricsTickSchema>;
+
+/** Why a metrics stream ended. */
+export const metricsStoppedSchema = z.object({
+  reason: z.string().min(1),
+  message: untrustedText(256),
+});
+
+export type MetricsStopped = z.infer<typeof metricsStoppedSchema>;
+
+/**
+ * Ask the server to push readings.
+ *
+ * Resolves to the interval the server actually accepted, which may be slower than the
+ * one requested — so a screen reports the rate it is getting rather than the rate it
+ * hoped for.
+ */
+export function subscribeMetrics(intervalMs: number): Promise<number> {
+  return call('subscribe_metrics', z.number().int().positive(), { input: { intervalMs } });
+}
+
+/** Ask the server to stop pushing readings. */
+export function unsubscribeMetrics(): Promise<void> {
+  return call('unsubscribe_metrics', z.void());
+}
+
+/**
+ * Subscribe to pushed readings.
+ *
+ * Returns the unlisten function, as Tauri's event API does.
+ */
+export async function listenMetricsUpdate(
+  handler: (tick: MetricsTick) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('metrics://update', (event) => {
+    const parsed = metricsTickSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}
+
+/**
+ * Subscribe to the end of a metrics stream.
+ *
+ * Worth listening for rather than assuming silence means idle: a dashboard that stopped
+ * being updated must say so instead of leaving its last reading on screen looking
+ * current.
+ */
+export async function listenMetricsStopped(
+  handler: (stopped: MetricsStopped) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('metrics://stopped', (event) => {
+    const parsed = metricsStoppedSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Terminal                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -708,4 +791,132 @@ export function parentPath(path: string): string | null {
   // on drive C", which is not what clicking "up" is asking for.
   const parent = trimmed.slice(0, cut);
   return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Updates                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export const updateStateSchema = z.enum([
+  'idle',
+  'checking_for_updates',
+  'no_update_available',
+  'update_available',
+  'preparing_download',
+  'downloading',
+  'paused',
+  'waiting_for_network',
+  'resuming',
+  'verifying',
+  'ready_to_install',
+  'waiting_for_user_confirmation',
+  'installing',
+  'restart_required',
+  'completed',
+  'failed',
+  'recovering',
+]);
+export type UpdateState = z.infer<typeof updateStateSchema>;
+
+export const downloadQueueStateSchema = z.enum([
+  'queued',
+  'downloading',
+  'paused',
+  'waiting_for_network',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+export const packageFormatSchema = z.enum([
+  'exe',
+  'msi',
+  'dmg',
+  'pkg',
+  'appimage',
+  'deb',
+  'rpm',
+  'tar.gz',
+]);
+export type PackageFormat = z.infer<typeof packageFormatSchema>;
+
+export const updatePlatformSchema = z.object({
+  os: z.enum(['windows', 'macos', 'linux']),
+  osVersion: z.string(),
+  cpuArchitecture: z.enum(['x64', 'arm64']),
+  installationArchitecture: z.enum(['x64', 'arm64']),
+  key: z.string().min(1),
+  osBuild: z.number().int().nonnegative().nullable().optional(),
+  linuxKernelVersion: z.string().nullable().optional(),
+  linuxGlibcVersion: z.string().nullable().optional(),
+  linuxDistribution: z.string().nullable().optional(),
+  installationType: z.enum([
+    'windows-msi',
+    'windows-exe',
+    'macos-app-bundle',
+    'macos-pkg',
+    'linux-deb',
+    'linux-rpm',
+    'linux-app-image',
+    'portable-archive',
+    'unknown',
+  ]),
+});
+
+export const downloadProgressSchema = z.object({
+  key: z.string().min(1),
+  state: downloadQueueStateSchema,
+  downloadedBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  percent: z.number().min(0).max(100),
+  retryCount: z.number().int().nonnegative(),
+});
+export type DownloadProgress = z.infer<typeof downloadProgressSchema>;
+
+export const updateStatusSchema = z.object({
+  state: updateStateSchema,
+  manifestUrl: z.string().nullable(),
+  currentVersion: z.string().min(1),
+  availableVersion: z.string().nullable(),
+  releaseNotes: z.string().nullable(),
+  platform: updatePlatformSchema,
+  packageFormat: packageFormatSchema.nullable(),
+  download: downloadProgressSchema.nullable(),
+  readyPath: z.string().nullable(),
+  lastError: z.string().nullable(),
+});
+export type UpdateStatus = z.infer<typeof updateStatusSchema>;
+
+export const installResultSchema = z.object({
+  restartRequired: z.boolean(),
+  message: z.string().min(1),
+});
+export type InstallResult = z.infer<typeof installResultSchema>;
+
+export function getUpdateStatus(): Promise<UpdateStatus> {
+  return call('update_status', updateStatusSchema);
+}
+
+export function checkForUpdates(manifestUrl: string | null): Promise<UpdateStatus> {
+  return call('check_for_updates', updateStatusSchema, { request: { manifestUrl } });
+}
+
+export function downloadUpdate(): Promise<UpdateStatus> {
+  return call('download_update', updateStatusSchema);
+}
+
+export function pauseUpdateDownload(): Promise<UpdateStatus> {
+  return call('pause_update_download', updateStatusSchema);
+}
+
+export function resumeUpdateDownload(): Promise<UpdateStatus> {
+  return call('resume_update_download', updateStatusSchema);
+}
+
+export function cancelUpdateDownload(deletePartial: boolean): Promise<UpdateStatus> {
+  return call('cancel_update_download', updateStatusSchema, { deletePartial });
+}
+
+export function installUpdate(): Promise<InstallResult> {
+  return call('install_update', installResultSchema);
 }

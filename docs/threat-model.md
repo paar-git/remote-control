@@ -144,6 +144,17 @@ update verification.
 *Residual:* a malicious Rust crate runs with agent privileges. Reduced by keeping the
 dependency set small and preferring widely-audited crates, not eliminated.
 
+*Residual: prototype pollution in the webview.* Tauri's `freezePrototype` is **off**
+(`apps/desktop-client/src-tauri/tauri.conf.json`). It injects
+`Object.freeze(Object.prototype)` before the bundle runs, which breaks `@xterm/xterm`:
+the terminal compiles a TypeScript namespace down to `o.toString = …` on a plain
+object, and that assignment throws under a frozen prototype, so the module fails to
+evaluate and the whole UI fails to mount. No released xterm avoids the pattern (6.1.0
+is beta-only as of this writing). What the flag defended is narrow here: `script-src
+'self'` with no remote origins means an attacker needs code execution in the bundle
+first, and at that point the frozen prototype buys little. Re-enable it if the terminal
+ever moves off xterm, and re-test the terminal screen if it is turned back on.
+
 ### A9. Session hijacking
 
 *Controls:* sessions are bound to the QUIC connection, which is itself bound to the

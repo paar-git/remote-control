@@ -66,15 +66,18 @@ impl PathPolicy {
     /// resolved against whatever directory the agent happened to be started in, which
     /// is not a confinement anyone could reason about.
     pub fn confined_to(roots: impl IntoIterator<Item = PathBuf>) -> Result<Self> {
-        let roots: Vec<PathBuf> = roots.into_iter().collect();
+        let mut canonical_roots = Vec::new();
 
-        for root in &roots {
+        for root in roots {
             if !root.is_absolute() {
                 return Err(FileError::BadRoot);
             }
+            canonical_roots.push(canonical_root(&root));
         }
 
-        Ok(Self { roots })
+        Ok(Self {
+            roots: canonical_roots,
+        })
     }
 
     /// A policy permitting any absolute path.
@@ -126,37 +129,69 @@ impl PathPolicy {
         let lexical = normalise(path)?;
         reject_reserved_names(&lexical)?;
 
-        if !self.permits(&lexical) {
-            return Err(FileError::OutsideRoot);
+        // Whether the lexical form alone sits inside a root. It is only the
+        // answer when nothing along the path can be canonicalised: a valid path
+        // may be spelled differently from its root — through a symlinked
+        // directory, in different case, or via a Windows 8.3 short name such as
+        // `C:\Users\RUNNER~1\...` — and rejecting it here would refuse access to
+        // a directory the operator did configure.
+        let lexically_permitted = self.permits(&lexical);
+
+        // The authoritative check, for anything that exists: the OS follows
+        // symlinks, and the result must land inside a root.
+        if let Ok(canonical) = lexical.canonicalize() {
+            let canonical = strip_verbatim_prefix(canonical);
+            return if self.permits(&canonical) {
+                Ok(canonical)
+            } else {
+                // A symlink pointing out of the root. Reported as the same error
+                // as traversal: from the peer's side they are the same refusal,
+                // and distinguishing them would describe the filesystem layout.
+                Err(FileError::OutsideRoot)
+            };
         }
 
-        // Second pass, for anything that exists: the OS follows symlinks, and the
-        // result must land inside a root too. A path that does not exist yet — every
-        // upload destination — cannot be canonicalised, so the lexical check stands
-        // alone for it, and its *parent* is checked instead.
-        let Ok(canonical) = lexical.canonicalize() else {
-            // The path does not exist. Its parent must, and must be inside a root —
-            // otherwise a peer could create a file through a symlinked parent that
-            // points outside.
-            if let Some(parent) = lexical.parent()
-                && let Ok(canonical_parent) = parent.canonicalize()
-                && !self.permits(&strip_verbatim_prefix(canonical_parent))
-            {
+        // The path does not exist — every upload destination and new directory.
+        // Its parent must exist and lie inside a root, otherwise a peer could
+        // create a file through a symlinked parent pointing outside.
+        if let Some(parent) = lexical.parent()
+            && let Ok(canonical_parent) = parent.canonicalize()
+        {
+            let canonical_parent = strip_verbatim_prefix(canonical_parent);
+            if !self.permits(&canonical_parent) {
                 return Err(FileError::OutsideRoot);
             }
-            return Ok(lexical);
-        };
+            // Return the destination under its canonical parent, so what is
+            // written and what the audit trail records are the same path.
+            return Ok(lexical
+                .file_name()
+                .map_or(lexical.clone(), |name| canonical_parent.join(name)));
+        }
 
-        let canonical = strip_verbatim_prefix(canonical);
-        if self.permits(&canonical) {
-            Ok(canonical)
+        // Neither the path nor its parent exists, so there is nothing the
+        // filesystem can confirm and the lexical judgement stands.
+        if lexically_permitted {
+            Ok(lexical)
         } else {
-            // A symlink pointing out of the root. Reported as the same error as
-            // traversal: from the peer's side they are the same refusal, and
-            // distinguishing them would describe the filesystem layout.
             Err(FileError::OutsideRoot)
         }
     }
+}
+
+/// Put a configured root into the same form `resolve` produces for a candidate.
+///
+/// `resolve` canonicalises whatever exists and strips the Windows verbatim
+/// prefix before checking containment. A root stored in some other form never
+/// matches: on Windows a temporary directory reached through an 8.3 short name
+/// such as `C:\Users\RUNNER~1\...` canonicalises to its long form, and a root
+/// recorded as the short name would then reject every path inside itself. The
+/// same applies to a root reached through a symlink, or given in different case.
+///
+/// A root that does not exist yet cannot be canonicalised; it is kept as given,
+/// which is the best available answer and still absolute.
+fn canonical_root(root: &Path) -> PathBuf {
+    root.canonicalize()
+        .map_or_else(|_| root.to_path_buf(), strip_verbatim_prefix)
 }
 
 /// Resolve `.` and `..` without touching the filesystem.
@@ -284,6 +319,95 @@ mod tests {
 
     fn as_str(path: &Path) -> String {
         path.to_string_lossy().into_owned()
+    }
+
+    // -- root spelling -------------------------------------------------------
+
+    #[test]
+    fn a_root_is_stored_in_the_form_resolved_paths_take() {
+        let root = temp_root();
+        // A root handed over exactly as the operator typed it, without the
+        // caller canonicalising it first.
+        let policy = PathPolicy::confined_to([root.path().to_path_buf()]).unwrap();
+
+        let file = root.path().join("inside.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        assert!(
+            policy.resolve(&as_str(&file)).is_ok(),
+            "a file inside the configured root must be reachable",
+        );
+    }
+
+    #[test]
+    fn a_root_that_does_not_exist_yet_is_still_accepted() {
+        let root = temp_root();
+        let missing = root.path().join("created-later");
+        let policy = PathPolicy::confined_to([missing.clone()]).unwrap();
+
+        assert!(policy.is_confined());
+        assert!(
+            policy.resolve(&as_str(&missing.join("file.txt"))).is_ok(),
+            "a root that has not been created yet must not deny everything",
+        );
+    }
+
+    #[test]
+    fn a_new_file_resolves_under_its_canonical_parent() {
+        let root = temp_root();
+        let policy = confined(root.path());
+        let canonical = strip_verbatim_prefix(root.path().canonicalize().unwrap());
+
+        let resolved = policy
+            .resolve(&as_str(&root.path().join("new.txt")))
+            .unwrap();
+
+        assert_eq!(resolved, canonical.join("new.txt"));
+    }
+
+    /// The exact shape that failed on CI: a root reached through an alias whose
+    /// canonical form differs from the spelling used to configure it. A Windows
+    /// 8.3 short name behaves this way; a symlink reproduces it portably.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_reached_through_a_symlink_permits_files_inside_it() {
+        let real = temp_root();
+        let parent = temp_root();
+        let alias = parent.path().join("alias");
+        std::os::unix::fs::symlink(real.path(), &alias).unwrap();
+
+        let policy = PathPolicy::confined_to([alias.clone()]).unwrap();
+
+        let file = real.path().join("inside.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        assert!(
+            policy.resolve(&as_str(&file)).is_ok(),
+            "the real path of a file inside an aliased root must be permitted",
+        );
+        assert!(
+            policy.resolve(&as_str(&alias.join("inside.txt"))).is_ok(),
+            "the aliased spelling of the same file must be permitted too",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_aliased_root_still_refuses_paths_outside_it() {
+        let real = temp_root();
+        let outside = temp_root();
+        let parent = temp_root();
+        let alias = parent.path().join("alias");
+        std::os::unix::fs::symlink(real.path(), &alias).unwrap();
+
+        let policy = PathPolicy::confined_to([alias]).unwrap();
+        let stray = outside.path().join("stray.txt");
+        std::fs::write(&stray, b"x").unwrap();
+
+        assert!(
+            matches!(policy.resolve(&as_str(&stray)), Err(FileError::OutsideRoot)),
+            "relaxing the lexical pre-check must not widen what is reachable",
+        );
     }
 
     // -- traversal -----------------------------------------------------------

@@ -133,6 +133,7 @@ The rules the codebase is built to, each enforced by tests:
 | [`docs/threat-model.md`](docs/threat-model.md) | Assets, boundaries, adversaries, residual risk |
 | [`docs/pairing-protocol.md`](docs/pairing-protocol.md) | The pairing exchange, transcript construction, domain separation |
 | [`docs/keystore-format.md`](docs/keystore-format.md) | Keystore envelope, DPAPI and Unix protection, installer requirements |
+| [`docs/update-manager.md`](docs/update-manager.md) | Release manifests, platform artifact selection, resumable downloads, verification and install flow |
 | [`docs/owner-authentication.md`](docs/owner-authentication.md) | Argon2id parameters, throttling, hash upgrades |
 | [`docs/permission-model.md`](docs/permission-model.md) | Capabilities, roles, the privilege boundary |
 

@@ -1,0 +1,20 @@
+{
+  "version": "0.1.1",
+  "releaseDate": "2026-08-09",
+  "mandatoryUpdate": false,
+  "releaseNotes": "Features\n- Complete the phase -- privilege split and pushed metrics\n- Wire the file manager end to end -- agent channel, client, two-pane UI\n- Rc-file-transfer -- safe paths, honest listings, verified transfers\n\nFixes\n- Unblock the desktop client and accept pre-certificate keystores\n",
+  "platforms": {
+    "windows-x64": {
+      "artifacts": [
+        {
+          "format": "msi",
+          "url": "https://github.com/realpargitDEV/remote-control/releases/download/v0.1.1/remote-control-0.1.1-x64.msi",
+          "sha256": "3e509b20beb87287e6c762917c0bbf67bc71bbb272da48c675ed190ac86d5b53",
+          "size": 2048,
+          "filename": "remote-control-0.1.1-x64.msi",
+          "signatureRequired": false
+        }
+      ]
+    }
+  }
+}

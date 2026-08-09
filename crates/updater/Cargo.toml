@@ -1,0 +1,38 @@
+[package]
+name = "rc-updater"
+description = "Download, release manifest, installer and updater helper support."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sysinfo = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tower-http = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

@@ -36,6 +36,12 @@ pub const TERMINAL_OUTPUT_EVENT: &str = "terminal://output";
 /// Event name announcing that a terminal ended.
 pub const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
 
+/// Event name carrying one pushed metrics tick to the webview.
+pub const METRICS_UPDATE_EVENT: &str = "metrics://update";
+
+/// Event name announcing that the metrics stream ended, and why.
+pub const METRICS_STOPPED_EVENT: &str = "metrics://stopped";
+
 /// One chunk of terminal output.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -278,6 +284,177 @@ pub async fn server_facts(state: tauri::State<'_, Arc<AppState>>) -> CommandResu
             "The server sent an unexpected reply. Check that both sides are on the same \
              version.",
         )),
+    }
+}
+
+/// One pushed metrics tick.
+///
+/// Deliberately a subset of [`SnapshotDto`]: the fields that change between samples. The
+/// process list and the CPU model come from a snapshot, once, so the screen merges a
+/// tick onto the snapshot it already has rather than the agent resending static facts
+/// several times a minute as though they were live readings.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsTickDto {
+    /// When the agent took the reading.
+    pub captured_at_ms: i64,
+    /// Seconds since the server booted.
+    pub uptime_secs: u64,
+    /// Overall CPU utilisation.
+    pub cpu_percent: f32,
+    /// Per-core utilisation.
+    pub cpu_per_core: Vec<f32>,
+    /// Physical memory in use.
+    pub memory_used_bytes: u64,
+    /// Physical memory installed.
+    pub memory_total_bytes: u64,
+    /// Swap in use.
+    pub swap_used_bytes: u64,
+    /// Swap configured.
+    pub swap_total_bytes: u64,
+    /// Mounted volumes.
+    pub disks: Vec<DiskDto>,
+    /// Network interfaces.
+    pub networks: Vec<NetworkDto>,
+    /// Temperature sensors the platform exposed.
+    pub temperatures: Vec<TemperatureDto>,
+    /// Load averages, where the platform has the concept.
+    pub load_average: Option<[f64; 3]>,
+}
+
+/// Why a metrics stream ended.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsStoppedEvent {
+    /// A stable reason code the screen can branch on.
+    pub reason: String,
+    /// A sentence safe to show an operator.
+    pub message: String,
+}
+
+/// Subscribe to pushed metrics from the connected server.
+///
+/// Returns the interval the agent actually accepted, which may be slower than the one
+/// requested — the screen reports what it is getting rather than what it asked for.
+///
+/// # Errors
+/// [`CommandError`] if nothing is connected, the session lacks the capability, or the
+/// server refused the subscription.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub async fn subscribe_metrics(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    interval_ms: u32,
+) -> CommandResult<u32> {
+    state.require_capability(Capability::RemoteDesktopView)?;
+    let manager = connection(&state)?;
+
+    manager
+        .subscribe_metrics(interval_ms, metrics_event_sink(app))
+        .await
+        .map_err(|err| CommandError::from_transport(&err))
+}
+
+/// Stop pushed metrics.
+///
+/// # Errors
+/// [`CommandError`] if nothing is connected.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub async fn unsubscribe_metrics(state: tauri::State<'_, Arc<AppState>>) -> CommandResult<()> {
+    let manager = connection(&state)?;
+
+    manager
+        .unsubscribe_metrics()
+        .await
+        .map_err(|err| CommandError::from_transport(&err))
+}
+
+/// A sink that forwards pushed metrics to the webview as events.
+fn metrics_event_sink(app: tauri::AppHandle) -> crate::connection::MetricsSink {
+    Arc::new(move |message: rc_protocol::system::MetricsAgentMessage| {
+        use rc_protocol::system::{MetricsAgentMessage, MetricsStopReason};
+        use tauri::Emitter as _;
+
+        match message {
+            MetricsAgentMessage::Update(update) => {
+                let _ = app.emit(METRICS_UPDATE_EVENT, convert_update(&update));
+            }
+            MetricsAgentMessage::Stopped { reason } => {
+                // Forwarded rather than swallowed: a dashboard that stopped updating
+                // must be able to say so instead of leaving its last reading on screen
+                // looking current.
+                let (code, message) = match reason {
+                    MetricsStopReason::Unsubscribed => ("unsubscribed", "Live updates stopped."),
+                    MetricsStopReason::NotAuthorized => (
+                        "not_authorized",
+                        "This device is no longer permitted to watch this server.",
+                    ),
+                    MetricsStopReason::Unavailable => (
+                        "unavailable",
+                        "The server stopped being able to take readings.",
+                    ),
+                    // A reason a newer agent knows and this build does not. Reported as
+                    // a stop rather than ignored, which would freeze the dashboard.
+                    _ => ("stopped", "The server stopped sending live updates."),
+                };
+                let _ = app.emit(
+                    METRICS_STOPPED_EVENT,
+                    MetricsStoppedEvent {
+                        reason: code.to_owned(),
+                        message: message.to_owned(),
+                    },
+                );
+            }
+            // A message a newer agent knows and this build does not.
+            _ => {}
+        }
+    })
+}
+
+/// Convert a pushed tick into the shape the webview reads.
+fn convert_update(update: &rc_protocol::system::MetricsUpdate) -> MetricsTickDto {
+    MetricsTickDto {
+        captured_at_ms: update.captured_at_ms,
+        uptime_secs: update.uptime_secs,
+        cpu_percent: update.cpu.usage_percent,
+        cpu_per_core: update.cpu.per_core_percent.clone(),
+        memory_used_bytes: update.memory.used_bytes,
+        memory_total_bytes: update.memory.total_bytes,
+        swap_used_bytes: update.memory.swap_used_bytes,
+        swap_total_bytes: update.memory.swap_total_bytes,
+        disks: update
+            .disks
+            .iter()
+            .map(|disk| DiskDto {
+                mount_point: disk.mount_point.clone(),
+                filesystem: disk.filesystem.clone(),
+                total_bytes: disk.total_bytes,
+                available_bytes: disk.available_bytes,
+            })
+            .collect(),
+        networks: update
+            .networks
+            .iter()
+            .map(|network| NetworkDto {
+                interface: network.interface.clone(),
+                receive_rate_bps: network.receive_rate_bps,
+                transmit_rate_bps: network.transmit_rate_bps,
+                received_bytes: network.received_bytes,
+                transmitted_bytes: network.transmitted_bytes,
+            })
+            .collect(),
+        temperatures: update
+            .temperatures
+            .iter()
+            .map(|reading| TemperatureDto {
+                label: reading.label.clone(),
+                celsius: reading.celsius,
+                critical_celsius: reading.critical_celsius,
+            })
+            .collect(),
+        load_average: update.load_average,
     }
 }
 

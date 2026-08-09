@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use rc_protocol::system::{
-    BatteryStats, CpuStats, DiskStats, MemoryStats, NetworkStats, ProcessInfo, SystemSnapshot,
-    TemperatureReading,
+    BatteryStats, CpuSample, CpuStats, DiskStats, MemoryStats, MetricsUpdate, NetworkStats,
+    ProcessInfo, SystemSnapshot, TemperatureReading,
 };
 
 /// How many processes a snapshot carries.
@@ -87,25 +87,12 @@ impl MetricsCollector {
         }
     }
 
-    /// Take a snapshot.
+    /// Take a full dashboard snapshot, including the top process list.
     ///
     /// `now_ms` is passed in rather than read here so the timestamp on a snapshot comes
     /// from the same clock as everything else the agent records.
     pub fn snapshot(&mut self, now_ms: i64) -> SystemSnapshot {
-        let elapsed = self.previous_sample.map(|previous| previous.elapsed());
-        self.previous_sample = Some(Instant::now());
-
-        self.system.refresh_cpu_all();
-        self.system.refresh_memory();
-        self.system.refresh_processes(
-            sysinfo::ProcessesToUpdate::All,
-            // Removing dead processes keeps the map from growing without bound on a
-            // long-lived agent watching a busy machine.
-            true,
-        );
-        self.disks.refresh(true);
-        self.networks.refresh(true);
-        self.components.refresh(true);
+        let elapsed = self.refresh(RefreshKind::WithProcesses);
 
         SystemSnapshot {
             captured_at_ms: now_ms,
@@ -123,6 +110,55 @@ impl MetricsCollector {
             top_processes: self.top_processes(),
             load_average: load_average(),
         }
+    }
+
+    /// Take a lightweight metrics tick for the push stream.
+    ///
+    /// Shares the same sampling path and rate state as [`Self::snapshot`], but skips
+    /// process enumeration: a dashboard subscription must not pay for a full process
+    /// walk every half-second on the machine it is watching.
+    pub fn update(&mut self, now_ms: i64) -> MetricsUpdate {
+        let elapsed = self.refresh(RefreshKind::RatesOnly);
+        let cpu = self.cpu();
+
+        MetricsUpdate {
+            captured_at_ms: now_ms,
+            uptime_secs: sysinfo::System::uptime(),
+            cpu: CpuSample {
+                usage_percent: cpu.usage_percent,
+                per_core_percent: cpu.per_core_percent,
+                frequency_mhz: cpu.frequency_mhz,
+            },
+            memory: self.memory(),
+            disks: self.disk_stats(),
+            networks: self.network_stats(elapsed),
+            temperatures: self.temperatures(),
+            gpus: Vec::new(),
+            battery: self.battery(),
+            load_average: load_average(),
+        }
+    }
+
+    /// Refresh platform counters and return the interval since the previous sample.
+    fn refresh(&mut self, kind: RefreshKind) -> Option<std::time::Duration> {
+        let elapsed = self.previous_sample.map(|previous| previous.elapsed());
+        self.previous_sample = Some(Instant::now());
+
+        self.system.refresh_cpu_all();
+        self.system.refresh_memory();
+        if matches!(kind, RefreshKind::WithProcesses) {
+            self.system.refresh_processes(
+                sysinfo::ProcessesToUpdate::All,
+                // Removing dead processes keeps the map from growing without bound on a
+                // long-lived agent watching a busy machine.
+                true,
+            );
+        }
+        self.disks.refresh(true);
+        self.networks.refresh(true);
+        self.components.refresh(true);
+
+        elapsed
     }
 
     fn cpu(&self) -> CpuStats {
@@ -295,6 +331,15 @@ impl MetricsCollector {
     }
 }
 
+/// What a sample needs from the platform.
+#[derive(Debug, Clone, Copy)]
+enum RefreshKind {
+    /// Full dashboard: rates plus a process walk.
+    WithProcesses,
+    /// Push tick: rates only. Process enumeration is the expensive part.
+    RatesOnly,
+}
+
 /// Convert one `sysinfo` process into the protocol's shape.
 fn convert_process(process: &sysinfo::Process, users: &sysinfo::Users) -> ProcessInfo {
     ProcessInfo {
@@ -304,9 +349,15 @@ fn convert_process(process: &sysinfo::Process, users: &sysinfo::Users) -> Proces
         // `None` when the agent may not read it, which is common for system processes
         // and for anything owned by another user. An empty string would be
         // indistinguishable from a process at the filesystem root.
+        //
+        // The empty case is filtered rather than assumed away: for a protected
+        // process sysinfo reports an empty path instead of nothing at all, which
+        // on Windows is common enough that several processes in any snapshot
+        // arrive that way.
         executable_path: process
             .exe()
-            .map(|path| path.to_string_lossy().into_owned()),
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|path| !path.is_empty()),
         // Resolved to a name, or absent. A numeric id the operator cannot act on is
         // not more useful than saying the owner is unknown.
         user: process
@@ -470,6 +521,58 @@ mod tests {
         assert_eq!(
             MetricsCollector::clamp_interval(u32::MAX),
             MAX_SAMPLE_INTERVAL_MS
+        );
+    }
+
+    #[test]
+    fn an_update_omits_processes_and_cpu_identity() {
+        // A push tick must stay cheaper than a full snapshot: no process walk, and no
+        // static CPU fields that belong on the one-shot snapshot.
+        let mut collector = MetricsCollector::new();
+        let update = collector.update(1_700_000_000_000);
+
+        assert_eq!(update.captured_at_ms, 1_700_000_000_000);
+        assert!(
+            !update.cpu.per_core_percent.is_empty(),
+            "live utilisation is still reported"
+        );
+        assert!(update.memory.total_bytes > 0);
+        // The type has no process field; gpus stay empty rather than inventing idle GPUs.
+        assert!(update.gpus.is_empty());
+        assert!(update.battery.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_update_still_reports_network_rates_after_a_baseline() {
+        // Skipping process enumeration must not break the rate path shared with
+        // snapshots: both methods advance the same previous-sample state.
+        let mut collector = MetricsCollector::new();
+        let _ = collector.update(0);
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let second = collector.update(1);
+
+        assert!(
+            second
+                .networks
+                .iter()
+                .all(|n| n.receive_rate_bps < u64::MAX),
+            "rates must be finite"
+        );
+        assert!(collector.previous_sample.is_some());
+    }
+
+    #[test]
+    fn snapshot_and_update_share_one_rate_timeline() {
+        // Two collectors would disagree; one collector used both ways must keep a
+        // coherent interval so rates do not reset every time the UI mixes paths.
+        let mut collector = MetricsCollector::new();
+        collector.snapshot(0);
+        assert!(collector.previous_sample.is_some());
+        collector.update(1);
+        assert!(collector.previous_sample.is_some());
+        assert!(
+            collector.previous_network.len() < 1000,
+            "interface state must track interfaces, not samples"
         );
     }
 

@@ -6,22 +6,82 @@
  * absent and says why, rather than showing a zero that would be indistinguishable from
  * a real reading of zero.
  *
- * The screen polls rather than subscribing. A subscription would push a snapshot every
- * interval whether or not anyone was looking at it; polling from the screen that
- * displays it means the cost on the server stops when the operator navigates away.
+ * # The screen subscribes, and falls back to polling
+ *
+ * The server pushes readings on the metrics channel, so a figure updates when the server
+ * measures it rather than when this screen happens to ask. The subscription is opened
+ * when the screen mounts and closed when it unmounts, so a dashboard nobody is looking
+ * at costs the server nothing.
+ *
+ * If the subscription is refused — an older agent that does not implement it, or a
+ * session that lost the capability — the screen polls instead. A dashboard that showed
+ * nothing because a newer feature was unavailable would be worse than a slower one.
+ *
+ * # Ticks are merged onto a snapshot
+ *
+ * A tick carries only what changes: utilisation, memory, disks, network, temperatures.
+ * The CPU model, the core count and the process list come from a snapshot, because
+ * resending them several times a minute would both cost a full process walk on the
+ * server and make fixed facts look like live readings. The process table is refreshed on
+ * its own slower timer.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { type ServerFacts, type Snapshot, getServerFacts, getSystemSnapshot } from './api.js';
+import {
+  type MetricsTick,
+  type ServerFacts,
+  type Snapshot,
+  getServerFacts,
+  getSystemSnapshot,
+  listenMetricsStopped,
+  listenMetricsUpdate,
+  subscribeMetrics,
+  unsubscribeMetrics,
+} from './api.js';
 import { Badge, Button, EmptyState } from './components';
 import { formatBytes, formatDuration, formatRate, formatTimestamp } from './format.js';
 
-/** How often a new snapshot is requested. */
+/** How often readings are wanted, whether pushed or polled. */
 const REFRESH_MS = 2000;
+
+/**
+ * How often the process list is refreshed while readings are being pushed.
+ *
+ * Slower than the readings themselves on purpose: enumerating every process is the
+ * expensive part of a snapshot, and it is the one part a tick deliberately omits.
+ */
+const PROCESS_REFRESH_MS = 10_000;
 
 /** How many samples the sparklines keep. */
 const HISTORY_LENGTH = 60;
+
+/** How readings are currently arriving. */
+type Delivery = 'push' | 'poll';
+
+/**
+ * Merge a pushed tick onto the snapshot the screen is showing.
+ *
+ * Everything a tick does not carry is kept from the snapshot, so the process table and
+ * the CPU model stay on screen between the slower refreshes that update them.
+ */
+export function applyTick(snapshot: Snapshot, tick: MetricsTick): Snapshot {
+  return {
+    ...snapshot,
+    capturedAtMs: tick.capturedAtMs,
+    uptimeSecs: tick.uptimeSecs,
+    cpuPercent: tick.cpuPercent,
+    cpuPerCore: tick.cpuPerCore,
+    memoryUsedBytes: tick.memoryUsedBytes,
+    memoryTotalBytes: tick.memoryTotalBytes,
+    swapUsedBytes: tick.swapUsedBytes,
+    swapTotalBytes: tick.swapTotalBytes,
+    disks: tick.disks,
+    networks: tick.networks,
+    temperatures: tick.temperatures,
+    loadAverage: tick.loadAverage,
+  };
+}
 
 type LoadState =
   | { readonly status: 'idle' }
@@ -32,6 +92,15 @@ type LoadState =
 export default function MonitoringScreen(): React.JSX.Element {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   const [live, setLive] = useState(true);
+  const [delivery, setDelivery] = useState<Delivery>('poll');
+  // The interval the server accepted, which may be slower than the one asked for. Shown
+  // rather than the requested figure, so the badge states the rate actually being got.
+  const [acceptedMs, setAcceptedMs] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // Set when the server stops a stream for a reason other than this screen asking. It
+  // re-runs the effect below down the polling path, so the notice saying readings are
+  // being polled is true rather than aspirational.
+  const [pushBlocked, setPushBlocked] = useState(false);
 
   // Kept in a ref rather than state: the history is appended to on every tick and
   // reading it during render is enough. Putting it in state would re-render twice per
@@ -40,16 +109,17 @@ export default function MonitoringScreen(): React.JSX.Element {
   const memoryHistory = useRef<number[]>([]);
   const facts = useRef<ServerFacts | null>(null);
 
+  /** Append one reading to the sparkline histories. */
+  const record = useCallback((cpuPercent: number, usedBytes: number, totalBytes: number) => {
+    cpuHistory.current = [...cpuHistory.current, cpuPercent].slice(-HISTORY_LENGTH);
+    const memoryPercent = totalBytes === 0 ? 0 : (usedBytes / totalBytes) * 100;
+    memoryHistory.current = [...memoryHistory.current, memoryPercent].slice(-HISTORY_LENGTH);
+  }, []);
+
   const refresh = useCallback(() => {
     getSystemSnapshot()
       .then((snapshot) => {
-        cpuHistory.current = [...cpuHistory.current, snapshot.cpuPercent].slice(-HISTORY_LENGTH);
-        const memoryPercent =
-          snapshot.memoryTotalBytes === 0
-            ? 0
-            : (snapshot.memoryUsedBytes / snapshot.memoryTotalBytes) * 100;
-        memoryHistory.current = [...memoryHistory.current, memoryPercent].slice(-HISTORY_LENGTH);
-
+        record(snapshot.cpuPercent, snapshot.memoryUsedBytes, snapshot.memoryTotalBytes);
         setState({ status: 'ready', snapshot, facts: facts.current });
       })
       .catch((error: unknown) => {
@@ -58,7 +128,20 @@ export default function MonitoringScreen(): React.JSX.Element {
           message: error instanceof Error ? error.message : 'Could not read the server’s status.',
         });
       });
-  }, []);
+  }, [record]);
+
+  /** Merge a pushed tick into whatever is on screen. */
+  const applyPushedTick = useCallback(
+    (tick: MetricsTick) => {
+      record(tick.cpuPercent, tick.memoryUsedBytes, tick.memoryTotalBytes);
+      setState((current) =>
+        current.status === 'ready'
+          ? { ...current, snapshot: applyTick(current.snapshot, tick) }
+          : current,
+      );
+    },
+    [record],
+  );
 
   // The host facts change rarely enough to fetch once per visit.
   useEffect(() => {
@@ -73,14 +156,81 @@ export default function MonitoringScreen(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    // One snapshot first, whichever way readings arrive afterwards: a tick carries no
+    // CPU model, core count or process list, so there must be something to merge onto.
     refresh();
     if (!live) return;
 
-    const timer = window.setInterval(refresh, REFRESH_MS);
-    return () => {
-      window.clearInterval(timer);
+    let cancelled = false;
+    const cleanups: (() => void)[] = [];
+
+    /** Fall back to asking for a snapshot on a timer. */
+    const poll = () => {
+      setDelivery('poll');
+      setAcceptedMs(null);
+      const timer = window.setInterval(refresh, REFRESH_MS);
+      cleanups.push(() => {
+        window.clearInterval(timer);
+      });
     };
-  }, [live, refresh]);
+
+    if (pushBlocked) {
+      poll();
+      return () => {
+        cancelled = true;
+        for (const cleanup of cleanups) cleanup();
+      };
+    }
+
+    void (async () => {
+      try {
+        const accepted = await subscribeMetrics(REFRESH_MS);
+        if (cancelled) {
+          // Unmounted while the request was in flight. Stop the stream rather than
+          // leaving the server sampling for a screen that is gone.
+          void unsubscribeMetrics().catch(() => undefined);
+          return;
+        }
+
+        cleanups.push(await listenMetricsUpdate(applyPushedTick));
+        cleanups.push(
+          await listenMetricsStopped((stopped) => {
+            // Said out loud rather than letting the figures quietly stop moving: a
+            // frozen dashboard that looks live is worse than one that says it stopped.
+            if (stopped.reason !== 'unsubscribed') {
+              setNotice(stopped.message);
+              setPushBlocked(true);
+            }
+          }),
+        );
+        cleanups.push(() => {
+          void unsubscribeMetrics().catch(() => undefined);
+        });
+
+        if (cancelled) return;
+        setDelivery('push');
+        setAcceptedMs(accepted);
+        setNotice(null);
+
+        // The process list is the one thing a tick omits, so it keeps its own slower
+        // timer. Enumerating every process is the expensive part of a snapshot.
+        const processes = window.setInterval(refresh, PROCESS_REFRESH_MS);
+        cleanups.push(() => {
+          window.clearInterval(processes);
+        });
+      } catch {
+        // An agent that does not implement subscriptions, or a session that may not
+        // watch. Polling still works, and a slower dashboard beats an empty one.
+        if (cancelled) return;
+        poll();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const cleanup of cleanups) cleanup();
+    };
+  }, [live, refresh, applyPushedTick, pushBlocked]);
 
   if (state.status === 'loading' || state.status === 'idle') {
     return (
@@ -117,7 +267,13 @@ export default function MonitoringScreen(): React.JSX.Element {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge tone={live ? 'success' : 'neutral'}>{live ? 'Live' : 'Paused'}</Badge>
+          <Badge tone={live ? 'success' : 'neutral'}>
+            {!live
+              ? 'Paused'
+              : delivery === 'push'
+                ? `Live · pushed every ${((acceptedMs ?? REFRESH_MS) / 1000).toFixed(1)} s`
+                : 'Live · polled'}
+          </Badge>
           <Button
             onClick={() => {
               setLive((current) => !current);
@@ -127,6 +283,15 @@ export default function MonitoringScreen(): React.JSX.Element {
           </Button>
         </div>
       </header>
+
+      {notice === null ? null : (
+        <p
+          role="status"
+          className="mb-4 rounded border border-(--color-warning) p-3 text-sm text-(--color-text-secondary)"
+        >
+          {notice} These readings are being polled instead.
+        </p>
+      )}
 
       <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Metric

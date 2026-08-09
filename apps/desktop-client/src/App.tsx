@@ -23,7 +23,10 @@ import DevicesScreen from './DevicesScreen';
 import FilesScreen from './FilesScreen';
 import MonitoringScreen from './MonitoringScreen';
 import TerminalScreen from './TerminalScreen';
+import UpdateScreen from './UpdateScreen';
 import { isTauriAvailable } from './ipc.js';
+import { isReadyToInstall, pendingUpdateVersion } from './updates.js';
+import { useUpdateWatcher } from './useUpdateWatcher.js';
 
 interface NavItem {
   readonly id: string;
@@ -41,6 +44,7 @@ const NAV_ITEMS: readonly NavItem[] = [
   { id: 'processes', label: 'Processes', availableInPhase: 7 },
   { id: 'services', label: 'Services', availableInPhase: 7 },
   { id: 'monitoring', label: 'Monitoring', availableInPhase: null },
+  { id: 'updates', label: 'Updates', availableInPhase: null },
   { id: 'power', label: 'Power', availableInPhase: 7 },
   { id: 'activity', label: 'Activity', availableInPhase: 7 },
   { id: 'settings', label: 'Settings', availableInPhase: 9 },
@@ -57,6 +61,10 @@ export default function App(): React.JSX.Element {
   const [gate, setGate] = useState<Gate>({ status: 'loading' });
   const [section, setSection] = useState('home');
   const [toast, setToast] = useState<Toast | null>(null);
+  // Only poll for releases once the app is unlocked; before that the backend
+  // refuses the capability check anyway.
+  const updates = useUpdateWatcher(gate.status === 'unlocked');
+  const pendingVersion = pendingUpdateVersion(updates.status);
 
   const applyStatus = useCallback((status: OwnerStatus) => {
     if (status.authenticated && status.username !== null) {
@@ -169,6 +177,13 @@ export default function App(): React.JSX.Element {
                     }
                   >
                     <span>{item.label}</span>
+                    {item.id === 'updates' && pendingVersion !== null && (
+                      <span
+                        aria-label={`Version ${pendingVersion} available`}
+                        title={`Version ${pendingVersion} available`}
+                        className="size-2 shrink-0 rounded-full bg-(--color-accent)"
+                      />
+                    )}
                     {!enabled && (
                       <span className="text-[10px] tabular-nums">P{item.availableInPhase}</span>
                     )}
@@ -200,8 +215,19 @@ export default function App(): React.JSX.Element {
         </div>
       </nav>
 
-      <main className="flex-1 overflow-auto p-6">
-        <Section id={section} onToast={setToast} />
+      <main className="flex-1 overflow-auto">
+        {pendingVersion !== null && section !== 'updates' && (
+          <UpdateBanner
+            version={pendingVersion}
+            ready={isReadyToInstall(updates.status)}
+            onOpen={() => {
+              setSection('updates');
+            }}
+          />
+        )}
+        <div className="p-6">
+          <Section id={section} onToast={setToast} onUpdateChange={updates.refresh} />
+        </div>
       </main>
 
       <ToastBar
@@ -210,6 +236,39 @@ export default function App(): React.JSX.Element {
           setToast(null);
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * Quiet, dismissible-by-acting call to action shown above any section while a
+ * newer release is waiting. It is hidden on the Updates section itself, where
+ * the same information is already the main content.
+ */
+function UpdateBanner({
+  version,
+  ready,
+  onOpen,
+}: {
+  readonly version: string;
+  readonly ready: boolean;
+  readonly onOpen: () => void;
+}): React.JSX.Element {
+  return (
+    <div
+      role="status"
+      className="flex flex-wrap items-center gap-3 border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-6 py-2.5"
+    >
+      <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-(--color-accent)" />
+      <p className="min-w-0 flex-1 text-sm">
+        <span className="font-medium">Version {version} is available.</span>{' '}
+        <span className="text-(--color-text-secondary)">
+          {ready ? 'It is verified and ready to install.' : 'Review the changes and update.'}
+        </span>
+      </p>
+      <Button variant="primary" onClick={onOpen}>
+        {ready ? 'Install Now' : 'View Update'}
+      </Button>
     </div>
   );
 }
@@ -359,15 +418,19 @@ function AuthPanel({
 function Section({
   id,
   onToast,
+  onUpdateChange,
 }: {
   readonly id: string;
   readonly onToast: (toast: Toast) => void;
+  readonly onUpdateChange: () => void;
 }): React.JSX.Element {
   switch (id) {
     case 'devices':
       return <DevicesScreen onToast={onToast} />;
     case 'monitoring':
       return <MonitoringScreen />;
+    case 'updates':
+      return <UpdateScreen onToast={onToast} onStatusChange={onUpdateChange} />;
     case 'terminal':
       return <TerminalScreen onToast={onToast} />;
     case 'files':

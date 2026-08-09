@@ -1,0 +1,241 @@
+name: Release Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} ${{ matrix.package_format }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            bundle: msi
+            extension: .msi
+            package_format: msi
+          - os: macos-13
+            platform: macos-x64
+            bundle: dmg
+            extension: .dmg
+            package_format: dmg
+          - os: macos-14
+            platform: macos-arm64
+            bundle: dmg
+            extension: .dmg
+            package_format: dmg
+          - os: ubuntu-latest
+            platform: linux-x64
+            bundle: deb
+            extension: .deb
+            package_format: deb
+          - os: ubuntu-latest
+            platform: linux-x64
+            bundle: appimage
+            extension: .AppImage
+            package_format: appimage
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check version sync
+        run: pnpm version:check
+
+      - name: Build Tauri bundle
+        working-directory: apps/desktop-client
+        run: pnpm tauri build --bundles ${{ matrix.bundle }}
+        env:
+          RC_UPDATE_MANIFEST_PUBLIC_KEYS_B64: ${{ vars.RELEASE_MANIFEST_PUBLIC_KEYS_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEY_B64 }}
+
+      - name: Collect artifact metadata
+        shell: bash
+        run: |
+          mkdir -p release-assets release-metadata
+          node <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { copyFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
+          const { basename, join } = require('node:path');
+          const root = 'apps/desktop-client/src-tauri/target/release/bundle';
+          const extension = process.env.EXTENSION;
+          const files = [];
+          function walk(dir) {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const path = join(dir, entry.name);
+              if (entry.isDirectory()) walk(path);
+              else if (entry.name.endsWith(extension)) files.push(path);
+            }
+          }
+          walk(root);
+          if (files.length !== 1) throw new Error(`Expected one ${extension} artifact, found ${files.length}: ${files.join(', ')}`);
+          const source = files[0];
+          const filename = basename(source);
+          const target = join('release-assets', filename);
+          mkdirSync('release-assets', { recursive: true });
+          copyFileSync(source, target);
+          const bytes = readFileSync(target);
+          const metadata = {
+            platform: process.env.PLATFORM,
+            filename,
+            packageFormat: process.env.PACKAGE_FORMAT,
+            url: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.GITHUB_REF_NAME}/${encodeURIComponent(filename)}`,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+            size: statSync(target).size,
+            signatureRequired: process.env.SIGNATURE_REQUIRED === 'true',
+          };
+          writeFileSync(join('release-metadata', `${process.env.PLATFORM}-${process.env.PACKAGE_FORMAT}.json`), `${JSON.stringify(metadata, null, 2)}\n`);
+          NODE
+        env:
+          EXTENSION: ${{ matrix.extension }}
+          PLATFORM: ${{ matrix.platform }}
+          PACKAGE_FORMAT: ${{ matrix.package_format }}
+          SIGNATURE_REQUIRED: ${{ vars.RELEASE_ARTIFACT_SIGNATURE_REQUIRED || 'false' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.platform }}-${{ matrix.package_format }}
+          path: release-assets/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata-${{ matrix.platform }}-${{ matrix.package_format }}
+          path: release-metadata/*.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish signed manifest and GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      # Full history and tags are required to derive the release notes from the
+      # commits since the previous tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: release-dist/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-metadata-*
+          path: release-dist/metadata
+          merge-multiple: true
+
+      - name: Validate downloaded release assets
+        run: |
+          node <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { existsSync, readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
+          const { join } = require('node:path');
+          const metadataDir = 'release-dist/metadata';
+          const assetsDir = 'release-dist/assets';
+          const metadataFiles = readdirSync(metadataDir).filter((name) => name.endsWith('.json')).sort();
+          if (metadataFiles.length === 0) throw new Error('No release metadata files were downloaded.');
+          for (const file of metadataFiles) {
+            const path = join(metadataDir, file);
+            const metadata = JSON.parse(readFileSync(path, 'utf8'));
+            const entries = Array.isArray(metadata) ? metadata : [metadata];
+            for (const entry of entries) {
+              const assetPath = join(assetsDir, entry.filename);
+              if (!existsSync(assetPath)) throw new Error(`Missing release asset ${entry.filename}`);
+              const bytes = readFileSync(assetPath);
+              const actualSha = createHash('sha256').update(bytes).digest('hex');
+              const actualSize = statSync(assetPath).size;
+              if (actualSha !== entry.sha256) throw new Error(`SHA mismatch for ${entry.filename}`);
+              if (actualSize !== entry.size) throw new Error(`Size mismatch for ${entry.filename}`);
+              entry.path = assetPath;
+            }
+            writeFileSync(path, `${JSON.stringify(Array.isArray(metadata) ? entries : entries[0], null, 2)}\n`);
+          }
+          NODE
+
+      - name: Generate release notes from the commit range
+        run: node scripts/generate-release-notes.mjs --tag "$GITHUB_REF_NAME" --output release-notes.md
+
+      - name: Generate signed release manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/generate-release-manifest.mjs \
+            --version "$VERSION" \
+            --artifacts-dir release-dist/metadata \
+            --notes-file release-notes.md \
+            --output release-manifest.json
+        env:
+          RELEASE_MANIFEST_PRIVATE_KEY_PEM: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY_PEM }}
+          RELEASE_MANIFEST_PRIVATE_KEY_B64: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY_B64 }}
+          RELEASE_MANIFEST_PUBLIC_KEY_B64: ${{ vars.RELEASE_MANIFEST_PUBLIC_KEYS_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEY_B64 }}
+          RELEASE_MINIMUM_SUPPORTED_VERSION: ${{ vars.RELEASE_MINIMUM_SUPPORTED_VERSION }}
+          RELEASE_MINIMUM_UPDATER_VERSION: ${{ vars.RELEASE_MINIMUM_UPDATER_VERSION }}
+          RELEASE_MINIMUM_OS_VERSION: ${{ vars.RELEASE_MINIMUM_OS_VERSION }}
+          RELEASE_MANDATORY_UPDATE: ${{ vars.RELEASE_MANDATORY_UPDATE }}
+
+      - name: Download previous signed release index
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download --repo "$GITHUB_REPOSITORY" --pattern release-index.json --output previous-release-index.json
+
+      - name: Generate signed release index
+        run: |
+          MANIFEST_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/release-manifest.json"
+          PREVIOUS_ARGS=""
+          if [ -f previous-release-index.json ]; then
+            PREVIOUS_ARGS="--previous-index previous-release-index.json"
+          fi
+          node scripts/generate-release-index.mjs             --manifest release-manifest.json             --manifest-url "$MANIFEST_URL"             --output release-index.json             $PREVIOUS_ARGS
+        env:
+          RELEASE_INDEX_PRIVATE_KEY_PEM: ${{ secrets.RELEASE_INDEX_PRIVATE_KEY_PEM }}
+          RELEASE_INDEX_PRIVATE_KEY_B64: ${{ secrets.RELEASE_INDEX_PRIVATE_KEY_B64 }}
+          RELEASE_INDEX_PUBLIC_KEY_B64: ${{ vars.RELEASE_INDEX_PUBLIC_KEY_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEYS_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEY_B64 }}
+          RELEASE_MANIFEST_PRIVATE_KEY_PEM: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY_PEM }}
+          RELEASE_MANIFEST_PRIVATE_KEY_B64: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY_B64 }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          body_path: release-notes.md
+          files: |
+            release-dist/assets/*
+            release-manifest.json
+            release-manifest.json.sig
+            release-index.json
+            release-index.json.sig

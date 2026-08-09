@@ -1,0 +1,12 @@
+# Trusted Ed25519 release-metadata verification keys.
+#
+# Comma- or newline-separated, base64, raw 32-byte public keys. Blank lines and
+# lines starting with '#' are ignored. These are PUBLIC verification keys only:
+# the matching private key signs `release-manifest.json` and `release-index.json`
+# in CI and must never appear in this repository.
+#
+# To rotate: append the next key below while keeping the current one, ship that
+# build, then start signing with the new key and remove the old entry in a later
+# release. Clients trust every key listed here, so an overlap window lets old and
+# new builds both verify during the transition.
+YW01mVPd9F6R/WxJJM2+FB2rCDaxLUUxQYZ0/HaHpf0=
