@@ -154,6 +154,12 @@ fn install_windows_msi(artifact: &Path) -> Result<InstallOutcome> {
     classify_windows_installer_status("MSI installer", status.code())
 }
 
+/// Map a Windows installer exit code onto an install outcome.
+///
+/// Compiled on Windows, where the MSI and EXE installers call it, and in test
+/// builds on every platform: the mapping is pure integer logic that is worth
+/// covering everywhere rather than only on Windows runners.
+#[cfg(any(windows, test))]
 fn classify_windows_installer_status(installer: &str, code: Option<i32>) -> Result<InstallOutcome> {
     let Some(code) = code else {
         return Err(UpdateError::InstallFailed(format!(

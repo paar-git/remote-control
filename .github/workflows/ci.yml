@@ -48,8 +48,15 @@ jobs:
         run: pnpm test:run
 
   rust:
-    name: Rust toolchain (format, clippy, tests)
-    runs-on: ubuntu-latest
+    # Conditional compilation means a symbol can be live on one platform and
+    # dead on another, so lints and tests run on every platform the app ships
+    # to rather than on Linux alone.
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -62,6 +69,7 @@ jobs:
       # The desktop client links against the system webkit stack, so the Tauri
       # packaging dependencies are required even for a check-only build.
       - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -71,6 +79,7 @@ jobs:
             patchelf
 
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
       - name: Clippy
