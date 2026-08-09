@@ -20,8 +20,14 @@ function fail(message) {
   process.exit(1);
 }
 
-function git(args) {
-  return execFileSync('git', args, { encoding: 'utf8' }).trim();
+function git(args, { quiet = false } = {}) {
+  return execFileSync('git', args, {
+    encoding: 'utf8',
+    // `git describe` writes "No tags can describe" to stderr when a repository
+    // has no tags yet. That is an expected answer for a first release, not a
+    // problem worth printing into the release log.
+    stdio: quiet ? ['ignore', 'pipe', 'ignore'] : ['ignore', 'pipe', 'inherit'],
+  }).trim();
 }
 
 // Conventional-commit prefixes, mapped to the headings users actually read.
@@ -53,7 +59,7 @@ function parseCommit(line) {
 
 function previousTag(tag) {
   try {
-    return git(['describe', '--tags', '--abbrev=0', `${tag}^`]);
+    return git(['describe', '--tags', '--abbrev=0', `${tag}^`], { quiet: true });
   } catch {
     return null;
   }
