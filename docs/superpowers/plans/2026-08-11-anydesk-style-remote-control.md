@@ -18,6 +18,8 @@
 - TypeScript is pinned to 5.9 (not 7.x) because `typescript-eslint` requires `typescript <6.1.0`. Never bump it.
 - TypeScript is strict with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
 - No mock implementations, no placeholder handlers, no stub returns anywhere in the tree. If something cannot be measured or performed, it is **absent**, never zero and never faked.
+  - **Ruled 2026-08-11:** this bans code that pretends to work. Interface copy that states plainly a feature is not in this version — such as the session screen's display panel in Task 17 — is the opposite of a stub and satisfies the constraint rather than violating it. Do not flag it.
+- **Ruled 2026-08-11:** address parsing is implemented twice, in `crates/transport/src/address.rs` and in `apps/desktop-client/src/address.ts`. This is deliberate, not drift. The backend's copy is the authority and re-validates every address; the frontend's exists only so a typo is reported under the field rather than as a connection failure seconds later. Do not flag it as duplication, and do not collapse it to one implementation.
 - Every value crossing the Tauri IPC boundary is validated by a Zod schema in `apps/desktop-client/src/api.ts`. Database rows never cross it; DTOs do.
 - No secret gets a `Serialize` impl or a plain `Debug`. Password hashes never reach the frontend.
 - Argon2id parameters are m=19 MiB, t=2, p=1 (`HashingPolicy::PRODUCTION`). Tests use `HashingPolicy::FAST_FOR_TESTS`.
