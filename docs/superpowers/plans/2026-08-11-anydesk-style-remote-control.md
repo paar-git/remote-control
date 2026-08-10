@@ -991,7 +991,7 @@ mod tests {
         let repository = RecentRepository::new(&database);
         repository.record("10.0.0.1", "BOX", 1_000).await.unwrap();
 
-        let fingerprint = Fingerprint::from_bytes(&[7u8; 32]);
+        let fingerprint = Fingerprint::from_bytes([7u8; 32]);
         let granted = PermissionSet::NONE.with(Permission::TransferFiles);
         repository
             .set_always_allow("10.0.0.1", Some(fingerprint.clone()), granted)
@@ -1011,7 +1011,7 @@ mod tests {
         let repository = RecentRepository::new(&database);
         repository.record("10.0.0.1", "BOX", 1_000).await.unwrap();
         repository
-            .set_always_allow("10.0.0.1", Some(Fingerprint::from_bytes(&[7u8; 32])), PermissionSet::ALL)
+            .set_always_allow("10.0.0.1", Some(Fingerprint::from_bytes([7u8; 32])), PermissionSet::ALL)
             .await
             .unwrap();
 
@@ -1094,15 +1094,21 @@ mod tests {
 
     #[tokio::test]
     async fn the_password_hash_is_not_part_of_the_loaded_settings() {
-        // HostSettings is the type that reaches the frontend. It must have no field
-        // that could carry a hash, which is pinned here by there being no way to ask
-        // for one.
+        // HostSettings is the type that reaches the frontend. A password is configured
+        // first, so this fails if the hash ever gains a path into the DTO — the test
+        // would pass trivially against an empty database.
         let database = temp_database().await;
         let repository = SettingsRepository::new(&database);
-        let settings = repository.load().await.unwrap();
-        let json = serde_json::to_string(&settings).unwrap();
+        let credential =
+            PasswordCredential::create("correct horse battery", HashingPolicy::FAST_FOR_TESTS, &OsRandom)
+                .unwrap();
+        repository.set_unattended(Some(&credential), PermissionSet::ALL).await.unwrap();
+
+        let json = serde_json::to_string(&repository.load().await.unwrap()).unwrap();
+
+        let phc = credential.expose_phc_for_storage();
+        assert!(!json.contains(phc), "the stored hash reached the settings DTO");
         assert!(!json.contains("argon2"));
-        assert!(!json.contains("phc"));
     }
 
     #[tokio::test]
@@ -1130,7 +1136,7 @@ rm -f crates/storage/src/owner.rs crates/storage/src/audit.rs crates/storage/src
 
 In `crates/storage/src/lib.rs` replace `pub mod owner; pub mod audit; pub mod trust;` with `pub mod recent; pub mod settings;` and update the re-exports to `pub use recent::{RecentConnection, RecentRepository}; pub use settings::{HostSettings, SettingsRepository};`.
 
-Add a `test_support` module to `crates/storage/src/lib.rs` if one does not already exist, exposing `pub(crate) async fn temp_database() -> Database` that opens an in-memory database and runs every migration. Follow whatever `repo_tests.rs` already does to build a database — reuse that helper rather than writing a second one.
+Add a `test_support` module to `crates/storage/src/lib.rs`, exposing `pub(crate) async fn temp_database() -> Database` built on the existing `Database::open_in_memory()` (used throughout `crates/storage/src/lib.rs`'s own tests), which runs every migration on open. Do not write a second way to build a test database.
 
 Write the production code above each new file's test module. `RecentRepository::record` is an `INSERT ... ON CONFLICT(address) DO UPDATE SET machine_name = excluded.machine_name, last_connected_ms = excluded.last_connected_ms` — note it deliberately leaves the pin alone, so reconnecting does not silently re-grant. `set_always_allow` writes `PermissionSet::NONE` whenever the fingerprint argument is `None`, which is what makes the schema's `CHECK` unreachable from the repository rather than merely guarded by it.
 
@@ -1266,10 +1272,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unbracketed_ipv6_address_with_a_port_is_refused_as_ambiguous() {
-        // "fe80::1:9000" cannot be told from an address whose last group is 9000.
-        // Refusing is the only honest answer; brackets are how the user says which.
-        assert!("fe80::1:9000".parse::<PeerAddress>().is_ok());
+    fn an_unbracketed_ipv6_address_keeps_the_default_port_rather_than_guessing() {
+        // "fe80::1:9000" cannot be told from an address whose last group is 9000, so
+        // the whole string is the host. Brackets are how the user says otherwise.
         let address: PeerAddress = "fe80::1:9000".parse().unwrap();
         assert_eq!(address.port, PeerAddress::DEFAULT_PORT);
         assert_eq!(address.host, "fe80::1:9000");
@@ -1591,7 +1596,7 @@ mod tests {
     fn request(password: Option<&str>) -> ConnectionRequest {
         ConnectionRequest {
             address: "192.168.1.77".parse::<PeerAddress>().unwrap(),
-            fingerprint: Fingerprint::from_bytes(&[7u8; 32]),
+            fingerprint: Fingerprint::from_bytes([7u8; 32]),
             machine_name: "WORK-LAPTOP".to_owned(),
             unattended_password: password.map(str::to_owned),
         }
@@ -1629,7 +1634,7 @@ mod tests {
         harness.recent().record("192.168.1.77:7443", "WORK-LAPTOP", 1_000).await.unwrap();
         harness
             .recent()
-            .set_always_allow("192.168.1.77:7443", Some(Fingerprint::from_bytes(&[7u8; 32])), granted)
+            .set_always_allow("192.168.1.77:7443", Some(Fingerprint::from_bytes([7u8; 32])), granted)
             .await
             .unwrap();
 
@@ -1648,7 +1653,7 @@ mod tests {
             .recent()
             .set_always_allow(
                 "192.168.1.77:7443",
-                Some(Fingerprint::from_bytes(&[99u8; 32])),
+                Some(Fingerprint::from_bytes([99u8; 32])),
                 PermissionSet::ALL,
             )
             .await
@@ -1769,6 +1774,11 @@ use crate::error::Result;
 /// What the person at the keyboard is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptRequest {
+    /// Correlates the dialog with the connection waiting on it.
+    ///
+    /// The answer arrives from a window, not from the connection, so without this an
+    /// answer could be applied to whichever request happened to be open.
+    pub request_id: String,
     /// The address the connection came from, as it will be displayed.
     pub address: String,
     /// The peer's certificate fingerprint, taken from the TLS connection.
@@ -1845,7 +1855,10 @@ pub async fn authorize_connection(
     request: &ConnectionRequest,
     deps: &AccessDeps<'_>,
 ) -> Result<Authorization> {
-    if !deps.settings.load().await?.accepting {
+    // Read once. Two reads could straddle a settings change and decide against two
+    // different configurations within one connection.
+    let settings = deps.settings.load().await?;
+    if !settings.accepting {
         return Ok(Authorization::Refused(RefusalReason::NotAccepting));
     }
 
@@ -1854,7 +1867,9 @@ pub async fn authorize_connection(
     // 1. A decision the user already made about this machine.
     if let Some(entry) = deps.recent.find(&key).await? {
         if let Some(pinned) = entry.pinned_fingerprint {
-            return Ok(if pinned == request.fingerprint {
+            // `ct_eq`, not `==`. The crate provides it precisely so no comparison of an
+            // identity anywhere in the tree is the one that leaks a timing signal.
+            return Ok(if pinned.ct_eq(&request.fingerprint) {
                 Authorization::Granted(entry.pinned_permissions)
             } else {
                 Authorization::Refused(RefusalReason::IdentityChanged)
@@ -1874,7 +1889,7 @@ pub async fn authorize_connection(
         }
 
         let stored = deps.settings.unattended_credential().await?;
-        let permitted = deps.settings.load().await?.unattended_permissions;
+        let permitted = settings.unattended_permissions;
 
         let verified = match &stored {
             Some(credential) => credential.verify(offered).is_ok(),
