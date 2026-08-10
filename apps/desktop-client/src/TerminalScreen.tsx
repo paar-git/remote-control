@@ -22,6 +22,7 @@
 
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
+import { Plus, SquareTerminal, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import '@xterm/xterm/css/xterm.css';
@@ -35,7 +36,7 @@ import {
   resizeTerminal,
   sendTerminalInput,
 } from './api.js';
-import { Badge, Button, EmptyState, type Toast } from './components';
+import { Badge, Button, EmptyState, PageHeader, SelectField, StatusBadge, type Toast } from './ui';
 
 /** Shells the operator can pick. */
 const SHELLS = [
@@ -124,50 +125,42 @@ export default function TerminalScreen({
   }, [onToast]);
 
   return (
-    <section className="flex h-full flex-col">
-      <header className="mb-4">
-        <h2 className="text-base font-semibold">Terminal</h2>
-        <p className="max-w-prose text-sm text-(--color-text-secondary)">
-          A real shell on the server. What you type goes to a pseudo-terminal there, and what it
-          prints comes back unaltered.
-        </p>
-      </header>
-
-      <div className="mb-3 flex flex-wrap items-end gap-2">
-        <div className="flex flex-col gap-1">
-          <label htmlFor="terminal-shell" className="text-xs text-(--color-text-secondary)">
-            Shell
-          </label>
-          <select
-            id="terminal-shell"
-            value={shell}
-            onChange={(event) => {
-              setShell(event.target.value);
-            }}
-            className="rounded border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5 text-sm"
-          >
-            {SHELLS.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <Button variant="primary" onClick={open} disabled={opening}>
-          {opening ? 'Opening…' : 'New terminal'}
-        </Button>
-      </div>
+    <section className="animate-fade-in flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Terminal"
+        description="A real shell on the server. What you type goes to a pseudo-terminal there, and what it prints comes back unaltered."
+        actions={
+          <div className="flex items-end gap-2">
+            <SelectField label="Shell" value={shell} onChange={setShell} options={SHELLS} />
+            <Button variant="primary" icon={Plus} onClick={open} disabled={opening} className="h-9">
+              {opening ? 'Opening…' : 'New terminal'}
+            </Button>
+          </div>
+        }
+      />
 
       {tabs.length === 0 ? (
         <EmptyState
+          icon={SquareTerminal}
           title="No terminals open"
           body="Choose a shell and open one. Sessions end when you close them or when the connection to the server ends — nothing is left running on the server afterwards."
         />
       ) : (
         <>
-          <div role="tablist" aria-label="Terminals" className="mb-2 flex flex-wrap gap-1.5">
+          <div
+            role="tablist"
+            aria-label="Terminals"
+            className="mb-3 flex flex-wrap gap-1.5 border-b border-(--color-border-subtle) pb-2"
+          >
             {tabs.map((tab) => (
-              <div key={tab.id} className="flex items-center">
+              <div
+                key={tab.id}
+                className={`flex items-center rounded-lg border transition-colors duration-150 ease-(--ease-ui) ${
+                  tab.id === active
+                    ? 'border-(--color-accent)/40 bg-(--color-accent-soft)'
+                    : 'border-(--color-border-subtle) hover:bg-(--color-surface-overlay)'
+                }`}
+              >
                 <button
                   type="button"
                   role="tab"
@@ -175,12 +168,11 @@ export default function TerminalScreen({
                   onClick={() => {
                     setActive(tab.id);
                   }}
-                  className={`rounded-l border px-3 py-1 text-xs ${
-                    tab.id === active
-                      ? 'border-(--color-accent) text-(--color-accent)'
-                      : 'border-(--color-border-subtle)'
+                  className={`flex items-center gap-1.5 rounded-l-lg px-2.5 py-1 text-xs ${
+                    tab.id === active ? 'text-(--color-accent)' : 'text-(--color-text-secondary)'
                   }`}
                 >
+                  <SquareTerminal aria-hidden="true" className="size-3.5" />
                   {tab.title}
                   {tab.exited && ' (ended)'}
                 </button>
@@ -190,9 +182,9 @@ export default function TerminalScreen({
                   onClick={() => {
                     close(tab.id);
                   }}
-                  className="rounded-r border border-l-0 border-(--color-border-subtle) px-2 py-1 text-xs"
+                  className="rounded-r-lg px-1.5 py-1 text-(--color-text-muted) transition-colors duration-150 ease-(--ease-ui) hover:text-(--color-text-primary)"
                 >
-                  ×
+                  <X aria-hidden="true" className="size-3.5" />
                 </button>
               </div>
             ))}
@@ -240,7 +232,9 @@ function TerminalPane({
       // Bounded: a shell can print without limit, and unbounded scrollback in a
       // long-lived window is a slow memory leak.
       scrollback: 5000,
-      theme: { background: '#0b0f14' },
+      // Matches `--color-surface-sunken` so the emulator reads as part of the app
+      // rather than as an embedded black rectangle.
+      theme: { background: '#0b0e13', foreground: '#e6eaf2', cursor: '#4c7df0' },
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -305,17 +299,21 @@ function TerminalPane({
   }, [tab.exited]);
 
   return (
-    <div className={visible ? 'flex flex-1 flex-col' : 'hidden'}>
-      <div className="mb-1.5 flex flex-wrap items-center gap-2 text-xs text-(--color-text-secondary)">
-        <span className="font-mono">{tab.shellPath}</span>
-        <span>PID {tab.pid}</span>
-        {tab.elevated ? <Badge tone="warning">Elevated</Badge> : <Badge>Standard privileges</Badge>}
-        {tab.exited && <Badge tone="danger">Ended</Badge>}
+    <div className={visible ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-(--color-text-secondary)">
+        <span className="font-mono select-text">{tab.shellPath}</span>
+        <span className="text-(--color-text-muted)">PID {tab.pid}</span>
+        {tab.elevated ? (
+          <StatusBadge tone="warning">Elevated</StatusBadge>
+        ) : (
+          <Badge>Standard privileges</Badge>
+        )}
+        {tab.exited && <StatusBadge tone="danger">Ended</StatusBadge>}
       </div>
 
       <div
         ref={host}
-        className="min-h-80 flex-1 overflow-hidden rounded border border-(--color-border-subtle)"
+        className="min-h-80 flex-1 overflow-hidden rounded-xl border border-(--color-border-subtle) bg-(--color-surface-sunken) p-2"
       />
 
       {status !== '' && (

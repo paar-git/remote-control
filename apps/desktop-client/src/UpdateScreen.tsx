@@ -1,3 +1,4 @@
+import { ChevronRight } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
@@ -12,7 +13,17 @@ import {
   pauseUpdateDownload,
   resumeUpdateDownload,
 } from './api.js';
-import { Button, ConfirmDialog, type Toast } from './components';
+import {
+  Button,
+  Card,
+  ConfirmDialog,
+  ErrorState,
+  PageHeader,
+  SkeletonRows,
+  StatusBadge,
+  type StatusTone,
+  type Toast,
+} from './ui';
 import { formatBytes, formatDuration, formatRate, humanise } from './format.js';
 import {
   ACTIVE_STATES,
@@ -21,6 +32,34 @@ import {
   primaryAction,
   transferControls,
 } from './updates.js';
+
+/** The status tone for an update-manager state. */
+function stateTone(state: UpdateStatus['state']): StatusTone {
+  switch (state) {
+    case 'failed':
+      return 'danger';
+    case 'update_available':
+    case 'ready_to_install':
+    case 'waiting_for_user_confirmation':
+    case 'restart_required':
+      return 'warning';
+    case 'checking_for_updates':
+    case 'preparing_download':
+    case 'downloading':
+    case 'resuming':
+    case 'verifying':
+    case 'installing':
+    case 'recovering':
+      return 'busy';
+    case 'no_update_available':
+    case 'completed':
+      return 'ready';
+    case 'idle':
+    case 'paused':
+    case 'waiting_for_network':
+      return 'idle';
+  }
+}
 
 interface SpeedSample {
   readonly bytes: number;
@@ -155,25 +194,24 @@ export default function UpdateScreen({
 
   if (loadError !== null && status === null) {
     return (
-      <section className="max-w-3xl">
-        <h2 className="mb-1 text-base font-semibold">Updates</h2>
-        <p role="alert" className="mb-4 text-sm text-(--color-danger)">
-          {loadError}
-        </p>
-        <Button variant="primary" onClick={refresh}>
-          Retry
-        </Button>
+      <section className="max-w-4xl">
+        <PageHeader title="Updates" />
+        <ErrorState
+          summary="The update manager couldn’t be reached."
+          detail={loadError}
+          onRetry={refresh}
+        />
       </section>
     );
   }
 
   if (status === null) {
     return (
-      <section className="max-w-3xl">
-        <h2 className="mb-1 text-base font-semibold">Updates</h2>
-        <p role="status" className="text-sm text-(--color-text-secondary)">
-          Loading update manager…
-        </p>
+      <section className="max-w-4xl">
+        <PageHeader title="Updates" description="Loading update manager…" />
+        <Card>
+          <SkeletonRows rows={3} />
+        </Card>
       </section>
     );
   }
@@ -208,14 +246,14 @@ export default function UpdateScreen({
   };
 
   return (
-    <section className="max-w-3xl">
-      <h2 className="mb-1 text-base font-semibold">Updates</h2>
-      <p className="mb-5 max-w-prose text-sm text-(--color-text-secondary)">
-        Updates are verified against a signed release manifest and a SHA-256 checksum before
-        anything is installed, and nothing installs without your confirmation.
-      </p>
+    <section className="animate-fade-in max-w-4xl">
+      <PageHeader
+        title="Updates"
+        description="Updates are verified against a signed release manifest and a SHA-256 checksum before anything is installed, and nothing installs without your confirmation."
+        meta={<StatusBadge tone={stateTone(status.state)}>{humanise(status.state)}</StatusBadge>}
+      />
 
-      <section className="rounded-lg border border-(--color-border-subtle) bg-(--color-surface-raised) p-5">
+      <Card className="p-5!">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <p className="text-sm font-semibold">{versionHeadline(status)}</p>
@@ -280,15 +318,12 @@ export default function UpdateScreen({
             )}
           </div>
         )}
-      </section>
+      </Card>
 
       {status.lastError !== null && status.state === 'failed' && (
-        <p
-          role="alert"
-          className="mt-4 rounded border border-(--color-danger) p-3 text-sm text-(--color-danger)"
-        >
-          {status.lastError}
-        </p>
+        <div className="mt-4">
+          <ErrorState summary="The last update attempt failed." detail={status.lastError} />
+        </div>
       )}
 
       {notes.length > 0 && (
@@ -321,9 +356,13 @@ export default function UpdateScreen({
           onClick={() => {
             setAdvancedOpen((open) => !open);
           }}
-          className="text-sm text-(--color-text-secondary) hover:text-(--color-text)"
+          className="flex items-center gap-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:text-(--color-text-primary)"
         >
-          {advancedOpen ? '▾' : '▸'} Advanced
+          <ChevronRight
+            aria-hidden="true"
+            className={`size-3.5 transition-transform duration-150 ease-(--ease-ui) ${advancedOpen ? 'rotate-90' : ''}`}
+          />
+          Advanced
         </button>
 
         {advancedOpen && (

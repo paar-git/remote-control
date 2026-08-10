@@ -26,6 +26,7 @@
  * its own slower timer.
  */
 
+import { Pause, Play } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
@@ -39,7 +40,7 @@ import {
   subscribeMetrics,
   unsubscribeMetrics,
 } from './api.js';
-import { Badge, Button, EmptyState } from './components';
+import { Button, Card, EmptyState, ErrorState, PageHeader, Skeleton, StatusBadge } from './ui';
 import { formatBytes, formatDuration, formatRate, formatTimestamp } from './format.js';
 
 /** How often readings are wanted, whether pushed or polled. */
@@ -234,18 +235,30 @@ export default function MonitoringScreen(): React.JSX.Element {
 
   if (state.status === 'loading' || state.status === 'idle') {
     return (
-      <p role="status" className="text-sm text-(--color-text-secondary)">
-        Reading the server’s status…
-      </p>
+      <div className="flex flex-col gap-6">
+        <PageHeader title="Monitoring" description="Reading the server’s status…" />
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((index) => (
+            <Card key={index}>
+              <Skeleton className="h-3 w-16" />
+              <Skeleton className="mt-2 h-7 w-24" />
+              <Skeleton className="mt-2 h-3 w-32" />
+            </Card>
+          ))}
+        </div>
+      </div>
     );
   }
 
   if (state.status === 'error') {
     return (
-      <div role="alert" className="max-w-prose rounded border border-(--color-danger) p-4 text-sm">
-        <h2 className="mb-1 font-semibold text-(--color-danger)">Could not read the server</h2>
-        <p className="mb-3 text-(--color-text-secondary)">{state.message}</p>
-        <Button onClick={refresh}>Try again</Button>
+      <div className="flex flex-col gap-6">
+        <PageHeader title="Monitoring" />
+        <ErrorState
+          summary="The server’s readings couldn’t be collected."
+          detail={state.message}
+          onRetry={refresh}
+        />
       </div>
     );
   }
@@ -257,43 +270,41 @@ export default function MonitoringScreen(): React.JSX.Element {
       : (snapshot.memoryUsedBytes / snapshot.memoryTotalBytes) * 100;
 
   return (
-    <section>
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold">Monitoring</h2>
-          <p className="max-w-prose text-sm text-(--color-text-secondary)">
-            Live readings from the server. Everything shown was measured; anything the server could
-            not measure is left out rather than shown as zero.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge tone={live ? 'success' : 'neutral'}>
+    <section className="animate-fade-in">
+      <PageHeader
+        title="Monitoring"
+        description="Live readings from the server. Everything shown was measured; anything the server could not measure is left out rather than shown as zero."
+        meta={
+          <StatusBadge tone={live ? 'busy' : 'idle'}>
             {!live
               ? 'Paused'
               : delivery === 'push'
                 ? `Live · pushed every ${((acceptedMs ?? REFRESH_MS) / 1000).toFixed(1)} s`
                 : 'Live · polled'}
-          </Badge>
+          </StatusBadge>
+        }
+        actions={
           <Button
+            icon={live ? Pause : Play}
             onClick={() => {
               setLive((current) => !current);
             }}
           >
             {live ? 'Pause' : 'Resume'}
           </Button>
-        </div>
-      </header>
+        }
+      />
 
       {notice === null ? null : (
         <p
           role="status"
-          className="mb-4 rounded border border-(--color-warning) p-3 text-sm text-(--color-text-secondary)"
+          className="mb-4 rounded-xl border border-(--color-warning)/40 bg-(--color-warning-soft) p-3 text-sm text-(--color-text-secondary)"
         >
           {notice} These readings are being polled instead.
         </p>
       )}
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Metric
           label="CPU"
           value={`${snapshot.cpuPercent.toFixed(1)}%`}
@@ -525,14 +536,14 @@ function Metric({
   readonly history: readonly number[];
 }): React.JSX.Element {
   return (
-    <div className="rounded border border-(--color-border-subtle) p-4">
-      <div className="text-xs text-(--color-text-secondary)">{label}</div>
-      <div className="mt-0.5 text-2xl font-semibold tabular-nums">{value}</div>
-      <div className="mt-0.5 truncate text-xs text-(--color-text-secondary)" title={detail}>
+    <Card>
+      <div className="text-xs font-medium text-(--color-text-secondary)">{label}</div>
+      <div className="mt-1 text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
+      <div className="mt-0.5 truncate text-xs text-(--color-text-muted)" title={detail}>
         {detail}
       </div>
       {history.length > 1 && <Sparkline values={history} />}
-    </div>
+    </Card>
   );
 }
 
@@ -586,12 +597,12 @@ function Bar({
   const clamped = Math.min(Math.max(percent, 0), 100);
   return (
     <div
-      className="h-1.5 w-full overflow-hidden rounded-full bg-(--color-border-subtle)"
+      className="h-1.5 w-full overflow-hidden rounded-full bg-(--color-surface-overlay)"
       role="img"
       aria-label={`${clamped.toFixed(0)} percent`}
     >
       <div
-        className={`h-full rounded-full ${
+        className={`h-full rounded-full transition-[width] duration-200 ease-(--ease-ui) ${
           clamped >= warnAbove ? 'bg-(--color-danger)' : 'bg-(--color-accent)'
         }`}
         style={{ width: `${String(clamped)}%` }}
@@ -609,9 +620,9 @@ function Panel({
   readonly children: React.ReactNode;
 }): React.JSX.Element {
   return (
-    <div className="mb-4 rounded border border-(--color-border-subtle) p-4">
+    <Card className="mb-4">
       <h3 className="mb-3 text-sm font-semibold">{title}</h3>
       {children}
-    </div>
+    </Card>
   );
 }

@@ -2,53 +2,49 @@
  * Application shell.
  *
  * The app is gated: on first run it asks for an owner account, thereafter it asks for
- * the owner password. Only once unlocked does the sidebar appear. Sections whose
- * features arrive in a later phase are rendered disabled and labelled with the phase,
- * rather than as buttons that look live and do nothing.
+ * the owner password. Only once unlocked does the shell appear.
+ *
+ * # Two modes
+ *
+ * Out of session the window is a normal application: sidebar, toolbar, content. Inside a
+ * session it becomes the remote computer — {@link SessionScreen} replaces the entire
+ * frame, chrome and all. That is the whole point of the design: once you are connected,
+ * the interface gets out of the way. `inSession` is what switches between the two, and it
+ * is never set unless the backend reports a live connection.
+ *
+ * Two pieces of state live here rather than in the screens, because more than one screen
+ * needs them and they must agree: the live connection, polled once and shared, and the
+ * pending update, which drives the sidebar badge, the toolbar bell and the banner.
  */
 
+import { AlertTriangle, MonitorCog } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import {
-  type ClientInfo,
   type OwnerStatus,
-  createOwner,
   getClientInfo,
   getOwnerStatus,
-  ownerLogin,
+  isConnected,
   ownerLogout,
 } from './api.js';
-import { Button, type Toast, ToastBar } from './components';
-import DevicesScreen from './DevicesScreen';
+import { AuthScreen } from './AuthScreen';
 import FilesScreen from './FilesScreen';
 import MonitoringScreen from './MonitoringScreen';
+import { RemoteAccessScreen } from './RemoteAccessScreen';
+import { RemoteSupportScreen } from './RemoteSupportScreen';
+import { SessionScreen } from './SessionScreen';
 import TerminalScreen from './TerminalScreen';
+import { ThisComputerScreen } from './ThisComputerScreen';
 import UpdateScreen from './UpdateScreen';
 import { isTauriAvailable } from './ipc.js';
+import { AppShell } from './shell/AppShell';
+import { DEFAULT_SECTION, isSectionAvailable, sectionForShortcut } from './shell/navigation';
+import { Sidebar, type ServiceStatus } from './shell/Sidebar';
+import { TopBar } from './shell/TopBar';
+import { type Connection, useConnectionState } from './useConnection.js';
 import { isReadyToInstall, pendingUpdateVersion } from './updates.js';
 import { useUpdateWatcher } from './useUpdateWatcher.js';
-
-interface NavItem {
-  readonly id: string;
-  readonly label: string;
-  /** `null` once the section is implemented. */
-  readonly availableInPhase: number | null;
-}
-
-const NAV_ITEMS: readonly NavItem[] = [
-  { id: 'home', label: 'Home', availableInPhase: null },
-  { id: 'devices', label: 'Devices', availableInPhase: null },
-  { id: 'remote-desktop', label: 'Remote Desktop', availableInPhase: 6 },
-  { id: 'terminal', label: 'Terminal', availableInPhase: null },
-  { id: 'files', label: 'Files', availableInPhase: null },
-  { id: 'processes', label: 'Processes', availableInPhase: 7 },
-  { id: 'services', label: 'Services', availableInPhase: 7 },
-  { id: 'monitoring', label: 'Monitoring', availableInPhase: null },
-  { id: 'updates', label: 'Updates', availableInPhase: null },
-  { id: 'power', label: 'Power', availableInPhase: 7 },
-  { id: 'activity', label: 'Activity', availableInPhase: 7 },
-  { id: 'settings', label: 'Settings', availableInPhase: 9 },
-];
+import { Button, ToastBar, type Toast } from './ui';
 
 type Gate =
   | { readonly status: 'loading' }
@@ -57,14 +53,29 @@ type Gate =
   | { readonly status: 'locked' }
   | { readonly status: 'unlocked'; readonly username: string };
 
+/** Remembered so the window opens the way it was left. */
+const COLLAPSED_KEY = 'rc.sidebar.collapsed';
+
 export default function App(): React.JSX.Element {
   const [gate, setGate] = useState<Gate>({ status: 'loading' });
-  const [section, setSection] = useState('home');
+  const [section, setSection] = useState(DEFAULT_SECTION);
   const [toast, setToast] = useState<Toast | null>(null);
+  const [inSession, setInSession] = useState(false);
+  const [sessionDevice, setSessionDevice] = useState<string | null>(null);
+  const [deviceEpoch, setDeviceEpoch] = useState(0);
+  const [collapsed, setCollapsed] = useState(
+    () => globalThis.localStorage?.getItem(COLLAPSED_KEY) === 'true',
+  );
+
+  const unlocked = gate.status === 'unlocked';
+
   // Only poll for releases once the app is unlocked; before that the backend
   // refuses the capability check anyway.
-  const updates = useUpdateWatcher(gate.status === 'unlocked');
+  const updates = useUpdateWatcher(unlocked);
   const pendingVersion = pendingUpdateVersion(updates.status);
+  const connection = useConnectionState(unlocked);
+  const service = useServiceStatus(gate.status);
+  const live = isConnected(connection.state);
 
   const applyStatus = useCallback((status: OwnerStatus) => {
     if (status.authenticated && status.username !== null) {
@@ -105,137 +116,237 @@ export default function App(): React.JSX.Element {
     };
   }, [applyStatus]);
 
-  if (gate.status === 'loading') {
-    return (
-      <Centered>
-        <p role="status" className="text-sm text-(--color-text-secondary)">
-          Starting…
-        </p>
-      </Centered>
-    );
-  }
+  // A session that ends — deliberately or not — must not leave the window pretending to
+  // be a remote computer. The backend's state is the authority.
+  useEffect(() => {
+    if (!live) {
+      setInSession(false);
+      setSessionDevice(null);
+    }
+  }, [live]);
 
-  if (gate.status === 'unavailable') {
-    return (
-      <Centered>
-        <div role="alert" className="max-w-prose rounded border border-(--color-danger) p-4">
-          <h1 className="mb-1 text-sm font-semibold text-(--color-danger)">Backend unavailable</h1>
-          <p className="text-sm text-(--color-text-secondary)">{gate.message}</p>
-        </div>
-      </Centered>
-    );
-  }
+  const navigate = useCallback((id: string) => {
+    // Guarded rather than trusted: a shortcut or a panel button must not be able to
+    // route to a section the sidebar itself refuses to open.
+    if (!isSectionAvailable(id)) return;
+    setInSession(false);
+    setSection(id);
+  }, []);
+
+  // Shortcuts are only advertised on items that are bound, and only bound while the app
+  // is unlocked — nothing behind the gate should be reachable by keyboard.
+  useEffect(() => {
+    if (!unlocked) return;
+
+    const onKey = (event: KeyboardEvent): void => {
+      const target = sectionForShortcut(event);
+      if (target === undefined) return;
+      event.preventDefault();
+      navigate(target);
+    };
+
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [unlocked, navigate]);
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed((current) => {
+      const next = !current;
+      globalThis.localStorage?.setItem(COLLAPSED_KEY, String(next));
+      return next;
+    });
+  }, []);
+
+  const lock = useCallback(() => {
+    ownerLogout()
+      .then(() => {
+        setGate({ status: 'locked' });
+        setInSession(false);
+        setSection(DEFAULT_SECTION);
+      })
+      .catch(() => {
+        setToast({ kind: 'error', message: 'Could not lock the application.' });
+      });
+  }, []);
+
+  const dismissToast = useCallback(() => {
+    setToast(null);
+  }, []);
+
+  if (gate.status === 'loading') return <Splash />;
+
+  if (gate.status === 'unavailable') return <BackendUnavailable message={gate.message} />;
 
   if (gate.status === 'setup' || gate.status === 'locked') {
     return (
-      <Centered>
-        <AuthPanel mode={gate.status} onAuthenticated={applyStatus} onToast={setToast} />
-        <ToastBar
-          toast={toast}
-          onDismiss={() => {
-            setToast(null);
+      <>
+        <AuthScreen mode={gate.status} onAuthenticated={applyStatus} onToast={setToast} />
+        <ToastBar toast={toast} onDismiss={dismissToast} />
+      </>
+    );
+  }
+
+  // The session owns the whole window, with no sidebar and no toolbar over it.
+  if (inSession && live) {
+    return (
+      <>
+        <SessionScreen
+          connection={connection.state}
+          deviceName={sessionDevice}
+          onToast={setToast}
+          onLeave={() => {
+            setInSession(false);
           }}
+          onOpenTool={navigate}
         />
-      </Centered>
+        <ToastBar toast={toast} onDismiss={dismissToast} />
+      </>
     );
   }
 
   return (
-    <div className="flex h-full">
-      <nav
-        aria-label="Sections"
-        className="flex w-56 shrink-0 flex-col justify-between border-r border-(--color-border-subtle) bg-(--color-surface-sunken)"
-      >
-        <div>
-          <div className="px-4 py-4">
-            <h1 className="text-sm font-semibold">Remote Control</h1>
-            <p className="text-xs text-(--color-text-secondary)">Private remote access</p>
-          </div>
-
-          <ul className="flex flex-col gap-0.5 px-2 pb-4">
-            {NAV_ITEMS.map((item) => {
-              const enabled = item.availableInPhase === null;
-              return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    disabled={!enabled}
-                    aria-current={item.id === section ? 'page' : undefined}
-                    onClick={() => {
-                      if (enabled) setSection(item.id);
-                    }}
-                    title={
-                      enabled ? undefined : `Arrives in development phase ${item.availableInPhase}`
-                    }
-                    className={
-                      'flex w-full items-center justify-between rounded px-3 py-1.5 text-left text-sm ' +
-                      (enabled
-                        ? item.id === section
-                          ? 'bg-(--color-surface-raised) font-medium'
-                          : 'hover:bg-(--color-surface-raised)'
-                        : 'cursor-not-allowed text-(--color-text-secondary) opacity-60')
-                    }
-                  >
-                    <span>{item.label}</span>
-                    {item.id === 'updates' && pendingVersion !== null && (
-                      <span
-                        aria-label={`Version ${pendingVersion} available`}
-                        title={`Version ${pendingVersion} available`}
-                        className="size-2 shrink-0 rounded-full bg-(--color-accent)"
-                      />
-                    )}
-                    {!enabled && (
-                      <span className="text-[10px] tabular-nums">P{item.availableInPhase}</span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-
-        <div className="border-t border-(--color-border-subtle) px-3 py-3">
-          <p className="mb-2 truncate text-xs text-(--color-text-secondary)">
-            Signed in as {gate.username}
-          </p>
-          <Button
-            variant="ghost"
-            onClick={() => {
-              ownerLogout()
-                .then(() => {
-                  setGate({ status: 'locked' });
-                })
-                .catch(() => {
-                  setToast({ kind: 'error', message: 'Could not lock the application.' });
-                });
-            }}
-          >
-            Lock
-          </Button>
-        </div>
-      </nav>
-
-      <main className="flex-1 overflow-auto">
-        {pendingVersion !== null && section !== 'updates' && (
-          <UpdateBanner
-            version={pendingVersion}
-            ready={isReadyToInstall(updates.status)}
-            onOpen={() => {
-              setSection('updates');
-            }}
+    <>
+      <AppShell
+        sidebar={
+          <Sidebar
+            section={section}
+            onSelect={navigate}
+            collapsed={collapsed}
+            onToggleCollapsed={toggleCollapsed}
+            username={gate.username}
+            onLock={lock}
+            updateBadge={pendingVersion}
+            service={service}
+            sessionActive={live}
           />
-        )}
-        <div className="p-6">
-          <Section id={section} onToast={setToast} onUpdateChange={updates.refresh} />
-        </div>
-      </main>
+        }
+        toolbar={
+          <TopBar
+            section={section}
+            connection={connection.state}
+            pendingVersion={pendingVersion}
+            onOpenUpdates={() => {
+              navigate('updates');
+            }}
+            onResumeSession={
+              live
+                ? () => {
+                    setInSession(true);
+                  }
+                : undefined
+            }
+          />
+        }
+        banner={
+          pendingVersion !== null && section !== 'updates' ? (
+            <UpdateBanner
+              version={pendingVersion}
+              ready={isReadyToInstall(updates.status)}
+              onOpen={() => {
+                navigate('updates');
+              }}
+            />
+          ) : undefined
+        }
+      >
+        <Section
+          id={section}
+          connection={connection}
+          deviceEpoch={deviceEpoch}
+          onNavigate={navigate}
+          onToast={setToast}
+          onUpdateChange={updates.refresh}
+          onEnterSession={(name) => {
+            // `null` means "resume whatever is open", so the name already recorded
+            // when the session started is kept rather than blanked.
+            if (name !== null) setSessionDevice(name);
+            setInSession(true);
+          }}
+          onDevicesChanged={() => {
+            setDeviceEpoch((value) => value + 1);
+          }}
+        />
+      </AppShell>
 
-      <ToastBar
-        toast={toast}
-        onDismiss={() => {
-          setToast(null);
-        }}
-      />
+      <ToastBar toast={toast} onDismiss={dismissToast} />
+    </>
+  );
+}
+
+/**
+ * Whether this installation is working, summarised for the sidebar.
+ *
+ * Derived from what the client can actually verify about itself — the backend answered,
+ * and its local database opened — rather than from a service it does not run. The client
+ * is not the agent; claiming "service online" here would be describing another program.
+ */
+function useServiceStatus(gate: Gate['status']): ServiceStatus {
+  const [databaseReady, setDatabaseReady] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (gate !== 'unlocked') return;
+    let cancelled = false;
+    getClientInfo()
+      .then((info) => {
+        if (!cancelled) setDatabaseReady(info.databaseReady);
+      })
+      .catch(() => {
+        if (!cancelled) setDatabaseReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gate]);
+
+  if (databaseReady === null) {
+    return { tone: 'busy', label: 'Starting', detail: 'Reading this computer’s state.' };
+  }
+  if (!databaseReady) {
+    return {
+      tone: 'danger',
+      label: 'Storage error',
+      detail: 'The local database could not be opened, so nothing can be saved.',
+    };
+  }
+  return {
+    tone: 'ready',
+    label: 'Client ready',
+    detail: 'The client backend is running and its local database is open.',
+  };
+}
+
+/** The first frame, before the backend has answered. */
+function Splash(): React.JSX.Element {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 bg-(--color-surface)">
+      <span className="flex size-11 items-center justify-center rounded-2xl bg-(--color-accent) text-(--color-accent-text)">
+        <MonitorCog aria-hidden="true" className="size-5.5" />
+      </span>
+      <p role="status" className="text-sm text-(--color-text-secondary)">
+        Starting…
+      </p>
+    </div>
+  );
+}
+
+/** The one failure the shell itself has to render: no backend at all. */
+function BackendUnavailable({ message }: { readonly message: string }): React.JSX.Element {
+  return (
+    <div className="flex h-full items-center justify-center bg-(--color-surface) p-6">
+      <div
+        role="alert"
+        className="w-full max-w-md rounded-xl border border-(--color-danger)/40 bg-(--color-surface-raised) p-5"
+      >
+        <div className="mb-2 flex items-center gap-2.5">
+          <span className="flex size-8 items-center justify-center rounded-lg bg-(--color-danger-soft) text-(--color-danger)">
+            <AlertTriangle aria-hidden="true" className="size-4" />
+          </span>
+          <h1 className="text-base font-semibold">Backend unavailable</h1>
+        </div>
+        <p className="text-sm text-(--color-text-secondary)">{message}</p>
+      </div>
     </div>
   );
 }
@@ -257,7 +368,7 @@ function UpdateBanner({
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-3 border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-6 py-2.5"
+      className="flex flex-wrap items-center gap-3 border-b border-(--color-border-subtle) bg-(--color-accent-soft) px-5 py-2.5"
     >
       <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-(--color-accent)" />
       <p className="min-w-0 flex-1 text-sm">
@@ -266,167 +377,53 @@ function UpdateBanner({
           {ready ? 'It is verified and ready to install.' : 'Review the changes and update.'}
         </span>
       </p>
-      <Button variant="primary" onClick={onOpen}>
-        {ready ? 'Install Now' : 'View Update'}
+      <Button variant="primary" size="sm" onClick={onOpen}>
+        {ready ? 'Install now' : 'View update'}
       </Button>
     </div>
-  );
-}
-
-function Centered({ children }: { readonly children: React.ReactNode }): React.JSX.Element {
-  return <div className="flex h-full items-center justify-center p-6">{children}</div>;
-}
-
-/** Owner account creation and sign-in. */
-function AuthPanel({
-  mode,
-  onAuthenticated,
-  onToast,
-}: {
-  readonly mode: 'setup' | 'locked';
-  readonly onAuthenticated: (status: OwnerStatus) => void;
-  readonly onToast: (toast: Toast) => void;
-}): React.JSX.Element {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const setupMode = mode === 'setup';
-
-  const submit = (event: React.FormEvent): void => {
-    event.preventDefault();
-    setError(null);
-
-    if (setupMode && password !== confirm) {
-      setError('The two passwords do not match.');
-      return;
-    }
-
-    setBusy(true);
-    const action = setupMode
-      ? createOwner(username, password).then(() => ownerLogin(username, password))
-      : ownerLogin(username, password);
-
-    action
-      .then((status) => {
-        setPassword('');
-        setConfirm('');
-        if (setupMode) onToast({ kind: 'success', message: 'Owner account created.' });
-        onAuthenticated(status);
-      })
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : 'Could not sign in.');
-        setPassword('');
-      })
-      .finally(() => {
-        setBusy(false);
-      });
-  };
-
-  return (
-    <form
-      onSubmit={submit}
-      className="w-full max-w-sm rounded border border-(--color-border-subtle) bg-(--color-surface-raised) p-6"
-    >
-      <h1 className="mb-1 text-base font-semibold">
-        {setupMode ? 'Create your owner account' : 'Sign in'}
-      </h1>
-      <p className="mb-5 text-sm text-(--color-text-secondary)">
-        {setupMode
-          ? 'This account unlocks the application on this computer. There is no default password and no recovery — choose something you will not lose.'
-          : 'Enter your owner password to unlock the application.'}
-      </p>
-
-      <label htmlFor="username" className="mb-1 block text-sm font-medium">
-        Username
-      </label>
-      <input
-        id="username"
-        value={username}
-        onChange={(event) => {
-          setUsername(event.target.value);
-        }}
-        autoComplete="username"
-        maxLength={64}
-        required
-        className="mb-4 w-full rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
-      />
-
-      <label htmlFor="password" className="mb-1 block text-sm font-medium">
-        Password
-      </label>
-      <input
-        id="password"
-        type="password"
-        value={password}
-        onChange={(event) => {
-          setPassword(event.target.value);
-        }}
-        autoComplete={setupMode ? 'new-password' : 'current-password'}
-        required
-        className="w-full rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
-      />
-      {setupMode && (
-        <p className="mt-1 mb-4 text-xs text-(--color-text-secondary)">
-          At least 12 characters. Stored as an Argon2id hash, never in plain text.
-        </p>
-      )}
-
-      {setupMode && (
-        <>
-          <label htmlFor="confirm" className="mt-3 mb-1 block text-sm font-medium">
-            Confirm password
-          </label>
-          <input
-            id="confirm"
-            type="password"
-            value={confirm}
-            onChange={(event) => {
-              setConfirm(event.target.value);
-            }}
-            autoComplete="new-password"
-            required
-            className="mb-4 w-full rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
-          />
-        </>
-      )}
-
-      {error !== null && (
-        <p role="alert" className="mt-4 mb-2 text-sm text-(--color-danger)">
-          {error}
-        </p>
-      )}
-
-      <div className="mt-5">
-        <Button type="submit" variant="primary" disabled={busy}>
-          {busy ? 'Working…' : setupMode ? 'Create account' : 'Unlock'}
-        </Button>
-      </div>
-    </form>
   );
 }
 
 /**
  * The screen for the selected sidebar section.
  *
- * Sections that are not yet built are unreachable — the sidebar disables them and says
- * which phase implements them — so this falls back to Home rather than rendering a
- * placeholder that would look like a broken page.
+ * Sections that are not yet built are unreachable — the sidebar disables them, the
+ * shortcuts skip them and `navigate` refuses them — so this falls back to Remote Access
+ * rather than rendering a placeholder that would look like a broken page.
  */
 function Section({
   id,
+  connection,
+  deviceEpoch,
+  onNavigate,
   onToast,
   onUpdateChange,
+  onEnterSession,
+  onDevicesChanged,
 }: {
   readonly id: string;
+  readonly connection: Connection;
+  /** Bumped when the device list changes, so Remote Access reloads on return. */
+  readonly deviceEpoch: number;
+  readonly onNavigate: (section: string) => void;
   readonly onToast: (toast: Toast) => void;
   readonly onUpdateChange: () => void;
+  readonly onEnterSession: (deviceName: string | null) => void;
+  readonly onDevicesChanged: () => void;
 }): React.JSX.Element {
   switch (id) {
-    case 'devices':
-      return <DevicesScreen onToast={onToast} />;
+    case 'remote-support':
+      return (
+        <RemoteSupportScreen
+          onToast={onToast}
+          onPaired={() => {
+            onDevicesChanged();
+            onNavigate('remote-access');
+          }}
+        />
+      );
+    case 'this-computer':
+      return <ThisComputerScreen connection={connection.state} onNavigate={onNavigate} />;
     case 'monitoring':
       return <MonitoringScreen />;
     case 'updates':
@@ -436,69 +433,16 @@ function Section({
     case 'files':
       return <FilesScreen onToast={onToast} />;
     default:
-      return <HomeScreen />;
+      return (
+        <RemoteAccessScreen
+          key={deviceEpoch}
+          onToast={onToast}
+          connection={connection}
+          onOpenSession={onEnterSession}
+          onAddComputer={() => {
+            onNavigate('remote-support');
+          }}
+        />
+      );
   }
-}
-
-/** The home overview. */
-function HomeScreen(): React.JSX.Element {
-  const [info, setInfo] = useState<ClientInfo | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getClientInfo()
-      .then((value) => {
-        if (!cancelled) setInfo(value);
-      })
-      .catch(() => {
-        if (!cancelled) setInfo(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (info === null) {
-    return (
-      <p role="status" className="text-sm text-(--color-text-secondary)">
-        Loading client information…
-      </p>
-    );
-  }
-
-  const rows: readonly (readonly [string, string])[] = [
-    ['App version', info.appVersion],
-    ['Protocol', `${String(info.protocolVersion.major)}.${String(info.protocolVersion.minor)}`],
-    ['Hostname', info.hostname],
-    ['Operating system', `${info.osVersion} (${info.osFamily})`],
-    ['Architecture', info.architecture],
-    ['Running elevated', info.elevated ? 'yes' : 'no'],
-    ['Local database', info.databaseReady ? 'ready' : 'unavailable'],
-  ];
-
-  return (
-    <section>
-      <h2 className="mb-1 text-base font-semibold">This computer</h2>
-      <p className="mb-4 max-w-prose text-sm text-(--color-text-secondary)">
-        Device identity and pairing are ready. Connecting to a server needs the network transport,
-        which arrives in phase 3; see <code>PROGRESS.md</code>.
-      </p>
-
-      <dl className="max-w-md divide-y divide-(--color-border-subtle) rounded border border-(--color-border-subtle)">
-        {rows.map(([label, value]) => (
-          <div key={label} className="flex justify-between gap-4 px-3 py-2 text-sm">
-            <dt className="text-(--color-text-secondary)">{label}</dt>
-            <dd className="font-mono">{value}</dd>
-          </div>
-        ))}
-      </dl>
-
-      {info.elevated && (
-        <p role="alert" className="mt-4 max-w-prose text-sm text-(--color-warning)">
-          This client is running with administrator privileges. That is not required and not
-          recommended — privileged operations are routed through the agent service instead.
-        </p>
-      )}
-    </section>
-  );
 }

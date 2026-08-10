@@ -3,78 +3,95 @@
 /*
  * Design tokens.
  *
- * The interface is a dense administration tool, not a marketing page: a neutral
- * surface hierarchy, one accent colour reserved for primary actions, and a separate
- * danger colour that appears only on destructive confirmations. Both themes are
- * defined here so the whole app inherits them rather than each view improvising.
+ * This is a dense administration tool, so the system is built from a small number of
+ * decisions rather than per-view improvisation:
+ *
+ * * **Four surface levels.** Sunken (the sidebar) sits below the page, raised is a
+ *   card, overlay is a popover or a hover state. Depth comes from surface and border,
+ *   not from shadow — shadow is reserved for things that genuinely float.
+ * * **One accent.** Reserved for the primary action and the current navigation item.
+ *   Status colours (success, warning, danger) are never used decoratively; each one
+ *   means the state it names.
+ * * **Soft variants.** Every status colour has a low-alpha companion used as a fill
+ *   behind the solid colour, so a badge reads as a state rather than as a button.
+ *
+ * Dark is the product's design, not a preference: the app defines the dark palette on
+ * `:root` and keeps a light equivalent behind an explicit `data-theme` opt-in so a
+ * future setting has somewhere to land.
  */
 @theme {
-  --color-surface: oklch(99% 0 0);
-  --color-surface-raised: oklch(100% 0 0);
-  --color-surface-sunken: oklch(96.5% 0.002 250);
-  --color-border-subtle: oklch(91% 0.004 250);
-  --color-text-primary: oklch(22% 0.01 250);
-  --color-text-secondary: oklch(48% 0.012 250);
-  --color-accent: oklch(55% 0.16 250);
-  --color-accent-text: oklch(99% 0 0);
-  --color-danger: oklch(53% 0.2 25);
-  --color-success: oklch(58% 0.14 150);
-  --color-warning: oklch(70% 0.15 75);
+  /* Surfaces, darkest first. */
+  --color-surface-sunken: #0b0e13;
+  --color-surface: #0f1218;
+  --color-surface-raised: #161b23;
+  --color-surface-overlay: #1c222c;
+
+  /* Hairlines. Alpha rather than a flat colour so they read correctly on any surface. */
+  --color-border-subtle: rgb(255 255 255 / 7%);
+  --color-border-strong: rgb(255 255 255 / 13%);
+
+  /* Text, brightest first. `muted` is for de-emphasised metadata only. */
+  --color-text-primary: #e6eaf2;
+  --color-text-secondary: #9ba6b8;
+  --color-text-muted: #6c778a;
+
+  --color-accent: #4c7df0;
+  --color-accent-hover: #5f8bf4;
+  --color-accent-soft: rgb(76 125 240 / 15%);
+  --color-accent-text: #ffffff;
+
+  --color-success: #3fb950;
+  --color-success-soft: rgb(63 185 80 / 14%);
+  --color-warning: #d8a02a;
+  --color-warning-soft: rgb(216 160 42 / 15%);
+  --color-danger: #f0505f;
+  --color-danger-soft: rgb(240 80 95 / 14%);
+
+  /* One motion vocabulary, so nothing invents its own timing. */
+  --ease-ui: cubic-bezier(0.2, 0, 0.2, 1);
 }
 
 @layer base {
   :root {
-    color-scheme: light dark;
+    color-scheme: dark;
   }
 
-  /* The viewer's OS preference is the default signal. */
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --color-surface: oklch(20% 0.008 250);
-      --color-surface-raised: oklch(24% 0.009 250);
-      --color-surface-sunken: oklch(16% 0.007 250);
-      --color-border-subtle: oklch(32% 0.01 250);
-      --color-text-primary: oklch(95% 0.004 250);
-      --color-text-secondary: oklch(70% 0.012 250);
-      --color-accent: oklch(68% 0.15 250);
-      --color-accent-text: oklch(18% 0.01 250);
-      --color-danger: oklch(66% 0.19 25);
-      --color-success: oklch(72% 0.15 150);
-      --color-warning: oklch(78% 0.15 75);
-    }
-  }
-
-  /* An explicit in-app choice must win over the OS preference in both directions. */
-  :root[data-theme='light'] {
-    --color-surface: oklch(99% 0 0);
-    --color-surface-raised: oklch(100% 0 0);
-    --color-surface-sunken: oklch(96.5% 0.002 250);
-    --color-border-subtle: oklch(91% 0.004 250);
-    --color-text-primary: oklch(22% 0.01 250);
-    --color-text-secondary: oklch(48% 0.012 250);
-    --color-accent: oklch(55% 0.16 250);
-    --color-accent-text: oklch(99% 0 0);
-    --color-danger: oklch(53% 0.2 25);
-    --color-success: oklch(58% 0.14 150);
-    --color-warning: oklch(70% 0.15 75);
-  }
-
+  /* An explicit in-app choice must win in both directions. */
   :root[data-theme='dark'] {
-    --color-surface: oklch(20% 0.008 250);
-    --color-surface-raised: oklch(24% 0.009 250);
-    --color-surface-sunken: oklch(16% 0.007 250);
-    --color-border-subtle: oklch(32% 0.01 250);
-    --color-text-primary: oklch(95% 0.004 250);
-    --color-text-secondary: oklch(70% 0.012 250);
-    --color-accent: oklch(68% 0.15 250);
-    --color-accent-text: oklch(18% 0.01 250);
-    --color-danger: oklch(66% 0.19 25);
-    --color-success: oklch(72% 0.15 150);
-    --color-warning: oklch(78% 0.15 75);
+    color-scheme: dark;
+  }
+
+  :root[data-theme='light'] {
+    color-scheme: light;
+
+    --color-surface-sunken: #f2f4f8;
+    --color-surface: #f8fafc;
+    --color-surface-raised: #ffffff;
+    --color-surface-overlay: #ffffff;
+
+    --color-border-subtle: rgb(15 18 24 / 10%);
+    --color-border-strong: rgb(15 18 24 / 18%);
+
+    --color-text-primary: #131720;
+    --color-text-secondary: #545e70;
+    --color-text-muted: #7b8494;
+
+    --color-accent: #2f5fd0;
+    --color-accent-hover: #2751bb;
+    --color-accent-soft: rgb(47 95 208 / 11%);
+    --color-accent-text: #ffffff;
+
+    --color-success: #1a7f37;
+    --color-success-soft: rgb(26 127 55 / 11%);
+    --color-warning: #9a6700;
+    --color-warning-soft: rgb(154 103 0 / 12%);
+    --color-danger: #c62c3c;
+    --color-danger-soft: rgb(198 44 60 / 11%);
   }
 
   html,
-  body {
+  body,
+  #root {
     height: 100%;
   }
 
@@ -82,13 +99,20 @@
     background-color: var(--color-surface);
     color: var(--color-text-primary);
     font-family:
+      'Inter var',
+      'Inter',
       'Segoe UI Variable Text',
       'Segoe UI',
       system-ui,
       -apple-system,
       sans-serif;
     font-size: 14px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    /* Tabular figures keep live metrics from shifting sideways as digits change. */
+    font-variant-numeric: tabular-nums;
+    /* A desktop chrome, not a document: the app owns its own scroll regions. */
+    overflow: hidden;
   }
 
   /* Remote host names and file paths must never be reflowed or mis-read. */
@@ -102,6 +126,36 @@
   :focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* The chrome is not a document; only deliberate scroll regions select. */
+  button,
+  [role='tab'],
+  [role='button'] {
+    user-select: none;
+  }
+
+  /* Scrollbars styled to belong to the app rather than to the platform. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-strong) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-border-strong);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-text-muted);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -111,5 +165,76 @@
       animation-duration: 0.01ms !important;
       transition-duration: 0.01ms !important;
     }
+  }
+}
+
+@layer utilities {
+  /* A dot that pulses while something is genuinely in progress. */
+  @keyframes rc-pulse {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.82);
+    }
+  }
+
+  .animate-status-pulse {
+    animation: rc-pulse 1.4s var(--ease-ui) infinite;
+  }
+
+  /* Skeleton shimmer. Deliberately slow and low-contrast. */
+  @keyframes rc-shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  .animate-skeleton {
+    background-image: linear-gradient(
+      90deg,
+      var(--color-surface-raised) 0%,
+      var(--color-surface-overlay) 50%,
+      var(--color-surface-raised) 100%
+    );
+    background-size: 200% 100%;
+    animation: rc-shimmer 1.6s linear infinite;
+  }
+
+  /* A state change should settle rather than jump. */
+  @keyframes rc-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-fade-in {
+    animation: rc-fade-in 160ms var(--ease-ui) both;
+  }
+
+  @keyframes rc-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-toast-in {
+    animation: rc-toast-in 180ms var(--ease-ui) both;
   }
 }

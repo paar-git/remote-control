@@ -19,6 +19,18 @@
  * character off is the difference between a tidy-up and an outage.
  */
 
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  File as FileIcon,
+  Folder,
+  HardDrive,
+  Laptop,
+  Link2,
+  RefreshCw,
+  Settings2,
+} from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import {
@@ -35,7 +47,17 @@ import {
   parentPath,
   uploadFile,
 } from './api.js';
-import { Badge, Button, ConfirmDialog, EmptyState, type Toast } from './components';
+import {
+  Badge,
+  Button,
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  IconButton,
+  PageHeader,
+  Skeleton,
+  type Toast,
+} from './ui';
 import { formatBytes, formatTimestamp } from './format.js';
 
 /** Which side of the screen a pane is. */
@@ -43,6 +65,8 @@ type Side = 'local' | 'remote';
 
 /** What a pane is currently showing. */
 type PaneState =
+  /** Nothing has been asked for yet, and the pane says why rather than spinning. */
+  | { readonly status: 'idle'; readonly hint: string }
   | { readonly status: 'loading' }
   | { readonly status: 'ready'; readonly listing: Listing }
   | { readonly status: 'error'; readonly message: string };
@@ -63,7 +87,12 @@ export default function FilesScreen({
   const [showHidden, setShowHidden] = useState(false);
 
   const [local, setLocal] = useState<PaneState>({ status: 'loading' });
-  const [remote, setRemote] = useState<PaneState>({ status: 'loading' });
+  // The remote pane has nothing to load until the operator names a path, so it opens on
+  // an explanation rather than on a spinner that would never resolve.
+  const [remote, setRemote] = useState<PaneState>({
+    status: 'idle',
+    hint: 'Connect to a paired server from Devices, then type a path above to browse it.',
+  });
 
   const [selected, setSelected] = useState<{ side: Side; entry: FileEntry } | null>(null);
   const [busy, setBusy] = useState<Progress | null>(null);
@@ -230,35 +259,43 @@ export default function FilesScreen({
   const canDownload = selected?.side === 'remote' && selected.entry.kind === 'file';
 
   return (
-    <section className="flex h-full flex-col">
-      <header className="mb-4">
-        <h2 className="text-base font-semibold">Files</h2>
-        <p className="max-w-prose text-sm text-(--color-text-secondary)">
-          This computer on the left, the server on the right. Every transfer is checked against a
-          BLAKE3 checksum, and a file that does not match is discarded rather than saved.
-        </p>
-      </header>
+    <section className="animate-fade-in flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Files"
+        description="This computer on the left, the server on the right. Every transfer is checked against a BLAKE3 checksum, and a file that does not match is discarded rather than saved."
+        actions={
+          <>
+            <Button icon={ArrowRight} onClick={doUpload} disabled={!canUpload || busy !== null}>
+              {busy?.direction === 'upload' ? 'Uploading…' : 'Upload'}
+            </Button>
+            <Button icon={ArrowLeft} onClick={doDownload} disabled={!canDownload || busy !== null}>
+              {busy?.direction === 'download' ? 'Downloading…' : 'Download'}
+            </Button>
+          </>
+        }
+      />
 
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-xs">
+      <div className="mb-3 flex flex-wrap items-center gap-4 rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised) px-3.5 py-2.5">
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-(--color-text-secondary)">
           <input
             type="checkbox"
             checked={showHidden}
             onChange={(event) => {
               setShowHidden(event.target.checked);
             }}
+            className="size-3.5 accent-(--color-accent)"
           />
           Show hidden files
         </label>
 
-        <label className="flex items-center gap-1.5 text-xs">
+        <label className="flex items-center gap-2 text-xs text-(--color-text-secondary)">
           If it already exists
           <select
             value={conflict}
             onChange={(event) => {
               setConflict(event.target.value as ConflictChoice);
             }}
-            className="rounded border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1 text-xs"
+            className="h-7 rounded-lg border border-(--color-border-strong) bg-(--color-surface) px-2 text-xs text-(--color-text-primary)"
           >
             <option value="fail">Stop and ask</option>
             <option value="overwrite">Replace it</option>
@@ -267,24 +304,15 @@ export default function FilesScreen({
           </select>
         </label>
 
-        <div className="ml-auto flex gap-1.5">
-          <Button onClick={doUpload} disabled={!canUpload || busy !== null}>
-            {busy?.direction === 'upload' ? 'Uploading…' : 'Upload →'}
-          </Button>
-          <Button onClick={doDownload} disabled={!canDownload || busy !== null}>
-            {busy?.direction === 'download' ? 'Downloading…' : '← Download'}
-          </Button>
-        </div>
+        {busy !== null && (
+          <p role="status" className="ml-auto text-xs text-(--color-accent)">
+            {busy.direction === 'upload' ? 'Uploading' : 'Downloading'} {busy.name}. Large files
+            take a while — the checksum is verified before it is saved.
+          </p>
+        )}
       </div>
 
-      {busy !== null && (
-        <p role="status" className="mb-2 text-xs text-(--color-text-secondary)">
-          {busy.direction === 'upload' ? 'Uploading' : 'Downloading'} {busy.name}. Large files take
-          a while — the checksum is verified before it is saved.
-        </p>
-      )}
-
-      <div className="grid flex-1 gap-4 lg:grid-cols-2">
+      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
         <Pane
           title="This computer"
           path={localPath}
@@ -310,11 +338,12 @@ export default function FilesScreen({
           onRefresh={loadRemote}
           actions={
             <>
-              <Button onClick={doCreateFolder} disabled={remotePath === null}>
+              <Button size="sm" onClick={doCreateFolder} disabled={remotePath === null}>
                 New folder
               </Button>
               <Button
                 variant="danger"
+                size="sm"
                 disabled={selected?.side !== 'remote'}
                 onClick={() => {
                   if (selected?.side === 'remote') setPendingDelete(selected.entry);
@@ -390,29 +419,36 @@ function Pane({
   const parent = path === null ? null : parentPath(path);
 
   return (
-    <div className="flex min-h-0 flex-col rounded border border-(--color-border-subtle)">
-      <div className="flex flex-wrap items-center gap-2 border-b border-(--color-border-subtle) p-2">
-        <span className="text-sm font-semibold">{title}</span>
-        <div className="ml-auto flex gap-1.5">{actions}</div>
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised)">
+      <div className="flex flex-wrap items-center gap-2 border-b border-(--color-border-subtle) px-3 py-2">
+        <span className="flex items-center gap-2 text-sm font-semibold">
+          {title === 'Server' ? (
+            <HardDrive aria-hidden="true" className="size-4 text-(--color-text-muted)" />
+          ) : (
+            <Laptop aria-hidden="true" className="size-4 text-(--color-text-muted)" />
+          )}
+          {title}
+        </span>
+        <div className="ml-auto flex gap-2">{actions}</div>
       </div>
 
       <form
-        className="flex gap-1.5 border-b border-(--color-border-subtle) p-2"
+        className="flex gap-2 border-b border-(--color-border-subtle) px-3 py-2"
         onSubmit={(event) => {
           event.preventDefault();
           if (draft.trim() !== '') onNavigate(draft.trim());
         }}
       >
-        <Button
-          type="button"
+        <IconButton
+          icon={ArrowUp}
+          label={parent === null ? 'Already at the top' : 'Go up one folder'}
           onClick={() => {
             if (parent !== null) onNavigate(parent);
           }}
           disabled={parent === null}
-          title={parent === null ? 'Already at the top' : 'Go up one folder'}
-        >
-          ↑
-        </Button>
+          variant="default"
+          size="sm"
+        />
         <label htmlFor={`path-${title}`} className="sr-only">
           {title} path
         </label>
@@ -423,45 +459,62 @@ function Pane({
             setDraft(event.target.value);
           }}
           spellCheck={false}
-          className="min-w-0 flex-1 rounded border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1 font-mono text-xs"
+          className="h-7 min-w-0 flex-1 rounded-lg border border-(--color-border-strong) bg-(--color-surface) px-2.5 font-mono text-xs transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-text-muted)"
         />
-        <Button type="submit">Go</Button>
-        <Button type="button" onClick={onRefresh}>
-          ⟳
+        <Button type="submit" size="sm">
+          Go
         </Button>
+        <IconButton
+          icon={RefreshCw}
+          label="Refresh"
+          onClick={onRefresh}
+          variant="default"
+          size="sm"
+        />
       </form>
 
       <div className="min-h-64 flex-1 overflow-auto">
+        {state.status === 'idle' && (
+          <div className="p-3">
+            <EmptyState icon={HardDrive} title="Nothing to show yet" body={state.hint} />
+          </div>
+        )}
+
         {state.status === 'loading' && (
-          <p role="status" className="p-3 text-sm text-(--color-text-secondary)">
-            Loading…
-          </p>
+          <div role="status" aria-label="Loading" className="flex flex-col gap-2 p-3">
+            {[0, 1, 2, 3, 4].map((index) => (
+              <Skeleton key={index} className="h-3.5 w-full" />
+            ))}
+          </div>
         )}
 
         {state.status === 'error' && (
-          <div role="alert" className="p-3 text-sm">
-            <p className="mb-2 text-(--color-danger)">{state.message}</p>
-            <Button onClick={onRefresh}>Try again</Button>
+          <div className="p-3">
+            <ErrorState
+              summary="This folder couldn’t be listed."
+              detail={state.message}
+              onRetry={onRefresh}
+            />
           </div>
         )}
 
         {state.status === 'ready' && state.listing.entries.length === 0 && (
           <div className="p-3">
-            <EmptyState title="This folder is empty" body="Nothing here to show." />
+            <EmptyState icon={Folder} title="This folder is empty" body="Nothing here to show." />
           </div>
         )}
 
         {state.status === 'ready' && state.listing.entries.length > 0 && (
           <table className="w-full text-left text-xs">
-            <thead className="sticky top-0 bg-(--color-surface) text-(--color-text-secondary)">
-              <tr>
-                <th scope="col" className="p-1.5 font-medium">
+            <thead className="sticky top-0 z-10 bg-(--color-surface-raised) text-(--color-text-muted)">
+              <tr className="border-b border-(--color-border-subtle)">
+                <th scope="col" className="px-3 py-1.5 font-medium">
                   Name
                 </th>
-                <th scope="col" className="p-1.5 text-right font-medium">
+                <th scope="col" className="px-3 py-1.5 text-right font-medium">
                   Size
                 </th>
-                <th scope="col" className="p-1.5 font-medium">
+                <th scope="col" className="px-3 py-1.5 font-medium">
                   Modified
                 </th>
               </tr>
@@ -470,30 +523,37 @@ function Pane({
               {state.listing.entries.map((entry) => (
                 <tr
                   key={entry.name}
-                  className={entry.name === selectedName ? 'bg-(--color-border-subtle)' : undefined}
+                  className={
+                    'transition-colors duration-150 ease-(--ease-ui) ' +
+                    (entry.name === selectedName
+                      ? 'bg-(--color-accent-soft)'
+                      : 'hover:bg-(--color-surface-overlay)')
+                  }
                 >
-                  <td className="p-1.5">
+                  <td className="px-3 py-1">
                     <button
                       type="button"
                       onClick={() => {
                         onActivate(entry);
                       }}
-                      className="flex items-center gap-1.5 text-left"
+                      className="flex w-full cursor-pointer items-center gap-2 py-0.5 text-left"
                     >
-                      <span aria-hidden="true">{icon(entry.kind)}</span>
+                      <EntryIcon kind={entry.kind} />
                       {/* Rendered as text. The schema has already stripped control
                           characters and bidirectional overrides. */}
-                      <span className={entry.hidden ? 'opacity-60' : undefined}>{entry.name}</span>
+                      <span className={`truncate ${entry.hidden ? 'opacity-60' : ''}`}>
+                        {entry.name}
+                      </span>
                       {entry.kind === 'symlink' && (
                         <Badge tone="warning">link → {entry.symlinkTarget ?? 'unknown'}</Badge>
                       )}
                       {!entry.readable && entry.kind !== 'symlink' && <Badge>no access</Badge>}
                     </button>
                   </td>
-                  <td className="p-1.5 text-right tabular-nums whitespace-nowrap">
+                  <td className="px-3 py-1 text-right tabular-nums whitespace-nowrap text-(--color-text-secondary)">
                     {entry.kind === 'directory' ? '—' : formatBytes(entry.sizeBytes)}
                   </td>
-                  <td className="p-1.5 whitespace-nowrap text-(--color-text-secondary)">
+                  <td className="px-3 py-1 whitespace-nowrap text-(--color-text-muted)">
                     {formatTimestamp(entry.modifiedMs)}
                   </td>
                 </tr>
@@ -504,7 +564,7 @@ function Pane({
       </div>
 
       {state.status === 'ready' && state.listing.truncated && (
-        <p className="border-t border-(--color-border-subtle) p-2 text-xs text-(--color-text-secondary)">
+        <p className="border-t border-(--color-border-subtle) px-3 py-2 text-xs text-(--color-text-secondary)">
           This folder has more entries than can be shown at once. Narrow it down by opening a
           subfolder.
         </p>
@@ -513,16 +573,17 @@ function Pane({
   );
 }
 
-/** A glyph for an entry kind. Decorative; the kind is also conveyed in text. */
-function icon(kind: FileEntry['kind']): string {
+/** An icon for an entry kind. Decorative; the kind is also conveyed in text. */
+function EntryIcon({ kind }: { readonly kind: FileEntry['kind'] }): React.JSX.Element {
+  const shared = 'size-3.5 shrink-0';
   switch (kind) {
     case 'directory':
-      return '📁';
+      return <Folder aria-hidden="true" className={`${shared} text-(--color-accent)`} />;
     case 'symlink':
-      return '🔗';
+      return <Link2 aria-hidden="true" className={`${shared} text-(--color-warning)`} />;
     case 'file':
-      return '📄';
+      return <FileIcon aria-hidden="true" className={`${shared} text-(--color-text-muted)`} />;
     case 'other':
-      return '⚙';
+      return <Settings2 aria-hidden="true" className={`${shared} text-(--color-text-muted)`} />;
   }
 }
