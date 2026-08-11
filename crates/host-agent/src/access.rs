@@ -10,7 +10,9 @@
 //!    refusal, not a fallback to the dialog: falling back would let anyone with the
 //!    address raise a prompt on someone's screen by guessing, and would make a wrong
 //!    password indistinguishable from no password.
-//! 3. **A human.** The dialog, with the timeout and the default both set to Dismiss.
+//! 3. **A human.** The dialog, with the timeout and the default both set to Dismiss, and
+//!    at most one dialog pending at a time — a second connection arriving while one is
+//!    open is refused immediately, without ever reaching the prompt.
 //!
 //! Nothing here talks to a network or a window. The prompt is a trait so the whole
 //! decision can be tested against a scripted answer, and so the desktop application
@@ -81,6 +83,16 @@ pub trait AcceptPrompt: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ConnectionRequest {
     /// The address the peer connected from.
+    ///
+    /// This must be the address the user *dialled* — the same string the pin in
+    /// [`RecentRepository`] is keyed on — and not the peer's remote socket address
+    /// read off the QUIC connection. [`PeerAddress`] carries a port, and a remote
+    /// socket address's port is ephemeral: building this field from it would make
+    /// every reconnection look like a new, unpinned peer. The pin would then never
+    /// match, the identity-change refusal would never trigger, and every reconnection
+    /// — including one from an attacker presenting a different certificate — would
+    /// fall through to the human dialog. That is precisely the "identity change
+    /// reachable by a routine click" outcome this module exists to prevent.
     pub address: PeerAddress,
     /// The peer's certificate fingerprint, taken from the TLS connection.
     pub fingerprint: Fingerprint,
@@ -91,6 +103,8 @@ pub struct ConnectionRequest {
 }
 
 /// Why a connection was refused.
+///
+/// Local-only. See [`RefusalReason::wire_code`] for what is safe to tell the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalReason {
     /// A human said no, or said nothing for long enough.
@@ -105,6 +119,42 @@ pub enum RefusalReason {
     TooManyAttempts,
 }
 
+/// The refusal reason as reported to the peer.
+///
+/// Deliberately coarser than [`RefusalReason`]. A dismissal, a wrong password and a
+/// lockout must be indistinguishable from outside — a peer that could tell them apart
+/// could use the response itself as an oracle for whether unattended access is
+/// configured, or as a way to count its own attempts against the lockout.
+/// [`RefusalReason`] stays available in full for the local log, where the distinction
+/// is the entire point.
+///
+/// A separate type rather than a same-valued convention on `RefusalReason` itself, so
+/// the coarsening is enforced by the type checker at the point something is put on the
+/// wire, not by every future call site remembering to collapse the fine-grained reason
+/// correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireRefusal {
+    /// This machine is not accepting connections at all.
+    NotAccepting,
+    /// A pinned peer presented a different certificate.
+    IdentityChanged,
+    /// Every other reason: a human said no, a password was wrong, or the address is
+    /// currently locked out. One value on purpose.
+    Denied,
+}
+
+impl RefusalReason {
+    /// The coarser reason to report to the peer. See [`WireRefusal`].
+    #[must_use]
+    pub const fn wire_code(self) -> WireRefusal {
+        match self {
+            Self::NotAccepting => WireRefusal::NotAccepting,
+            Self::IdentityChanged => WireRefusal::IdentityChanged,
+            Self::Dismissed | Self::WrongPassword | Self::TooManyAttempts => WireRefusal::Denied,
+        }
+    }
+}
+
 /// The outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authorization {
@@ -112,6 +162,22 @@ pub enum Authorization {
     Granted(PermissionSet),
     /// Do not proceed.
     Refused(RefusalReason),
+}
+
+/// Turn a set of permissions into the outcome, refusing rather than granting an empty
+/// set.
+///
+/// A session that may do nothing is a connection nobody can use and nobody can see;
+/// refusing says the same thing more clearly. Every door in `authorize_connection` that
+/// can grant something funnels through here rather than re-deriving the check itself —
+/// this check very nearly stayed specific to the human branch alone, which is exactly
+/// how a future fourth way in would miss it too.
+fn grant_or_refuse(permissions: PermissionSet) -> Authorization {
+    if permissions.is_empty() {
+        Authorization::Refused(RefusalReason::Dismissed)
+    } else {
+        Authorization::Granted(permissions)
+    }
 }
 
 /// Everything the decision reads or writes.
@@ -127,6 +193,15 @@ pub struct AccessDeps<'a> {
     pub throttle: &'a Mutex<Throttle>,
     /// The source of "now" for the throttle.
     pub clock: &'a dyn Clock,
+    /// Held for as long as one Accept dialog is open.
+    ///
+    /// Enforced here, in the decision layer, rather than left to whatever eventually
+    /// implements [`AcceptPrompt`]: it is testable with no window involved, and a rule
+    /// that lived only as a doc comment is how "at most one dialog pending" went
+    /// missing before. Shared across every connection this process is deciding, so it
+    /// must be constructed once and passed to every call, never created fresh per
+    /// call.
+    pub pending_dialog: &'a Mutex<()>,
 }
 
 /// Decide what an incoming connection may do.
@@ -141,6 +216,8 @@ pub async fn authorize_connection(
         return Ok(Authorization::Refused(RefusalReason::NotAccepting));
     }
 
+    // The address the user dialled — see the doc comment on `ConnectionRequest::address`
+    // for why this must never be built from a peer's ephemeral remote socket address.
     let key = request.address.to_string();
 
     // 1. A decision the user already made about this machine.
@@ -150,7 +227,7 @@ pub async fn authorize_connection(
         // `ct_eq`, not `==`. The crate provides it precisely so no comparison of an
         // identity anywhere in the tree is the one that leaks a timing signal.
         return Ok(if pinned.ct_eq(&request.fingerprint) {
-            Authorization::Granted(entry.pinned_permissions)
+            grant_or_refuse(entry.pinned_permissions)
         } else {
             Authorization::Refused(RefusalReason::IdentityChanged)
         });
@@ -158,19 +235,30 @@ pub async fn authorize_connection(
 
     // 2. An unattended password, if one was offered.
     if let Some(offered) = request.unattended_password.as_deref() {
-        // Checked before hashing, so a lockout cannot be turned into a
-        // work-amplification vector.
-        {
-            let throttle = deps.throttle.lock().await;
-            if throttle.check(&key, deps.clock).is_err() {
-                return Ok(Authorization::Refused(RefusalReason::TooManyAttempts));
-            }
+        // One guard held across the whole check-hash-record sequence, not two
+        // separate lock scopes. Two scopes let N concurrent attempts against the same
+        // address all pass `check` before any of them reached `record_failure`, so
+        // the lockout only bounded strictly sequential guessing — and every one of
+        // those N concurrent guesses still paid for a full Argon2id hash first, which
+        // is exactly the work-amplification the lockout exists to prevent.
+        let mut throttle = deps.throttle.lock().await;
+        if throttle.check(&key, deps.clock).is_err() {
+            return Ok(Authorization::Refused(RefusalReason::TooManyAttempts));
         }
 
         let stored = deps.settings.unattended_credential().await?;
         let permitted = settings.unattended_permissions;
 
-        let verified = if let Some(credential) = &stored {
+        // An over-long password is rejected the same way whether or not a credential
+        // is configured, checked before either branch below. `PasswordCredential::verify`
+        // already rejects an over-long password before hashing; if the no-credential
+        // branch still ran its dummy hash for the same over-long input, the two paths
+        // would diverge in timing for that one input shape — a fast refusal only when
+        // unattended access exists, which is the exact disclosure the dummy hash below
+        // exists to prevent, inverted.
+        let verified = if offered.len() > rc_security::password::MAX_PASSWORD_BYTES {
+            false
+        } else if let Some(credential) = &stored {
             credential.verify(offered).is_ok()
         } else {
             // A full dummy hash, so "no unattended access configured" and "wrong
@@ -183,18 +271,22 @@ pub async fn authorize_connection(
             false
         };
 
-        let mut throttle = deps.throttle.lock().await;
         return Ok(if verified {
             throttle.record_success(&key, deps.clock);
-            Authorization::Granted(permitted)
+            grant_or_refuse(permitted)
         } else {
             throttle.record_failure(&key, deps.clock);
             Authorization::Refused(RefusalReason::WrongPassword)
         });
     }
 
-    // 3. Ask a human.
-    //
+    // 3. Ask a human — but only if no dialog is already pending. A second connection
+    // arriving while one is open is refused immediately, without ever reaching the
+    // prompt: see the doc comment on `AccessDeps::pending_dialog`.
+    let Ok(_dialog_slot) = deps.pending_dialog.try_lock() else {
+        return Ok(Authorization::Refused(RefusalReason::Dismissed));
+    };
+
     // Generated here, never accepted from the peer or from any caller-supplied value:
     // it exists only to match this specific answer back to this specific request.
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -218,10 +310,8 @@ pub async fn authorize_connection(
     }
 
     Ok(match answer.decision {
-        // Accepting with nothing ticked is a session that can do nothing and that
-        // nobody can see. Refusing says the same thing more clearly.
-        AcceptDecision::Accept(granted) if !granted.is_empty() => Authorization::Granted(granted),
-        _ => Authorization::Refused(RefusalReason::Dismissed),
+        AcceptDecision::Accept(granted) => grant_or_refuse(granted),
+        AcceptDecision::Dismiss => Authorization::Refused(RefusalReason::Dismissed),
     })
 }
 
@@ -284,6 +374,55 @@ mod tests {
         }
     }
 
+    /// A prompt that blocks inside `ask` until told to proceed, so a test can hold a
+    /// connection at "dialog open" for as long as it needs to.
+    struct BlockingPrompt {
+        answer: AcceptDecision,
+        calls: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl BlockingPrompt {
+        fn new(answer: AcceptDecision) -> Self {
+            Self {
+                answer,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Resolves once `ask` has actually been entered at least once. `Notify`
+        /// keeps a single permit, so this cannot miss a notification sent just
+        /// before it starts waiting.
+        async fn wait_until_entered(&self) {
+            self.entered.notified().await;
+        }
+
+        /// Let a blocked `ask` call return.
+        fn release(&self) {
+            self.release.notify_one();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AcceptPrompt for BlockingPrompt {
+        async fn ask(&self, request: AcceptRequest) -> AcceptAnswer {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            AcceptAnswer {
+                request_id: request.request_id,
+                decision: self.answer,
+            }
+        }
+    }
+
     fn request(password: Option<&str>) -> ConnectionRequest {
         ConnectionRequest {
             address: "192.168.1.77".parse::<PeerAddress>().unwrap(),
@@ -294,18 +433,22 @@ mod tests {
     }
 
     /// Everything `authorize_connection` needs, built fresh for each test.
-    struct Harness {
+    ///
+    /// Generic over the prompt so tests can substitute [`BlockingPrompt`] for the
+    /// concurrency tests without duplicating the harness.
+    struct Harness<P: AcceptPrompt> {
         settings: SettingsRepository,
         recent: RecentRepository,
-        prompt: ScriptedPrompt,
+        prompt: P,
         throttle: Mutex<Throttle>,
         clock: rc_security::clock::TestClock,
+        pending_dialog: Mutex<()>,
         // Kept alive for the lifetime of the harness: the repositories borrow its pool.
         _database: rc_storage::Database,
     }
 
-    impl Harness {
-        async fn new(prompt: ScriptedPrompt) -> Self {
+    impl<P: AcceptPrompt> Harness<P> {
+        async fn new(prompt: P) -> Self {
             let database = rc_storage::Database::open_in_memory()
                 .await
                 .expect("an in-memory database must always open and migrate cleanly");
@@ -317,6 +460,7 @@ mod tests {
                 prompt,
                 throttle: Mutex::new(Throttle::with_defaults()),
                 clock: rc_security::clock::TestClock::default(),
+                pending_dialog: Mutex::new(()),
                 _database: database,
             }
         }
@@ -329,7 +473,7 @@ mod tests {
             &self.recent
         }
 
-        fn prompt(&self) -> &ScriptedPrompt {
+        fn prompt(&self) -> &P {
             &self.prompt
         }
 
@@ -350,6 +494,7 @@ mod tests {
                 prompt: &self.prompt,
                 throttle: &self.throttle,
                 clock: &self.clock,
+                pending_dialog: &self.pending_dialog,
             };
             authorize_connection(&request, &deps).await
         }
@@ -439,6 +584,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pinned_peer_with_no_permissions_is_refused_not_granted_an_empty_session() {
+        // The same "nothing ticked is a refusal" rule the human branch enforces must
+        // hold here too. This can happen if a pin was ever stored via
+        // `set_always_allow` with `PermissionSet::NONE` -- the storage layer allows
+        // it as long as a fingerprint is present.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
+            PermissionSet::ALL,
+        )))
+        .await;
+        harness
+            .recent()
+            .record("192.168.1.77:7443", "WORK-LAPTOP", 1_000)
+            .await
+            .unwrap();
+        harness
+            .recent()
+            .set_always_allow(
+                "192.168.1.77:7443",
+                Some(Fingerprint::from_bytes([7u8; 32])),
+                PermissionSet::NONE,
+            )
+            .await
+            .unwrap();
+
+        let outcome = harness.authorize(request(None)).await.unwrap();
+        assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
+        assert_eq!(
+            harness.prompt().asked(),
+            0,
+            "an empty pin must not fall back to the dialog either"
+        );
+    }
+
+    #[tokio::test]
     async fn a_correct_unattended_password_skips_the_prompt() {
         let granted = PermissionSet::NONE.with(Permission::ControlInput);
         let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
@@ -452,6 +631,29 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, Authorization::Granted(granted));
         assert_eq!(harness.prompt().asked(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unattended_credential_with_no_permissions_is_refused_not_granted_an_empty_session()
+    {
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
+            PermissionSet::ALL,
+        )))
+        .await;
+        harness
+            .set_unattended("correct horse battery", PermissionSet::NONE)
+            .await;
+
+        let outcome = harness
+            .authorize(request(Some("correct horse battery")))
+            .await
+            .unwrap();
+        assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
+        assert_eq!(
+            harness.prompt().asked(),
+            0,
+            "an empty unattended grant must not fall back to the dialog either"
+        );
     }
 
     #[tokio::test]
@@ -495,6 +697,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_overlong_password_is_rejected_quickly_when_no_credential_is_configured() {
+        // `PasswordCredential::verify` already rejects an over-long password before
+        // hashing. If the no-credential branch still ran its full Argon2id dummy hash
+        // for the same input, an over-long guess would take measurably longer when
+        // unattended access is *not* configured than when it is -- the disclosure the
+        // dummy hash exists to prevent, inverted, for this one input shape. Argon2id
+        // at production cost (m=19 MiB, t=2) takes tens of milliseconds; a length
+        // check takes microseconds, so a generous bound distinguishes the two without
+        // being sensitive to ordinary scheduling jitter.
+        let overlong = "a".repeat(rc_security::password::MAX_PASSWORD_BYTES + 1);
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
+            PermissionSet::ALL,
+        )))
+        .await;
+
+        let started = std::time::Instant::now();
+        let outcome = harness.authorize(request(Some(&overlong))).await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            outcome,
+            Authorization::Refused(RefusalReason::WrongPassword)
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(20),
+            "an over-long password must be rejected without hashing; took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overlong_password_is_rejected_quickly_when_a_credential_is_configured() {
+        // The credentialed path must behave the same way: this is the equal-cost half
+        // of the same guarantee, not just a regression guard on the branch above.
+        let overlong = "a".repeat(rc_security::password::MAX_PASSWORD_BYTES + 1);
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
+            PermissionSet::ALL,
+        )))
+        .await;
+        harness
+            .set_unattended("correct horse battery", PermissionSet::ALL)
+            .await;
+
+        let started = std::time::Instant::now();
+        let outcome = harness.authorize(request(Some(&overlong))).await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            outcome,
+            Authorization::Refused(RefusalReason::WrongPassword)
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(20),
+            "an over-long password must be rejected without hashing; took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn repeated_wrong_passwords_lock_out_before_hashing() {
         let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
         harness
@@ -515,6 +774,55 @@ mod tests {
             outcome,
             Authorization::Refused(RefusalReason::TooManyAttempts)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_lockout_bounds_concurrent_attempts_against_one_address() {
+        // If the throttle's check and its recording of the failure are not atomic
+        // together, every one of several concurrent attempts can pass `check` before
+        // any of them reaches `record_failure`, so all of them pay for a full
+        // Argon2id hash regardless of the lockout -- exactly the work-amplification
+        // the throttle exists to prevent.
+        //
+        // With the default policy (`free_attempts = 2`), fully-serialized attempts
+        // give a deterministic split regardless of arrival order: the first three
+        // reach verification (and are refused as `WrongPassword`, since the password
+        // offered is wrong), and the lockout applies to the third of them, so the
+        // remaining two never reach verification at all and are refused as
+        // `TooManyAttempts` before any hashing.
+        let harness =
+            std::sync::Arc::new(Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await);
+        harness
+            .set_unattended("correct horse battery", PermissionSet::ALL)
+            .await;
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let harness = std::sync::Arc::clone(&harness);
+            handles.push(tokio::spawn(async move {
+                harness
+                    .authorize(request(Some("wrong password here")))
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut wrong_password = 0;
+        let mut too_many_attempts = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Authorization::Refused(RefusalReason::WrongPassword) => wrong_password += 1,
+                Authorization::Refused(RefusalReason::TooManyAttempts) => too_many_attempts += 1,
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            wrong_password, 3,
+            "the lockout must bound how many concurrent guesses ever reach hashing, \
+             not merely how many arrive sequentially"
+        );
+        assert_eq!(too_many_attempts, 2);
     }
 
     #[tokio::test]
@@ -565,6 +873,69 @@ mod tests {
             harness.prompt().asked(),
             1,
             "the prompt was reached; its mismatched answer must simply not count"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_second_connection_is_refused_while_a_dialog_is_pending() {
+        let harness = std::sync::Arc::new(
+            Harness::new(BlockingPrompt::new(AcceptDecision::Accept(
+                PermissionSet::ALL,
+            )))
+            .await,
+        );
+
+        // Start the first connection; it blocks inside `ask` until released, so the
+        // pending slot stays held.
+        let first = {
+            let harness = std::sync::Arc::clone(&harness);
+            tokio::spawn(async move { harness.authorize(request(None)).await.unwrap() })
+        };
+        harness.prompt().wait_until_entered().await;
+
+        // A second connection arriving now must be refused immediately, without ever
+        // reaching the prompt.
+        let second = harness.authorize(request(None)).await.unwrap();
+        assert_eq!(second, Authorization::Refused(RefusalReason::Dismissed));
+        assert_eq!(
+            harness.prompt().calls(),
+            1,
+            "the second connection must never reach the prompt"
+        );
+
+        harness.prompt().release();
+        let first_outcome = first.await.unwrap();
+        assert_eq!(first_outcome, Authorization::Granted(PermissionSet::ALL));
+    }
+
+    #[test]
+    fn dismissed_wrong_password_and_lockout_are_indistinguishable_on_the_wire() {
+        // A peer must not be able to tell a dismissal from a wrong password from a
+        // lockout -- any of the three would let it learn whether unattended access is
+        // configured, or count its own attempts against the lockout.
+        assert_eq!(
+            RefusalReason::Dismissed.wire_code(),
+            RefusalReason::WrongPassword.wire_code()
+        );
+        assert_eq!(
+            RefusalReason::WrongPassword.wire_code(),
+            RefusalReason::TooManyAttempts.wire_code()
+        );
+    }
+
+    #[test]
+    fn not_accepting_and_identity_changed_stay_distinguishable() {
+        assert_ne!(
+            RefusalReason::NotAccepting.wire_code(),
+            RefusalReason::Dismissed.wire_code()
+        );
+        assert_ne!(
+            RefusalReason::IdentityChanged.wire_code(),
+            RefusalReason::Dismissed.wire_code()
+        );
+        assert_ne!(
+            RefusalReason::NotAccepting.wire_code(),
+            RefusalReason::IdentityChanged.wire_code()
         );
     }
 }

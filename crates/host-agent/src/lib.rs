@@ -19,6 +19,6 @@ pub mod server;
 pub mod sessions;
 
 pub use access::{
-    AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization, ConnectionRequest,
-    RefusalReason, authorize_connection,
+    AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization,
+    ConnectionRequest, RefusalReason, WireRefusal, authorize_connection,
 };
