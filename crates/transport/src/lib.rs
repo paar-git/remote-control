@@ -38,12 +38,14 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod address;
 pub mod channel;
 pub mod endpoint;
 pub mod error;
 pub mod handshake;
 pub mod tls;
 
+pub use address::PeerAddress;
 pub use channel::{ChannelReader, ChannelWriter, accept_channel, open_channel};
 pub use endpoint::{AgentListener, ClientConnector};
 pub use error::{RejectionCause, Result, TransportError};

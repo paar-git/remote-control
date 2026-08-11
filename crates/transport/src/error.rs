@@ -131,6 +131,23 @@ pub enum TransportError {
         retry_after_secs: u64,
     },
 
+    /// The text the user typed is not an address this transport can dial.
+    ///
+    /// Distinct from [`Self::UnresolvableAddress`] because the two need different
+    /// remedies: this one means "you typed it wrong", the other means "that machine
+    /// could not be found". Collapsing them would leave the operator guessing which.
+    #[error("`{0}` is not a valid address")]
+    InvalidAddress(String),
+
+    /// The address is well formed but names nothing reachable.
+    #[error("`{address}` could not be found: {reason}")]
+    UnresolvableAddress {
+        /// The address as the user would recognise it.
+        address: String,
+        /// What the resolver said.
+        reason: String,
+    },
+
     /// An I/O failure not covered by the cases above.
     #[error("transport I/O failed: {reason}")]
     Io {
@@ -156,7 +173,15 @@ impl TransportError {
             | Self::Io { .. } => true,
 
             // Requires a human, or indicates an attack. Never retried.
-            Self::FingerprintMismatch
+            //
+            // Both address errors sit here rather than with the transient cases. A
+            // mistyped address fails identically however many times it is tried, and a
+            // name that does not resolve needs the address corrected or DNS fixed —
+            // neither happens by waiting. A machine that is merely switched off
+            // resolves fine and fails at `Connect`, which does retry.
+            Self::InvalidAddress(_)
+            | Self::UnresolvableAddress { .. }
+            | Self::FingerprintMismatch
             | Self::NotTrusted
             | Self::Revoked
             | Self::IdentityProofRejected
