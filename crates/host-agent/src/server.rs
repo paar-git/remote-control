@@ -26,8 +26,8 @@
 //! # Bounds
 //!
 //! Concurrent sessions are capped by configuration. A connection arriving over the cap
-//! is refused immediately and audited, rather than queued — a queue would let anyone
-//! who can reach the port hold agent memory.
+//! is refused immediately, rather than queued — a queue would let anyone who can reach
+//! the port hold agent memory.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,8 +38,6 @@ use rc_protocol::control::{
     DisconnectReason, Opening,
 };
 use rc_security::{Clock, DeviceIdentity, Fingerprint, Permission, PermissionSet, SystemClock};
-use rc_storage::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
-use rc_storage::trust::TrustRepository;
 use rc_transport::{AgentListener, ChannelReader, ChannelWriter, PinPolicy, TransportError};
 
 use crate::config::AgentConfig;
@@ -51,8 +49,6 @@ pub struct AgentServer {
     identity: Arc<DeviceIdentity>,
     /// Validated configuration.
     config: AgentConfig,
-    /// The agent's local database.
-    database: rc_storage::Database,
     /// Live sessions, for the cap and for the operator's session list.
     sessions: Arc<SessionRegistry>,
     /// Time source. Injected so expiry is testable.
@@ -76,16 +72,11 @@ pub struct AgentServer {
 impl AgentServer {
     /// Assemble a server. Does not bind anything yet.
     #[must_use]
-    pub fn new(
-        identity: Arc<DeviceIdentity>,
-        config: AgentConfig,
-        database: rc_storage::Database,
-    ) -> Self {
+    pub fn new(identity: Arc<DeviceIdentity>, config: AgentConfig) -> Self {
         let max_sessions = usize::from(config.network.max_sessions);
         Self {
             identity,
             config,
-            database,
             sessions: Arc::new(SessionRegistry::new(max_sessions)),
             clock: Arc::new(SystemClock),
             host: rc_platform::HostInfo::detect(),
@@ -111,9 +102,9 @@ impl AgentServer {
     /// Bind the listener and serve until `shutdown` resolves.
     ///
     /// # Errors
-    /// Fails only if the socket cannot be bound. Per-connection failures are logged and
-    /// audited; they never stop the listener, because one hostile peer must not be able
-    /// to take the agent off the network.
+    /// Fails only if the socket cannot be bound. Per-connection failures are logged;
+    /// they never stop the listener, because one hostile peer must not be able to take
+    /// the agent off the network.
     pub async fn run(
         self: Arc<Self>,
         shutdown: impl Future<Output = ()> + Send,
@@ -132,16 +123,6 @@ impl AgentServer {
         self.listener_ready
             .store(true, std::sync::atomic::Ordering::Release);
         tracing::info!(%bound, "listening for client connections");
-
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::LISTENER_STARTED,
-                AuditResult::Success,
-            )
-            .meta("port", bound.port()),
-        )
-        .await;
 
         let accepting = async {
             while let Some(incoming) = listener.accept().await {
@@ -221,16 +202,11 @@ impl AgentServer {
         // away for a reason it could have been told about earlier — and so the cap
         // cannot be exceeded by clients that all authenticate at once.
         let Some(slot) = self.sessions.reserve() else {
-            tracing::warn!(%remote, "refusing a connection: the session limit is reached");
-            self.audit(
-                AuditEvent::new(
-                    AuditCategory::Connection,
-                    actions::CONNECTION_LIMIT_REACHED,
-                    AuditResult::Denied,
-                )
-                .meta("source", redact_address(remote)),
-            )
-            .await;
+            tracing::warn!(
+                %remote,
+                source = %redact_address(remote),
+                "refusing a connection: the session limit is reached"
+            );
             return Err(TransportError::Throttled {
                 retry_after_secs: 30,
             }
@@ -240,19 +216,14 @@ impl AgentServer {
         let peer = match rc_transport::handshake::finish_accept(writer, observed, hello).await {
             Ok(peer) => peer,
             Err(err) => {
-                self.audit(
-                    AuditEvent::new(
-                        AuditCategory::Connection,
-                        actions::CONNECTION_REFUSED,
-                        AuditResult::Denied,
-                    )
-                    .meta("source", redact_address(remote))
+                tracing::warn!(
+                    source = %redact_address(remote),
                     // The observed fingerprint is not secret and is what an operator
                     // needs in order to tell a renewal apart from an impostor.
-                    .meta("observed_fingerprint", observed)
-                    .meta("reason", &err),
-                )
-                .await;
+                    %observed,
+                    %err,
+                    "refusing a connection"
+                );
                 return Err(err.into());
             }
         };
@@ -267,7 +238,7 @@ impl AgentServer {
             self.clock.now_ms(),
         );
 
-        self.record_session_start(&peer, remote).await;
+        record_session_start(&peer, remote);
 
         // The permissions this connection was admitted with, re-checked on every
         // request rather than assumed for the life of the session.
@@ -295,18 +266,6 @@ impl AgentServer {
             .await;
 
         channel_server.abort();
-
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::SESSION_ENDED,
-                AuditResult::Success,
-            )
-            .actor_device(device_id)
-            .meta("session_id", session_id)
-            .meta("reason", reason_name(reason)),
-        )
-        .await;
 
         tracing::info!(%device_id, %session_id, reason = reason_name(reason), "session ended");
         Ok(())
@@ -456,47 +415,6 @@ impl AgentServer {
         }
     }
 
-    /// Record that a session began, in the database and in the audit trail.
-    ///
-    /// Called only after the peer has been admitted, so a refused connection can never
-    /// move the "last authenticated" timestamp an operator reads to decide whether a
-    /// device is still in use.
-    async fn record_session_start(
-        &self,
-        peer: &rc_transport::AuthenticatedPeer,
-        remote: SocketAddr,
-    ) {
-        if let Err(err) = TrustRepository::new(&self.database)
-            .record_authentication(peer.device_id, self.clock.now_ms())
-            .await
-        {
-            let device_id = peer.device_id;
-            tracing::warn!(%err, %device_id, "could not record the authentication time");
-        }
-
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::SESSION_STARTED,
-                AuditResult::Success,
-            )
-            .actor_device(peer.device_id)
-            .meta("session_id", peer.session_id)
-            .meta("permissions", permission_names(peer.permissions))
-            .meta("source", redact_address(remote))
-            .meta("protocol", peer.negotiated_version),
-        )
-        .await;
-
-        tracing::info!(
-            device_id = %peer.device_id,
-            session_id = %peer.session_id,
-            permissions = %permission_names(peer.permissions),
-            %remote,
-            "session started"
-        );
-    }
-
     /// Serve the channels a client opens after authenticating.
     ///
     /// The control channel is already established; this accepts the *additional*
@@ -533,10 +451,8 @@ impl AgentServer {
                             server.file_policy(),
                             server.config.features.max_transfer_bytes,
                             authorization,
-                            server.database.clone(),
                             device_id,
                             session_id,
-                            Arc::clone(&server.clock),
                             server.config.features.file_transfer,
                         );
                         tokio::spawn(async move {
@@ -615,14 +531,6 @@ impl AgentServer {
             booted_at_ms: boot_time_ms(self.clock.now_ms()),
         }
     }
-
-    /// Append an audit record, logging rather than failing if the write does not work.
-    async fn audit(&self, event: AuditEvent) {
-        let repository = AuditRepository::new(&self.database);
-        if let Err(err) = repository.record(&event, self.clock.now_ms()).await {
-            tracing::error!(%err, action = event.action, "could not write an audit record");
-        }
-    }
 }
 
 /// What reading the next control request produced.
@@ -665,6 +573,26 @@ async fn read_control_request(
         // A finished stream and a dropped connection are the same outcome here.
         Ok(None) | Err(_) => RequestOutcome::Closed,
     }
+}
+
+/// Record that a session began.
+///
+/// Called only after the peer has been admitted, so a refused connection never
+/// appears to have started a session.
+///
+/// There is no trusted-device table to update in this build — the model it described
+/// (identity anchoring, pairing history) was dropped along with it; see
+/// `crates/storage/migrations/0003_anydesk_model.sql`. What a "last connected" entry
+/// means for the `AnyDesk` model is `RecentRepository::record`, which belongs to
+/// admission, not to this already-authenticated path.
+fn record_session_start(peer: &rc_transport::AuthenticatedPeer, remote: SocketAddr) {
+    tracing::info!(
+        device_id = %peer.device_id,
+        session_id = %peer.session_id,
+        permissions = %permission_names(peer.permissions),
+        %remote,
+        "session started"
+    );
 }
 
 /// Stable name for a disconnect reason, for logs and audit records.
@@ -751,10 +679,9 @@ mod tests {
         AgentConfig::default()
     }
 
-    async fn server() -> Arc<AgentServer> {
+    fn server() -> Arc<AgentServer> {
         let identity = Arc::new(DeviceIdentity::generate("test-agent", &SystemClock).unwrap());
-        let database = rc_storage::Database::open_in_memory().await.unwrap();
-        Arc::new(AgentServer::new(identity, config(), database))
+        Arc::new(AgentServer::new(identity, config()))
     }
 
     /// Every permission, which is what an ordinary session carries.
@@ -777,7 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_ping_is_answered_with_the_token_it_carried() {
-        let server = server().await;
+        let server = server();
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(
@@ -797,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_snapshot_carries_values_the_agent_actually_measured() {
-        let server = server().await;
+        let server = server();
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(
@@ -824,7 +751,7 @@ mod tests {
     async fn host_facts_are_reported_separately_from_live_readings() {
         // Sending the CPU model and kernel version on every tick would make them look
         // like live readings when they are not.
-        let server = server().await;
+        let server = server();
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(&ControlRequestPayload::HostInfo, &owner(), &subscription)
@@ -845,7 +772,7 @@ mod tests {
     async fn a_session_with_only_view_metrics_may_still_read_the_dashboard() {
         // A session holding only ViewMetrics is what a metrics-only grant is for;
         // refusing it would leave that permission with nothing it could do.
-        let server = server().await;
+        let server = server();
         let view_only = PermissionSet::NONE.with(Permission::ViewMetrics);
 
         let (subscription, _receiver) = subscription();
@@ -866,7 +793,7 @@ mod tests {
     async fn a_session_without_view_metrics_is_refused_even_mid_session() {
         // The check is against the live permission set on every request, so a
         // permission lost mid-session does not wait for the connection to end.
-        let server = server().await;
+        let server = server();
         let revoked = PermissionSet::NONE;
 
         let (subscription, _receiver) = subscription();
@@ -893,7 +820,7 @@ mod tests {
     async fn a_metrics_interval_is_clamped_rather_than_honoured_as_asked() {
         // A client asking for 10 ms would cost a full process enumeration a hundred
         // times a second on the machine it is supposed to be observing.
-        let server = server().await;
+        let server = server();
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(
@@ -916,7 +843,7 @@ mod tests {
         // The subscription is asked for on the control channel and delivered on the
         // metrics channel. If the answer did not reach the handle, a client would be
         // told it had subscribed and then receive nothing at all.
-        let server = server().await;
+        let server = server();
         let (subscription, receiver) = subscription();
 
         assert_eq!(*receiver.borrow(), None, "nothing is pushed unasked");
@@ -942,7 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsubscribing_disarms_the_handle() {
-        let server = server().await;
+        let server = server();
         let (subscription, receiver) = subscription();
 
         server
@@ -971,7 +898,7 @@ mod tests {
     async fn unsubscribing_without_a_subscription_is_not_an_error() {
         // A client tidying up on the way out should not have to remember whether it
         // ever started.
-        let server = server().await;
+        let server = server();
         let (subscription, _receiver) = subscription();
 
         let result = server
@@ -992,7 +919,7 @@ mod tests {
     async fn a_session_without_view_metrics_cannot_subscribe_to_metrics() {
         // Denial must leave the handle untouched: a refused subscription that still
         // armed the pusher would stream readings to a device that was just refused.
-        let server = server().await;
+        let server = server();
         let (subscription, receiver) = subscription();
 
         let result = server
@@ -1021,7 +948,7 @@ mod tests {
     async fn a_request_this_build_does_not_implement_is_refused_not_faked() {
         // Returning an empty answer would put figures on the operator's dashboard that
         // the agent never measured.
-        let server = server().await;
+        let server = server();
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(

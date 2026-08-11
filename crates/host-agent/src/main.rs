@@ -180,15 +180,9 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         "database ready"
     );
 
-    // Recorded once the database is available, so first-run identity creation leaves a
-    // trail. An ordinary load writes nothing.
-    identity::record_identity_event(
-        &rc_storage::audit::AuditRepository::new(&database),
-        identity_origin,
-        &device_identity,
-        &rc_security::SystemClock,
-    )
-    .await?;
+    // Logged once the database is available, so first-run identity creation leaves a
+    // trail in the process log. An ordinary load logs nothing.
+    identity::record_identity_event(identity_origin, &device_identity, &rc_security::SystemClock);
 
     tracing::info!(
         device_id = %device_identity.device_id(),
@@ -216,7 +210,6 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
     let server = std::sync::Arc::new(server::AgentServer::new(
         std::sync::Arc::clone(&device_identity),
         config,
-        database.clone(),
     ));
 
     // One shutdown signal, observed by both the listener and the local endpoint. A

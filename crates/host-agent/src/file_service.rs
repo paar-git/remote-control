@@ -30,7 +30,6 @@ use rc_protocol::TransferId;
 use rc_protocol::control::ErrorCode;
 use rc_protocol::files::{ConflictPolicy, FileAgentMessage, FileClientMessage};
 use rc_security::{Permission, PermissionSet};
-use rc_storage::audit::{AuditCategory, AuditEvent, AuditResult, actions};
 use rc_transport::{ChannelReader, ChannelWriter, TransportError};
 use tokio::sync::Mutex;
 
@@ -45,10 +44,8 @@ pub struct FileService {
     /// Shared so a download pump and the message loop can both write.
     writer: Arc<Mutex<ChannelWriter>>,
     authorization: PermissionSet,
-    database: rc_storage::Database,
     device_id: rc_protocol::DeviceId,
     session_id: rc_protocol::SessionId,
-    clock: Arc<dyn rc_security::Clock>,
     /// Whether the agent's configuration permits file transfer at all.
     enabled: bool,
 }
@@ -62,10 +59,8 @@ impl FileService {
         policy: PathPolicy,
         max_transfer_bytes: u64,
         authorization: PermissionSet,
-        database: rc_storage::Database,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
-        clock: Arc<dyn rc_security::Clock>,
         enabled: bool,
     ) -> Self {
         Self {
@@ -76,10 +71,8 @@ impl FileService {
             )),
             writer: Arc::new(Mutex::new(writer)),
             authorization,
-            database,
             device_id,
             session_id,
-            clock,
             enabled,
         }
     }
@@ -213,8 +206,7 @@ impl FileService {
                 let outcome = self.resolve(&path).and_then(|resolved| {
                     std::fs::create_dir_all(&resolved).map_err(|err| FileError::from_io(&err))
                 });
-                self.answer(outcome, actions::DIRECTORY_CREATED, &path)
-                    .await;
+                self.answer(outcome, "file.directory_created").await;
             }
 
             FileClientMessage::Rename { from, to, conflict } => {
@@ -277,7 +269,7 @@ impl FileService {
                 }
                 match self.transfers.finish(transfer_id) {
                     Ok(bytes) => {
-                        self.audit_transfer(actions::FILE_UPLOADED, bytes).await;
+                        self.log_transfer("file.uploaded", bytes);
                         self.send(&FileAgentMessage::TransferComplete {
                             transfer_id,
                             bytes_transferred: bytes,
@@ -341,7 +333,7 @@ impl FileService {
             std::fs::rename(&source, &destination).map_err(|err| FileError::from_io(&err))
         })();
 
-        self.answer(outcome, actions::FILE_RENAMED, from).await;
+        self.answer(outcome, "file.renamed").await;
     }
 
     /// Copy within the host.
@@ -367,7 +359,7 @@ impl FileService {
                 .map_err(|err| FileError::from_io(&err))
         })();
 
-        self.answer(outcome, actions::FILE_COPIED, from).await;
+        self.answer(outcome, "file.copied").await;
     }
 
     /// Delete a path.
@@ -396,7 +388,7 @@ impl FileService {
         // whatever the client asked for. The flag is not consulted, and the client is
         // told plainly rather than being allowed to believe a delete was recoverable.
         let _ = permanent;
-        self.answer(outcome, actions::FILE_DELETED, path).await;
+        self.answer(outcome, "file.deleted").await;
     }
 
     /// Begin or resume an upload.
@@ -498,7 +490,7 @@ impl FileService {
         }
 
         let sent = download.bytes_sent();
-        self.audit_transfer(actions::FILE_DOWNLOADED, sent).await;
+        self.log_transfer("file.downloaded", sent);
         self.send(&FileAgentMessage::TransferComplete {
             transfer_id,
             bytes_transferred: sent,
@@ -527,19 +519,14 @@ impl FileService {
     }
 
     /// Report the outcome of an operation that either works or does not.
-    async fn answer(
-        &self,
-        outcome: rc_file_transfer::Result<()>,
-        action: &'static str,
-        path: &str,
-    ) {
+    async fn answer(&self, outcome: rc_file_transfer::Result<()>, action: &'static str) {
         match outcome {
             Ok(()) => {
-                self.audit_path(action, AuditResult::Success, path).await;
+                self.log_operation(action, true);
                 self.send(&FileAgentMessage::Ok).await;
             }
             Err(err) => {
-                self.audit_path(action, AuditResult::Failure, path).await;
+                self.log_operation(action, false);
                 self.send_file_error(&err).await;
             }
         }
@@ -578,35 +565,34 @@ impl FileService {
         .await;
     }
 
-    /// Record an operation on a path.
+    /// Log an operation on a path.
     ///
-    /// The path is deliberately **not** included: it came from a peer, and the audit
-    /// trail is read by a human. What is recorded is that this device did this kind of
-    /// thing in this session, which is what the trail is for.
-    async fn audit_path(&self, action: &'static str, result: AuditResult, _path: &str) {
-        self.audit(
-            AuditEvent::new(AuditCategory::FileTransfer, action, result)
-                .actor_device(self.device_id)
-                .meta("session_id", self.session_id),
-        )
-        .await;
+    /// The path is deliberately **not** included: it came from a peer, and this is
+    /// read by a human. What is logged is that this device did this kind of thing in
+    /// this session.
+    ///
+    /// There is no persisted audit trail in this build — the table it used to write to
+    /// was dropped along with the model it described (see
+    /// `crates/storage/migrations/0003_anydesk_model.sql`) — so this only reaches the
+    /// process log.
+    fn log_operation(&self, action: &'static str, success: bool) {
+        tracing::info!(
+            device_id = %self.device_id,
+            session_id = %self.session_id,
+            action,
+            success,
+            "file operation"
+        );
     }
 
-    async fn audit_transfer(&self, action: &'static str, bytes: u64) {
-        self.audit(
-            AuditEvent::new(AuditCategory::FileTransfer, action, AuditResult::Success)
-                .actor_device(self.device_id)
-                .meta("session_id", self.session_id)
-                .meta("bytes", bytes),
-        )
-        .await;
-    }
-
-    async fn audit(&self, event: AuditEvent) {
-        let repository = rc_storage::audit::AuditRepository::new(&self.database);
-        if let Err(err) = repository.record(&event, self.clock.now_ms()).await {
-            tracing::error!(%err, action = event.action, "could not write an audit record");
-        }
+    fn log_transfer(&self, action: &'static str, bytes: u64) {
+        tracing::info!(
+            device_id = %self.device_id,
+            session_id = %self.session_id,
+            action,
+            bytes,
+            "file transfer"
+        );
     }
 }
 

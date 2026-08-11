@@ -6,7 +6,6 @@
 
 use anyhow::Context as _;
 use rc_security::{Clock, DeviceIdentity, Keystore, SystemClock};
-use rc_storage::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
 
 use crate::config::AgentConfig;
 
@@ -75,41 +74,33 @@ pub fn load_identity(
     Ok((identity, origin))
 }
 
-/// Write the audit record for how the identity was obtained.
+/// Log how the identity was obtained.
 ///
-/// A plain load produces no record: it happens on every start, and a trail that logs
-/// every boot buries the events that matter. Only creation and renewal are recorded,
-/// and neither carries key material — the device id and identity fingerprint are both
+/// A plain load logs nothing: it happens on every start, and a trail that logs every
+/// boot buries the events that matter. Only creation and renewal are logged, and
+/// neither carries key material — the device id and identity fingerprint are both
 /// public values a client is expected to see.
 ///
-/// # Errors
-/// Propagates a failure to write the audit row. Identity creation that cannot be
-/// audited is treated as a failure rather than proceeding silently.
-pub async fn record_identity_event(
-    audit: &AuditRepository,
-    origin: IdentityOrigin,
-    identity: &DeviceIdentity,
-    clock: &dyn Clock,
-) -> anyhow::Result<()> {
+/// There is no persisted audit trail in this build — the table it used to write to
+/// was dropped along with the model it described (see
+/// `crates/storage/migrations/0003_anydesk_model.sql`) — so this only reaches the
+/// process log.
+pub fn record_identity_event(origin: IdentityOrigin, identity: &DeviceIdentity, clock: &dyn Clock) {
     let action = match origin {
-        IdentityOrigin::Loaded => return Ok(()),
-        IdentityOrigin::Created => actions::IDENTITY_CREATED,
-        IdentityOrigin::CertificateRenewed => actions::CERTIFICATE_RENEWED,
+        IdentityOrigin::Loaded => return,
+        IdentityOrigin::Created => "identity created",
+        IdentityOrigin::CertificateRenewed => "certificate renewed",
     };
 
     let public = identity.public();
-    audit
-        .record(
-            &AuditEvent::new(AuditCategory::Config, action, AuditResult::Success)
-                .actor_device(public.device_id)
-                .meta("identity_fingerprint", public.identity_fingerprint)
-                .meta("certificate_version", public.certificate_version),
-            clock.now_ms(),
-        )
-        .await
-        .context("could not write the identity audit record")?;
-
-    Ok(())
+    tracing::info!(
+        device_id = %public.device_id,
+        identity_fingerprint = %public.identity_fingerprint,
+        certificate_version = public.certificate_version,
+        occurred_at_ms = clock.now_ms(),
+        action,
+        "identity event"
+    );
 }
 
 /// Print this agent's identity for the operator to compare.
@@ -144,54 +135,19 @@ fn format_timestamp(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rc_storage::audit::AuditCategory;
-
     use super::*;
 
-    #[tokio::test]
-    async fn creating_an_identity_is_audited_but_loading_one_is_not() {
-        let database = rc_storage::Database::open_in_memory().await.unwrap();
-        let audit = AuditRepository::new(&database);
+    #[test]
+    fn logging_an_identity_event_does_not_panic_for_any_origin() {
+        // There is no persisted trail to assert against any more — see this function's
+        // doc comment — so what is left to pin is that every origin, including the one
+        // that logs nothing, is handled without panicking.
         let clock = SystemClock;
         let identity = DeviceIdentity::generate("test-agent", &clock).unwrap();
 
-        record_identity_event(&audit, IdentityOrigin::Loaded, &identity, &clock)
-            .await
-            .unwrap();
-        assert_eq!(
-            audit.count().await.unwrap(),
-            0,
-            "an ordinary load must not write a record on every boot"
-        );
-
-        record_identity_event(&audit, IdentityOrigin::Created, &identity, &clock)
-            .await
-            .unwrap();
-        record_identity_event(
-            &audit,
-            IdentityOrigin::CertificateRenewed,
-            &identity,
-            &clock,
-        )
-        .await
-        .unwrap();
-        assert_eq!(audit.count().await.unwrap(), 2);
-
-        // Neither record may carry key material.
-        let rendered = format!("{:?}", audit.recent(10).await.unwrap());
-        assert!(
-            !rendered.contains("PRIVATE"),
-            "no key material in the trail"
-        );
-        assert_eq!(
-            audit
-                .recent_in_category(AuditCategory::Pairing, 10)
-                .await
-                .unwrap()
-                .len(),
-            0,
-            "identity events belong to the config category, not pairing"
-        );
+        record_identity_event(IdentityOrigin::Loaded, &identity, &clock);
+        record_identity_event(IdentityOrigin::Created, &identity, &clock);
+        record_identity_event(IdentityOrigin::CertificateRenewed, &identity, &clock);
     }
 
     #[test]
