@@ -167,20 +167,27 @@ impl TransportError {
     pub const fn permits_auto_reconnect(&self) -> bool {
         match self {
             // Transient: the network went away, or the agent restarted.
+            //
+            // `UnresolvableAddress` belongs here, not with the permanent failures.
+            // Resolution is attempted fresh on every connection, so the same address
+            // can fail now and succeed in a minute: a machine that is asleep may have
+            // no record until it wakes, and a resolver outage heals without anyone
+            // touching the address. Both are the shape `Connect` already retries
+            // through. Filing it as permanent would mean a saved machine that went to
+            // sleep stops being reachable until the operator intervenes, even though
+            // nothing was mistyped and nothing is wrong.
             Self::ConnectionLost { .. }
             | Self::Connect { .. }
             | Self::HandshakeTimeout
+            | Self::UnresolvableAddress { .. }
             | Self::Io { .. } => true,
 
             // Requires a human, or indicates an attack. Never retried.
             //
-            // Both address errors sit here rather than with the transient cases. A
-            // mistyped address fails identically however many times it is tried, and a
-            // name that does not resolve needs the address corrected or DNS fixed —
-            // neither happens by waiting. A machine that is merely switched off
-            // resolves fine and fails at `Connect`, which does retry.
+            // `InvalidAddress` is the address error that does belong here: the text
+            // does not change between attempts, so retrying reproduces the identical
+            // failure forever.
             Self::InvalidAddress(_)
-            | Self::UnresolvableAddress { .. }
             | Self::FingerprintMismatch
             | Self::NotTrusted
             | Self::Revoked
@@ -296,10 +303,25 @@ mod tests {
             TransportError::Io {
                 reason: "reset".to_owned(),
             },
+            // Resolution runs again on every attempt, so a name that fails now can
+            // succeed in a minute — a sleeping machine, or a resolver that came back.
+            TransportError::UnresolvableAddress {
+                address: "work-laptop.local:7443".to_owned(),
+                reason: "no such host".to_owned(),
+            },
         ] {
             assert!(err.permits_auto_reconnect(), "{err:?} should reconnect");
             assert!(!err.is_security_rejection());
         }
+    }
+
+    #[test]
+    fn a_malformed_address_is_never_retried() {
+        // The text does not change between attempts, so retrying reproduces the
+        // identical failure forever. This is the one address error that is permanent.
+        let err = TransportError::InvalidAddress("https://192.168.1.77".to_owned());
+        assert!(!err.permits_auto_reconnect());
+        assert!(!err.is_security_rejection());
     }
 
     #[test]
