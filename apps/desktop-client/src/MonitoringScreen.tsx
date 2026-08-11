@@ -85,8 +85,13 @@ export interface StripReading {
   readonly networkTxBps?: number | undefined;
 }
 
-/** Aggregate disk usage across every volume the server reported, as one percentage. */
-function diskUtilisation(disks: Snapshot['disks']): number | undefined {
+/**
+ * Aggregate disk usage across every volume the server reported, as one percentage.
+ *
+ * Exported so the reduction can be tested directly against real disk-list shapes,
+ * rather than only through the component that happens to render its result.
+ */
+export function diskUtilisation(disks: Snapshot['disks']): number | undefined {
   if (disks.length === 0) return undefined;
   const totalBytes = disks.reduce((sum, disk) => sum + disk.totalBytes, 0);
   if (totalBytes === 0) return undefined;
@@ -94,8 +99,12 @@ function diskUtilisation(disks: Snapshot['disks']): number | undefined {
   return (usedBytes / totalBytes) * 100;
 }
 
-/** Aggregate throughput across every interface the server reported. */
-function networkThroughput(
+/**
+ * Aggregate throughput across every interface the server reported.
+ *
+ * Exported for the same reason as {@link diskUtilisation}.
+ */
+export function networkThroughput(
   networks: Snapshot['networks'],
 ): { readonly rx: number; readonly tx: number } | undefined {
   if (networks.length === 0) return undefined;
@@ -105,8 +114,14 @@ function networkThroughput(
   };
 }
 
-/** Reduce a full snapshot down to the four figures the strip shows. */
-function toStripReading(snapshot: Snapshot): StripReading {
+/**
+ * Reduce a full snapshot down to the four figures the strip shows.
+ *
+ * Exported so the whole reduction — the one place this task's "absent, never zero"
+ * guarantee is actually decided — can be driven with real {@link Snapshot} inputs in
+ * tests, not just with hand-built {@link StripReading} literals.
+ */
+export function toStripReading(snapshot: Snapshot): StripReading {
   const memoryPercent =
     snapshot.memoryTotalBytes === 0
       ? undefined

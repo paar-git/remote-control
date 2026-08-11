@@ -2,7 +2,13 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { metricsTickSchema, type MetricsTick, type Snapshot } from './api.js';
-import { applyTick, MonitoringStrip } from './MonitoringScreen.js';
+import {
+  applyTick,
+  diskUtilisation,
+  MonitoringStrip,
+  networkThroughput,
+  toStripReading,
+} from './MonitoringScreen.js';
 
 /** A snapshot with a process list and static CPU identity, as one arrives from a fetch. */
 function snapshot(): Snapshot {
@@ -101,6 +107,108 @@ describe('the tick schema', () => {
     // real zero, and will eventually trust the wrong one.
     const parsed = metricsTickSchema.safeParse(tick({ loadAverage: null }));
     expect(parsed.success).toBe(true);
+  });
+});
+
+describe('reducing a real snapshot to the strip reading', () => {
+  it('omits disk when the server reported no volumes', () => {
+    const reading = toStripReading({ ...snapshot(), disks: [] });
+    expect(reading.diskPercent).toBeUndefined();
+  });
+
+  it('computes disk usage as a percentage across every volume, not a flat 0', () => {
+    const reading = toStripReading({
+      ...snapshot(),
+      disks: [
+        { mountPoint: '/', filesystem: 'ext4', totalBytes: 100, availableBytes: 25 },
+        { mountPoint: '/data', filesystem: 'ext4', totalBytes: 300, availableBytes: 100 },
+      ],
+    });
+    // used = (100 - 25) + (300 - 100) = 275; total = 400; 275 / 400 * 100 = 68.75.
+    // A swapped used/available, or a sum of percentages instead of bytes, would not
+    // land on this exact figure.
+    expect(reading.diskPercent).toBe(68.75);
+  });
+
+  it('omits network when the server reported no interfaces', () => {
+    const reading = toStripReading({ ...snapshot(), networks: [] });
+    expect(reading.networkRxBps).toBeUndefined();
+    expect(reading.networkTxBps).toBeUndefined();
+  });
+
+  it('sums throughput across every interface, not just the first', () => {
+    const reading = toStripReading({
+      ...snapshot(),
+      networks: [
+        {
+          interface: 'eth0',
+          receiveRateBps: 1000,
+          transmitRateBps: 200,
+          receivedBytes: 0,
+          transmittedBytes: 0,
+        },
+        {
+          interface: 'wlan0',
+          receiveRateBps: 500,
+          transmitRateBps: 50,
+          receivedBytes: 0,
+          transmittedBytes: 0,
+        },
+      ],
+    });
+    expect(reading.networkRxBps).toBe(1500);
+    expect(reading.networkTxBps).toBe(250);
+  });
+
+  it('omits memory when the server reported zero total memory', () => {
+    // Zero total memory is a broken read, not a machine that genuinely has none — the
+    // same "absent, not a fake zero" rule the disk and network cases apply.
+    const reading = toStripReading({ ...snapshot(), memoryTotalBytes: 0 });
+    expect(reading.memoryPercent).toBeUndefined();
+  });
+
+  it('computes memory usage as a percentage of total', () => {
+    const reading = toStripReading({
+      ...snapshot(),
+      memoryUsedBytes: 3_000,
+      memoryTotalBytes: 4_000,
+    });
+    expect(reading.memoryPercent).toBe(75);
+  });
+});
+
+describe('the disk and network aggregation helpers directly', () => {
+  it('diskUtilisation returns undefined for an empty disk list', () => {
+    expect(diskUtilisation([])).toBeUndefined();
+  });
+
+  it('diskUtilisation weighs by bytes, not by volume count', () => {
+    // A small, nearly-full volume and a large, nearly-empty one must not average as
+    // if each volume counted equally — the figure is meant to read as "how full is
+    // this machine's storage", which only bytes can answer.
+    const percent = diskUtilisation([
+      { mountPoint: '/small', filesystem: 'ext4', totalBytes: 10, availableBytes: 0 },
+      { mountPoint: '/large', filesystem: 'ext4', totalBytes: 990, availableBytes: 990 },
+    ]);
+    // used = 10 + 0 = 10; total = 1000; 10 / 1000 * 100 = 1.
+    expect(percent).toBe(1);
+  });
+
+  it('networkThroughput returns undefined for an empty interface list', () => {
+    expect(networkThroughput([])).toBeUndefined();
+  });
+
+  it('networkThroughput keeps receive and transmit as separate sums', () => {
+    const throughput = networkThroughput([
+      {
+        interface: 'eth0',
+        receiveRateBps: 4_000,
+        transmitRateBps: 100,
+        receivedBytes: 0,
+        transmittedBytes: 0,
+      },
+    ]);
+    expect(throughput).toEqual({ rx: 4_000, tx: 100 });
   });
 });
 
