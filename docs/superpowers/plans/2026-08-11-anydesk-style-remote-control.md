@@ -2148,6 +2148,20 @@ whether unattended access is configured."
 
 ### Task 12: Embed the host in the desktop application
 
+> **BLOCKING REQUIREMENT inherited from Task 8 (ruled by the project owner 2026-08-12).**
+> Deleting the owner account removed the only construction site for `AppState.session`,
+> so `authorization()` always returns `None` and `require_permission` /
+> `require_unlocked` deny every call. Thirteen commands are currently unreachable:
+> `disconnect_from_server` and `ping_server` (`connect_commands.rs`), `system_snapshot`,
+> `server_facts`, `subscribe_metrics` (`session_commands.rs`), and the seven
+> file-transfer commands (`file_commands.rs`).
+>
+> This task MUST re-gate all thirteen on the permissions carried by the authorized
+> session from Task 11, and delete `require_unlocked` and the `OwnerSession` remnant.
+> The owner ruled these may fail closed in the interim rather than be stripped of their
+> gate — that ruling expires here. Task 12 is not complete while any command is gated on
+> a check that cannot pass.
+
 **Files:**
 - Modify: `apps/desktop-client/src-tauri/Cargo.toml` (depend on `rc-host-agent`)
 - Modify: `apps/desktop-client/src-tauri/src/lib.rs`
