@@ -92,13 +92,6 @@ pnpm --filter @rc/desktop-client tauri:dev
 Opening `http://127.0.0.1:1420` in a browser instead will show an explicit
 "backend unavailable" message — the UI has no mock mode.
 
-### Run the coordination service
-
-```bash
-cargo run -p rc-coordination-server         # binds 127.0.0.1:47812 by default
-curl http://127.0.0.1:47812/health
-```
-
 ## Security posture
 
 The rules the codebase is built to, each enforced by tests:
