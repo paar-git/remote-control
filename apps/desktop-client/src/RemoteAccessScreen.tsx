@@ -391,7 +391,7 @@ function DeviceRow({
         aria-label={
           live ? `Disconnect from ${device.displayName}` : `Connect to ${device.displayName}`
         }
-        className="flex w-full cursor-pointer items-center gap-4 rounded-xl border border-(--color-border) bg-(--color-card) py-4 pr-24 pl-4 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border) hover:bg-(--color-card) active:translate-y-px disabled:pointer-events-none disabled:opacity-60"
+        className="flex w-full cursor-pointer items-center gap-4 rounded-xl border border-(--color-border) bg-(--color-card) py-4 pr-24 pl-4 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border-hover) hover:bg-(--color-hover) active:translate-y-px disabled:pointer-events-none disabled:opacity-60"
       >
         <span
           className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors duration-150 ease-(--ease-ui) ${

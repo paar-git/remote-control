@@ -117,7 +117,7 @@ function SidebarHeader({
           onClick={onToggleCollapsed}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-expanded={!collapsed}
-          className="flex size-8 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+          className="flex size-8 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
         >
           {collapsed ? (
             <ChevronsRight aria-hidden="true" className="size-4" />
@@ -237,8 +237,8 @@ export function SidebarItem({
               : current
                 ? 'bg-(--color-accent-soft) font-medium text-(--color-text) '
                 : idle
-                  ? 'text-(--color-text-secondary) hover:bg-(--color-card) hover:text-(--color-text-secondary) '
-                  : 'text-(--color-text-secondary) hover:bg-(--color-card) hover:text-(--color-text) ')
+                  ? 'text-(--color-text-secondary) hover:bg-(--color-hover) hover:text-(--color-text-secondary) '
+                  : 'text-(--color-text-secondary) hover:bg-(--color-hover) hover:text-(--color-text) ')
           }
         >
           {/* The active marker. Absolutely positioned so it never shifts the row. */}
@@ -313,7 +313,7 @@ function SidebarFooter({
             type="button"
             onClick={onLock}
             aria-label="Lock session"
-            className="flex size-8 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+            className="flex size-8 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
           >
             <Lock aria-hidden="true" className="size-4" />
           </button>
@@ -339,7 +339,7 @@ function SidebarFooter({
       <button
         type="button"
         onClick={onLock}
-        className="mt-1 flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+        className="mt-1 flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
       >
         <Lock aria-hidden="true" className="size-4 shrink-0" />
         Lock session

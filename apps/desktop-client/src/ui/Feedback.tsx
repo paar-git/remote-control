@@ -121,7 +121,7 @@ export function ConfirmDialog({
             ref={cancelRef}
             type="button"
             onClick={onCancel}
-            className="inline-flex h-8 items-center rounded-lg border border-(--color-border) px-3 text-sm font-medium transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card)"
+            className="inline-flex h-8 items-center rounded-lg border border-(--color-border) px-3 text-sm font-medium transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover)"
           >
             Cancel
           </button>

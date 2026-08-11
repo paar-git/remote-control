@@ -298,7 +298,7 @@ export default function MonitoringScreen(): React.JSX.Element {
       {notice === null ? null : (
         <p
           role="status"
-          className="mb-4 rounded-xl border border-(--color-danger)/40 bg-(--color-danger-soft) p-3 text-sm text-(--color-text-secondary)"
+          className="mb-4 rounded-xl border border-(--color-warning)/40 bg-(--color-warning-soft) p-3 text-sm text-(--color-text-secondary)"
         >
           {notice} These readings are being polled instead.
         </p>
@@ -597,7 +597,7 @@ function Bar({
   const clamped = Math.min(Math.max(percent, 0), 100);
   return (
     <div
-      className="h-1.5 w-full overflow-hidden rounded-full bg-(--color-card)"
+      className="h-1.5 w-full overflow-hidden rounded-full bg-(--color-border)"
       role="img"
       aria-label={`${clamped.toFixed(0)} percent`}
     >

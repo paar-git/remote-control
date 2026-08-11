@@ -334,9 +334,9 @@ function DeviceHero({
 function ReadinessBanner({ readiness }: { readonly readiness: Readiness }): React.JSX.Element {
   const accent =
     readiness.tone === 'danger'
-      ? 'border-(--color-danger)/40 bg-(--color-danger-soft)'
+      ? 'border-(--color-warning)/40 bg-(--color-warning-soft)'
       : readiness.tone === 'warning'
-        ? 'border-(--color-danger)/40 bg-(--color-danger-soft)'
+        ? 'border-(--color-warning)/40 bg-(--color-warning-soft)'
         : 'border-(--color-border) bg-(--color-card)';
 
   return (
@@ -436,7 +436,7 @@ function RemoteAccessCard({
               ? 'Renewal due'
               : `Valid to ${formatTimestamp(identity.certificateNotAfterMs)}`
         }
-        tone={identity?.needsRenewal === true ? 'text-(--color-danger)' : undefined}
+        tone={identity?.needsRenewal === true ? 'text-(--color-warning)' : undefined}
       />
     </InfoCard>
   );
@@ -462,7 +462,7 @@ function SecurityCard({
       title="Security"
       footer={
         info.elevated ? (
-          <p className="flex items-start gap-2 text-xs text-(--color-danger)">
+          <p className="flex items-start gap-2 text-xs text-(--color-warning)">
             <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0" />
             Close this window and start it normally. Privileged work is routed through the agent
             service, so the client gains nothing from elevation.

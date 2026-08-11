@@ -63,7 +63,7 @@ export function AuthScreen({
     <div className="flex h-full items-center justify-center overflow-y-auto bg-(--color-page) p-6">
       <div className="animate-fade-in w-full max-w-sm">
         <div className="mb-6 flex flex-col items-center text-center">
-          <span className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-(--color-accent) text-(--color-accent-text) shadow-lg shadow-black/30">
+          <span className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-(--color-accent) text-(--color-accent-text) shadow-md shadow-[rgb(16_24_40_/_12%)]">
             <MonitorCog aria-hidden="true" className="size-6" />
           </span>
           <h1 className="text-lg font-semibold tracking-[-0.01em]">
@@ -78,7 +78,7 @@ export function AuthScreen({
 
         <form
           onSubmit={submit}
-          className="rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-xl shadow-black/20"
+          className="rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-lg shadow-[rgb(16_24_40_/_10%)]"
         >
           <div className="flex flex-col gap-4">
             <TextField

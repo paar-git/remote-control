@@ -28,7 +28,7 @@ export function Card({
         'rounded-xl border border-(--color-border) bg-(--color-card) ' +
         (padded ? 'p-4 ' : '') +
         (interactive
-          ? 'transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-border) hover:bg-(--color-card) '
+          ? 'transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-border-hover) hover:bg-(--color-hover) '
           : '') +
         className
       }
@@ -166,7 +166,7 @@ export function InlineCopy({
               setCopied(false);
             });
         }}
-        className="flex size-6 shrink-0 items-center justify-center rounded-md text-(--color-text-secondary) opacity-0 transition-[opacity,color,background-color] duration-150 ease-(--ease-ui) group-hover:opacity-100 hover:bg-(--color-card) hover:text-(--color-text) focus-visible:opacity-100"
+        className="flex size-6 shrink-0 items-center justify-center rounded-md text-(--color-text-secondary) opacity-0 transition-[opacity,color,background-color] duration-150 ease-(--ease-ui) group-hover:opacity-100 hover:bg-(--color-hover) hover:text-(--color-text) focus-visible:opacity-100"
       >
         {copied ? (
           <Check aria-hidden="true" className="size-3.5 text-(--color-success)" />

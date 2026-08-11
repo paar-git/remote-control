@@ -29,12 +29,12 @@ const BASE =
 const VARIANTS: Record<ButtonVariant, string> = {
   default:
     'border border-(--color-border) bg-(--color-card) text-(--color-text) ' +
-    'hover:border-(--color-text-secondary) hover:bg-(--color-card)',
+    'hover:border-(--color-text-secondary) hover:bg-(--color-hover)',
   primary: 'bg-(--color-accent) text-(--color-accent-text) hover:bg-(--color-accent-hover)',
   danger:
     'border border-(--color-danger)/45 bg-(--color-danger-soft) text-(--color-danger) ' +
     'hover:border-(--color-danger) hover:bg-(--color-danger)/20',
-  ghost: 'text-(--color-text-secondary) hover:bg-(--color-card) hover:text-(--color-text)',
+  ghost: 'text-(--color-text-secondary) hover:bg-(--color-hover) hover:text-(--color-text)',
   subtle: 'bg-(--color-accent-soft) text-(--color-accent) hover:bg-(--color-accent)/25',
 };
 

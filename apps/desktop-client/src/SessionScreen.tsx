@@ -150,7 +150,7 @@ export function SessionScreen({
             }}
             aria-label="Open session options"
             aria-expanded={false}
-            className="absolute top-1/2 right-0 z-20 flex h-16 w-5 -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-(--color-border) bg-(--color-card)/90 text-(--color-text-secondary) backdrop-blur transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+            className="absolute top-1/2 right-0 z-20 flex h-16 w-5 -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-(--color-border) bg-(--color-card)/90 text-(--color-text-secondary) backdrop-blur transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
           >
             <ChevronRight aria-hidden="true" className="size-3.5 rotate-180" />
           </button>
@@ -181,7 +181,7 @@ export function SessionScreen({
               setPanelOpen(false);
             }}
             aria-label="Close session options"
-            className="flex size-7 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+            className="flex size-7 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
           >
             <X aria-hidden="true" className="size-4" />
           </button>
@@ -235,7 +235,7 @@ export function SessionScreen({
           <button
             type="button"
             onClick={onLeave}
-            className="h-8 w-full rounded-lg text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+            className="h-8 w-full rounded-lg text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
           >
             Back to my computers
           </button>
@@ -343,7 +343,7 @@ function PanelToggle({
       role="switch"
       aria-checked={checked}
       onClick={onToggle}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
     >
       <Icon aria-hidden="true" className="size-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
@@ -391,7 +391,7 @@ function PanelAction({
     <button
       type="button"
       onClick={onSelect}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
     >
       <Icon aria-hidden="true" className="size-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>

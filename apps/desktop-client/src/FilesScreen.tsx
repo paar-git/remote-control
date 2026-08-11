@@ -527,7 +527,7 @@ function Pane({
                     'transition-colors duration-150 ease-(--ease-ui) ' +
                     (entry.name === selectedName
                       ? 'bg-(--color-accent-soft)'
-                      : 'hover:bg-(--color-card)')
+                      : 'hover:bg-(--color-hover)')
                   }
                 >
                   <td className="px-3 py-1">
@@ -545,7 +545,7 @@ function Pane({
                         {entry.name}
                       </span>
                       {entry.kind === 'symlink' && (
-                        <Badge tone="warning">link → {entry.symlinkTarget ?? 'unknown'}</Badge>
+                        <Badge tone="neutral">link → {entry.symlinkTarget ?? 'unknown'}</Badge>
                       )}
                       {!entry.readable && entry.kind !== 'symlink' && <Badge>no access</Badge>}
                     </button>
@@ -580,7 +580,7 @@ function EntryIcon({ kind }: { readonly kind: FileEntry['kind'] }): React.JSX.El
     case 'directory':
       return <Folder aria-hidden="true" className={`${shared} text-(--color-accent)`} />;
     case 'symlink':
-      return <Link2 aria-hidden="true" className={`${shared} text-(--color-danger)`} />;
+      return <Link2 aria-hidden="true" className={`${shared} text-(--color-text-secondary)`} />;
     case 'file':
       return <FileIcon aria-hidden="true" className={`${shared} text-(--color-text-secondary)`} />;
     case 'other':

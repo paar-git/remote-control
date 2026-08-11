@@ -18,18 +18,46 @@
 @theme {
   --color-page: #f5f6f8;
   --color-card: #ffffff;
+
+  /*
+   * A hover fill distinct from both surfaces. Without it, a control sitting on a card
+   * has no colour to move to — `card` on `card` is not a hover state, it is the
+   * absence of one.
+   */
+  --color-hover: #eef0f3;
+
+  /*
+   * Two border weights, not one. Collapsing them left inputs and rows whose resting
+   * and hover borders were the same value, so every text field in the app silently
+   * lost its affordance. `border` is the resting hairline; `border-hover` is what a
+   * control moves to under the pointer or focus.
+   */
   --color-border: #e3e5e9;
+  --color-border-hover: #c9cfd8;
 
   --color-text: #1a1a1a;
-  --color-text-secondary: #6b7280;
+  /* #6B7280 measured 4.47:1 on the page background — just under AA. */
+  --color-text-secondary: #5b6472;
 
-  --color-accent: #ef443b;
-  --color-accent-hover: #d93a32;
-  --color-accent-soft: rgb(239 68 59 / 10%);
+  /*
+   * The accent is darkened from AnyDesk's own red. White on #EF443B is 3.78:1, below
+   * AA for the button label it carries; this reads as the same red and passes at
+   * 4.65:1.
+   */
+  --color-accent: #d93a32;
+  --color-accent-hover: #c0322b;
+  --color-accent-soft: rgb(217 58 50 / 10%);
   --color-accent-text: #ffffff;
 
   --color-success: #2e9e4f;
   --color-success-soft: rgb(46 158 79 / 12%);
+  /*
+   * Warning is a distinct tone, not an alias for danger. Merging them made "no
+   * computers yet" — a first-run state — render identically to "the database could not
+   * be opened".
+   */
+  --color-warning: #a16207;
+  --color-warning-soft: rgb(161 98 7 / 12%);
   --color-danger: #c62828;
   --color-danger-soft: rgb(198 40 40 / 10%);
 

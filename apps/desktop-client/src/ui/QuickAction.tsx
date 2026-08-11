@@ -73,7 +73,7 @@ export function QuickAction({
     <button
       type="button"
       onClick={onSelect}
-      className="flex cursor-pointer items-start gap-3 rounded-xl border border-(--color-border) bg-(--color-card) p-3.5 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border) hover:bg-(--color-card) active:translate-y-px"
+      className="flex cursor-pointer items-start gap-3 rounded-xl border border-(--color-border) bg-(--color-card) p-3.5 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border-hover) hover:bg-(--color-hover) active:translate-y-px"
     >
       {body}
     </button>

@@ -71,7 +71,7 @@ export function TextField({
           className={
             'h-9 w-full min-w-0 rounded-lg border bg-(--color-page) px-3 text-sm ' +
             'transition-[border-color,background-color] duration-150 ease-(--ease-ui) ' +
-            'placeholder:text-(--color-text-secondary) hover:border-(--color-border) ' +
+            'placeholder:text-(--color-text-secondary) hover:border-(--color-border-hover) ' +
             (invalid ? 'border-(--color-danger) ' : 'border-(--color-border) ') +
             (mono ? 'font-mono ' : '') +
             (uppercase ? 'tracking-[0.12em] uppercase ' : '')
