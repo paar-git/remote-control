@@ -66,10 +66,10 @@ pub struct AgentListener {
 impl AgentListener {
     /// Bind a listener on `address`, presenting `identity`.
     ///
-    /// `policy` decides which clients are admitted at the TLS layer:
-    /// [`PinPolicy::TrustOnFirstUse`] while a pairing window is open, and a specific
-    /// pin for a known device. Note that TLS admission is **not** authorization — the
-    /// handshake still performs the trust and revocation checks.
+    /// `policy` decides which certificates are admitted at the TLS layer. A listener
+    /// serving many clients uses [`PinPolicy::TrustOnFirstUse`], because one pin could
+    /// only ever match one of them. Note that TLS admission is **not** authorization —
+    /// [`crate::handshake`] decides whether the peer may have a session.
     ///
     /// # Errors
     /// [`TransportError::Bind`] if the socket cannot be bound, or

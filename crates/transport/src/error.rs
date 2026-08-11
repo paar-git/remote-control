@@ -44,13 +44,17 @@ pub enum TransportError {
     /// This is the loud one. It is never retried automatically and never silently
     /// re-trusted: it means either a misconfiguration or an active attacker.
     #[error(
-        "the device presented a different identity than the one you paired with; \
+        "the device presented a different identity than the one saved for it; \
          refusing to connect"
     )]
     FingerprintMismatch,
 
-    /// The peer is not a trusted device.
-    #[error("this device is not paired with the agent")]
+    /// The agent refused to admit this device.
+    ///
+    /// This is what every refused peer sees, and what the agent's audit trail records
+    /// for a refused connection, so the wording states the outcome and nothing about
+    /// which check produced it.
+    #[error("the agent did not admit this device")]
     NotTrusted,
 
     /// The peer's trust was revoked.
@@ -190,6 +194,12 @@ impl TransportError {
 /// The wire carries only a coarse rejection. This type exists so the agent can record
 /// precisely what happened without telling the peer, which would otherwise turn the
 /// handshake into an oracle for probing which device ids are known.
+///
+/// **Nothing produces these variants in this build.** The trust lookup that used to was
+/// deleted with the pairing protocol, and the handshake currently refuses every peer
+/// with [`TransportError::AuthorizationUnavailable`] instead. The type is kept, tested
+/// and exported for the accept path, which will produce it again; it is not a live
+/// decision path today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RejectionCause {
