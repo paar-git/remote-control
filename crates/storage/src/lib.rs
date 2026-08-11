@@ -17,14 +17,15 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-pub mod audit;
 pub mod error;
 pub mod models;
-pub mod owner;
-pub mod trust;
+pub mod recent;
+pub mod settings;
 
 #[cfg(test)]
 mod repo_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
@@ -32,16 +33,15 @@ use std::str::FromStr as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
 
-pub use audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult};
 pub use error::{Result, StorageError};
-pub use owner::{AuthenticatedOwner, OwnerRepository};
-pub use trust::{PresentedIdentity, TrustRepository, TrustedDevice};
+pub use recent::{RecentConnection, RecentRepository};
+pub use settings::{HostSettings, SettingsRepository};
 
 /// Migrations compiled into the binary.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Highest migration version this build ships.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 /// An open, migrated database.
 #[derive(Debug, Clone)]
@@ -264,34 +264,24 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_keys_are_enforced() {
+        // The schema after migration 0003 has no foreign key left to violate — the one
+        // that existed, session_token.account_id -> owner_account.id, was dropped along
+        // with both tables. What is still verifiable, and still worth pinning, is that
+        // enforcement itself is switched on for every connection, per the crate's
+        // safety property that `PRAGMA foreign_keys` is always enabled.
         let db = Database::open_in_memory().await.unwrap();
-        // No such owner_account row, so the FK must reject this.
-        let err = sqlx::query(
-            "INSERT INTO session_token
-                 (id, account_id, token_kind, token_hash, issued_at_ms, expires_at_ms)
-             VALUES (?, ?, 'access', ?, 1, 2)",
-        )
-        .bind("tok1")
-        .bind("nonexistent-account")
-        .bind("hash1")
-        .execute(db.pool())
-        .await
-        .unwrap_err();
-
-        assert!(
-            format!("{err}").to_lowercase().contains("foreign key"),
-            "got: {err}"
-        );
+        let (enabled,): (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(enabled, 1, "foreign key enforcement must be on");
     }
 
     #[tokio::test]
     async fn check_constraints_reject_bad_enum_values() {
         let db = Database::open_in_memory().await.unwrap();
         let err = sqlx::query(
-            "INSERT INTO trusted_device
-                 (device_id, peer_role, display_name, certificate_fingerprint,
-                  identity_public_key, paired_at_ms)
-             VALUES ('d1', 'not-a-role', 'x', 'fp', 'pk', 1)",
+            "INSERT INTO host_settings (id, machine_name, accepting) VALUES (1, 'x', 5)",
         )
         .execute(db.pool())
         .await
@@ -304,21 +294,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinned_fingerprints_are_unique_across_devices() {
+    async fn recent_connection_addresses_are_unique() {
         let db = Database::open_in_memory().await.unwrap();
-        let insert = |id: &'static str| {
+        let insert = || {
             sqlx::query(
-                "INSERT INTO trusted_device
-                     (device_id, peer_role, display_name, certificate_fingerprint,
-                      identity_public_key, paired_at_ms)
-                 VALUES (?, 'agent', 'server', 'same-fingerprint', 'pk', 1)",
+                "INSERT INTO recent_connections (address, machine_name, last_connected_ms)
+                 VALUES ('10.0.0.1', 'box', 1)",
             )
-            .bind(id)
             .execute(db.pool())
         };
 
-        insert("d1").await.unwrap();
-        let err: StorageError = insert("d2").await.unwrap_err().into();
+        insert().await.unwrap();
+        let err: StorageError = insert().await.unwrap_err().into();
         assert!(matches!(err, StorageError::Conflict), "got: {err}");
     }
 

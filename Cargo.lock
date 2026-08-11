@@ -3549,6 +3549,7 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "hex",
+ "rc-platform",
  "rc-protocol",
  "rc-security",
  "serde",

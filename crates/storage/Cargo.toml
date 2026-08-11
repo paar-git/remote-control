@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 rc-protocol = { workspace = true }
 rc-security = { workspace = true }
+rc-platform = { workspace = true }
 sqlx = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
