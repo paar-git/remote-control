@@ -23,7 +23,7 @@
 use rc_security::PermissionSet;
 use rc_security::clock::{Clock, RandomSource};
 use rc_security::error::SecurityError;
-use rc_security::password::{self, HashingPolicy, OwnerCredential};
+use rc_security::password::{self, HashingPolicy, PasswordCredential};
 use rc_security::throttle::Throttle;
 
 use crate::error::{Result, StorageError};
@@ -109,7 +109,7 @@ impl OwnerRepository {
             return Err(StorageError::Conflict);
         }
 
-        let credential = OwnerCredential::create(password, self.policy, rng)
+        let credential = PasswordCredential::create(password, self.policy, rng)
             .map_err(|err| security_to_storage(&err))?;
 
         let account_id = rc_protocol::UserId::generate().to_canonical_string();
@@ -189,7 +189,7 @@ impl OwnerRepository {
         }
 
         // 3. Verify.
-        let credential = OwnerCredential::from_phc(account.password_hash.clone())
+        let credential = PasswordCredential::from_phc(account.password_hash.clone())
             .map_err(|err| security_to_storage(&err))?;
 
         if credential.verify(password).is_err() {
@@ -206,7 +206,7 @@ impl OwnerRepository {
         let mut upgraded = false;
         if credential.needs_rehash(self.policy) || !credential.is_argon2id() {
             if let Ok(new_credential) =
-                OwnerCredential::create(password, self.policy, &rc_security::OsRandom)
+                PasswordCredential::create(password, self.policy, &rc_security::OsRandom)
             {
                 self.store_upgraded_hash(&account.id, &new_credential, clock)
                     .await?;
@@ -256,14 +256,14 @@ impl OwnerRepository {
             return Ok(Err(SecurityError::InvalidCredentials));
         };
 
-        let credential = OwnerCredential::from_phc(account.password_hash.clone())
+        let credential = PasswordCredential::from_phc(account.password_hash.clone())
             .map_err(|err| security_to_storage(&err))?;
         if credential.verify(current_password).is_err() {
             self.record_failure(username, clock);
             return Ok(Err(SecurityError::InvalidCredentials));
         }
 
-        let new_credential = match OwnerCredential::create(new_password, self.policy, rng) {
+        let new_credential = match PasswordCredential::create(new_password, self.policy, rng) {
             Ok(credential) => credential,
             Err(err) => return Ok(Err(err)),
         };
@@ -353,7 +353,7 @@ impl OwnerRepository {
     async fn store_upgraded_hash(
         &self,
         account_id: &str,
-        credential: &OwnerCredential,
+        credential: &PasswordCredential,
         clock: &dyn Clock,
     ) -> Result<()> {
         sqlx::query(

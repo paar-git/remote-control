@@ -31,6 +31,6 @@ pub use error::{Result, SecurityError};
 pub use fingerprint::Fingerprint;
 pub use identity::{DeviceIdentity, DeviceIdentityPublic, derive_device_id};
 pub use keystore::Keystore;
-pub use password::{HashingPolicy, OwnerCredential};
+pub use password::{HashingPolicy, PasswordCredential};
 pub use permissions::{Permission, PermissionSet};
 pub use throttle::{Throttle, ThrottlePolicy};
