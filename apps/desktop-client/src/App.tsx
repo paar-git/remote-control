@@ -313,7 +313,7 @@ function useServiceStatus(gate: Gate['status']): ServiceStatus {
 /** The first frame, before the backend has answered. */
 function Splash(): React.JSX.Element {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 bg-(--color-surface)">
+    <div className="flex h-full flex-col items-center justify-center gap-3 bg-(--color-page)">
       <span className="flex size-11 items-center justify-center rounded-2xl bg-(--color-accent) text-(--color-accent-text)">
         <MonitorCog aria-hidden="true" className="size-5.5" />
       </span>
@@ -327,10 +327,10 @@ function Splash(): React.JSX.Element {
 /** The one failure the shell itself has to render: no backend at all. */
 function BackendUnavailable({ message }: { readonly message: string }): React.JSX.Element {
   return (
-    <div className="flex h-full items-center justify-center bg-(--color-surface) p-6">
+    <div className="flex h-full items-center justify-center bg-(--color-page) p-6">
       <div
         role="alert"
-        className="w-full max-w-md rounded-xl border border-(--color-danger)/40 bg-(--color-surface-raised) p-5"
+        className="w-full max-w-md rounded-xl border border-(--color-danger)/40 bg-(--color-card) p-5"
       >
         <div className="mb-2 flex items-center gap-2.5">
           <span className="flex size-8 items-center justify-center rounded-lg bg-(--color-danger-soft) text-(--color-danger)">
@@ -361,7 +361,7 @@ function UpdateBanner({
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-3 border-b border-(--color-border-subtle) bg-(--color-accent-soft) px-5 py-2.5"
+      className="flex flex-wrap items-center gap-3 border-b border-(--color-border) bg-(--color-accent-soft) px-5 py-2.5"
     >
       <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-(--color-accent)" />
       <p className="min-w-0 flex-1 text-sm">

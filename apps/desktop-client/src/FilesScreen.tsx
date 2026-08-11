@@ -275,7 +275,7 @@ export default function FilesScreen({
         }
       />
 
-      <div className="mb-3 flex flex-wrap items-center gap-4 rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised) px-3.5 py-2.5">
+      <div className="mb-3 flex flex-wrap items-center gap-4 rounded-xl border border-(--color-border) bg-(--color-card) px-3.5 py-2.5">
         <label className="flex cursor-pointer items-center gap-2 text-xs text-(--color-text-secondary)">
           <input
             type="checkbox"
@@ -295,7 +295,7 @@ export default function FilesScreen({
             onChange={(event) => {
               setConflict(event.target.value as ConflictChoice);
             }}
-            className="h-7 rounded-lg border border-(--color-border-strong) bg-(--color-surface) px-2 text-xs text-(--color-text-primary)"
+            className="h-7 rounded-lg border border-(--color-border) bg-(--color-page) px-2 text-xs text-(--color-text)"
           >
             <option value="fail">Stop and ask</option>
             <option value="overwrite">Replace it</option>
@@ -419,13 +419,13 @@ function Pane({
   const parent = path === null ? null : parentPath(path);
 
   return (
-    <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised)">
-      <div className="flex flex-wrap items-center gap-2 border-b border-(--color-border-subtle) px-3 py-2">
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-(--color-border) bg-(--color-card)">
+      <div className="flex flex-wrap items-center gap-2 border-b border-(--color-border) px-3 py-2">
         <span className="flex items-center gap-2 text-sm font-semibold">
           {title === 'Server' ? (
-            <HardDrive aria-hidden="true" className="size-4 text-(--color-text-muted)" />
+            <HardDrive aria-hidden="true" className="size-4 text-(--color-text-secondary)" />
           ) : (
-            <Laptop aria-hidden="true" className="size-4 text-(--color-text-muted)" />
+            <Laptop aria-hidden="true" className="size-4 text-(--color-text-secondary)" />
           )}
           {title}
         </span>
@@ -433,7 +433,7 @@ function Pane({
       </div>
 
       <form
-        className="flex gap-2 border-b border-(--color-border-subtle) px-3 py-2"
+        className="flex gap-2 border-b border-(--color-border) px-3 py-2"
         onSubmit={(event) => {
           event.preventDefault();
           if (draft.trim() !== '') onNavigate(draft.trim());
@@ -459,7 +459,7 @@ function Pane({
             setDraft(event.target.value);
           }}
           spellCheck={false}
-          className="h-7 min-w-0 flex-1 rounded-lg border border-(--color-border-strong) bg-(--color-surface) px-2.5 font-mono text-xs transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-text-muted)"
+          className="h-7 min-w-0 flex-1 rounded-lg border border-(--color-border) bg-(--color-page) px-2.5 font-mono text-xs transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-text-secondary)"
         />
         <Button type="submit" size="sm">
           Go
@@ -506,8 +506,8 @@ function Pane({
 
         {state.status === 'ready' && state.listing.entries.length > 0 && (
           <table className="w-full text-left text-xs">
-            <thead className="sticky top-0 z-10 bg-(--color-surface-raised) text-(--color-text-muted)">
-              <tr className="border-b border-(--color-border-subtle)">
+            <thead className="sticky top-0 z-10 bg-(--color-card) text-(--color-text-secondary)">
+              <tr className="border-b border-(--color-border)">
                 <th scope="col" className="px-3 py-1.5 font-medium">
                   Name
                 </th>
@@ -527,7 +527,7 @@ function Pane({
                     'transition-colors duration-150 ease-(--ease-ui) ' +
                     (entry.name === selectedName
                       ? 'bg-(--color-accent-soft)'
-                      : 'hover:bg-(--color-surface-overlay)')
+                      : 'hover:bg-(--color-card)')
                   }
                 >
                   <td className="px-3 py-1">
@@ -553,7 +553,7 @@ function Pane({
                   <td className="px-3 py-1 text-right tabular-nums whitespace-nowrap text-(--color-text-secondary)">
                     {entry.kind === 'directory' ? '—' : formatBytes(entry.sizeBytes)}
                   </td>
-                  <td className="px-3 py-1 whitespace-nowrap text-(--color-text-muted)">
+                  <td className="px-3 py-1 whitespace-nowrap text-(--color-text-secondary)">
                     {formatTimestamp(entry.modifiedMs)}
                   </td>
                 </tr>
@@ -564,7 +564,7 @@ function Pane({
       </div>
 
       {state.status === 'ready' && state.listing.truncated && (
-        <p className="border-t border-(--color-border-subtle) px-3 py-2 text-xs text-(--color-text-secondary)">
+        <p className="border-t border-(--color-border) px-3 py-2 text-xs text-(--color-text-secondary)">
           This folder has more entries than can be shown at once. Narrow it down by opening a
           subfolder.
         </p>
@@ -580,10 +580,10 @@ function EntryIcon({ kind }: { readonly kind: FileEntry['kind'] }): React.JSX.El
     case 'directory':
       return <Folder aria-hidden="true" className={`${shared} text-(--color-accent)`} />;
     case 'symlink':
-      return <Link2 aria-hidden="true" className={`${shared} text-(--color-warning)`} />;
+      return <Link2 aria-hidden="true" className={`${shared} text-(--color-danger)`} />;
     case 'file':
-      return <FileIcon aria-hidden="true" className={`${shared} text-(--color-text-muted)`} />;
+      return <FileIcon aria-hidden="true" className={`${shared} text-(--color-text-secondary)`} />;
     case 'other':
-      return <Settings2 aria-hidden="true" className={`${shared} text-(--color-text-muted)`} />;
+      return <Settings2 aria-hidden="true" className={`${shared} text-(--color-text-secondary)`} />;
   }
 }

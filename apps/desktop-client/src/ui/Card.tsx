@@ -25,10 +25,10 @@ export function Card({
   return (
     <div
       className={
-        'rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised) ' +
+        'rounded-xl border border-(--color-border) bg-(--color-card) ' +
         (padded ? 'p-4 ' : '') +
         (interactive
-          ? 'transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-border-strong) hover:bg-(--color-surface-overlay) '
+          ? 'transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-border) hover:bg-(--color-card) '
           : '') +
         className
       }
@@ -51,7 +51,7 @@ export function CardHeader({
   return (
     <div className="mb-3 flex items-center gap-2.5">
       {Icon !== undefined && (
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-(--color-surface-overlay) text-(--color-text-secondary)">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-(--color-card) text-(--color-text-secondary)">
           <Icon aria-hidden="true" className="size-4" />
         </span>
       )}
@@ -88,7 +88,7 @@ export function InfoCard({
       </div>
       <dl className="flex-1 px-4">{children}</dl>
       {footer !== undefined && (
-        <div className="mt-1 border-t border-(--color-border-subtle) px-4 py-3">{footer}</div>
+        <div className="mt-1 border-t border-(--color-border) px-4 py-3">{footer}</div>
       )}
     </Card>
   );
@@ -118,7 +118,7 @@ export function InfoRow({
   readonly tone?: string | undefined;
 }): React.JSX.Element {
   return (
-    <div className="group flex min-h-11 items-center justify-between gap-4 border-b border-(--color-border-subtle) py-2 last:border-b-0">
+    <div className="group flex min-h-11 items-center justify-between gap-4 border-b border-(--color-border) py-2 last:border-b-0">
       <dt className="shrink-0 text-sm text-(--color-text-secondary)">{label}</dt>
       <dd className="flex min-w-0 items-center gap-1.5">
         <span
@@ -166,7 +166,7 @@ export function InlineCopy({
               setCopied(false);
             });
         }}
-        className="flex size-6 shrink-0 items-center justify-center rounded-md text-(--color-text-muted) opacity-0 transition-[opacity,color,background-color] duration-150 ease-(--ease-ui) group-hover:opacity-100 hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary) focus-visible:opacity-100"
+        className="flex size-6 shrink-0 items-center justify-center rounded-md text-(--color-text-secondary) opacity-0 transition-[opacity,color,background-color] duration-150 ease-(--ease-ui) group-hover:opacity-100 hover:bg-(--color-card) hover:text-(--color-text) focus-visible:opacity-100"
       >
         {copied ? (
           <Check aria-hidden="true" className="size-3.5 text-(--color-success)" />

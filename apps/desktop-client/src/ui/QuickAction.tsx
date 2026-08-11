@@ -33,7 +33,7 @@ export function QuickAction({
         className={`flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors duration-150 ease-(--ease-ui) ${
           available
             ? 'bg-(--color-accent-soft) text-(--color-accent)'
-            : 'bg-(--color-surface-overlay) text-(--color-text-muted)'
+            : 'bg-(--color-card) text-(--color-text-secondary)'
         }`}
       >
         <Icon aria-hidden="true" className="size-4.5" />
@@ -62,7 +62,7 @@ export function QuickAction({
     return (
       <div
         aria-disabled="true"
-        className="flex cursor-not-allowed items-start gap-3 rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised)/60 p-3.5 text-left"
+        className="flex cursor-not-allowed items-start gap-3 rounded-xl border border-(--color-border) bg-(--color-card)/60 p-3.5 text-left"
       >
         {body}
       </div>
@@ -73,7 +73,7 @@ export function QuickAction({
     <button
       type="button"
       onClick={onSelect}
-      className="flex cursor-pointer items-start gap-3 rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised) p-3.5 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border-strong) hover:bg-(--color-surface-overlay) active:translate-y-px"
+      className="flex cursor-pointer items-start gap-3 rounded-xl border border-(--color-border) bg-(--color-card) p-3.5 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border) hover:bg-(--color-card) active:translate-y-px"
     >
       {body}
     </button>

@@ -69,10 +69,10 @@ export function TextField({
           aria-invalid={invalid || undefined}
           aria-describedby={help !== undefined || invalid ? helpId : undefined}
           className={
-            'h-9 w-full min-w-0 rounded-lg border bg-(--color-surface) px-3 text-sm ' +
+            'h-9 w-full min-w-0 rounded-lg border bg-(--color-page) px-3 text-sm ' +
             'transition-[border-color,background-color] duration-150 ease-(--ease-ui) ' +
-            'placeholder:text-(--color-text-muted) hover:border-(--color-border-strong) ' +
-            (invalid ? 'border-(--color-danger) ' : 'border-(--color-border-strong) ') +
+            'placeholder:text-(--color-text-secondary) hover:border-(--color-border) ' +
+            (invalid ? 'border-(--color-danger) ' : 'border-(--color-border) ') +
             (mono ? 'font-mono ' : '') +
             (uppercase ? 'tracking-[0.12em] uppercase ' : '')
           }
@@ -118,7 +118,7 @@ export function SelectField({
         onChange={(event) => {
           onChange(event.target.value);
         }}
-        className="h-9 rounded-lg border border-(--color-border-strong) bg-(--color-surface) px-2.5 text-sm transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-text-muted)"
+        className="h-9 rounded-lg border border-(--color-border) bg-(--color-page) px-2.5 text-sm transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-text-secondary)"
       >
         {options.map((option) => (
           <option key={option.id} value={option.id}>

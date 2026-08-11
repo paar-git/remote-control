@@ -42,10 +42,10 @@ export function ToastBar({
       // `alert` for errors so screen readers interrupt; `status` for successes so
       // they do not.
       role={error ? 'alert' : 'status'}
-      className={`animate-toast-in fixed right-5 bottom-5 z-50 flex max-w-sm items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-sm shadow-xl shadow-black/40 ${
+      className={`animate-toast-in fixed right-5 bottom-5 z-50 flex max-w-sm items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-sm shadow-lg shadow-[rgb(16_24_40_/_12%)] ${
         error
-          ? 'border-(--color-danger)/40 bg-(--color-surface-overlay) text-(--color-text-primary)'
-          : 'border-(--color-success)/40 bg-(--color-surface-overlay) text-(--color-text-primary)'
+          ? 'border-(--color-danger)/40 bg-(--color-card) text-(--color-text)'
+          : 'border-(--color-success)/40 bg-(--color-card) text-(--color-text)'
       }`}
     >
       {error ? (
@@ -99,12 +99,12 @@ export function ConfirmDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgb(16_24_40_/_40%)] p-4 backdrop-blur-[2px]">
       <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="animate-fade-in w-full max-w-md rounded-xl border border-(--color-border-strong) bg-(--color-surface-raised) p-5 shadow-2xl shadow-black/50"
+        className="animate-fade-in w-full max-w-md rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-xl shadow-[rgb(16_24_40_/_16%)]"
       >
         <div className="mb-3 flex items-center gap-2.5">
           {destructive && (
@@ -121,7 +121,7 @@ export function ConfirmDialog({
             ref={cancelRef}
             type="button"
             onClick={onCancel}
-            className="inline-flex h-8 items-center rounded-lg border border-(--color-border-strong) px-3 text-sm font-medium transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay)"
+            className="inline-flex h-8 items-center rounded-lg border border-(--color-border) px-3 text-sm font-medium transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card)"
           >
             Cancel
           </button>
@@ -147,9 +147,9 @@ export function EmptyState({
   readonly icon?: LucideIcon | undefined;
 }): React.JSX.Element {
   return (
-    <div className="flex flex-col items-center rounded-xl border border-dashed border-(--color-border-strong) px-6 py-10 text-center">
+    <div className="flex flex-col items-center rounded-xl border border-dashed border-(--color-border) px-6 py-10 text-center">
       {Icon !== undefined && (
-        <span className="mb-3 flex size-10 items-center justify-center rounded-xl bg-(--color-surface-overlay) text-(--color-text-muted)">
+        <span className="mb-3 flex size-10 items-center justify-center rounded-xl bg-(--color-card) text-(--color-text-secondary)">
           <Icon aria-hidden="true" className="size-5" />
         </span>
       )}
@@ -190,10 +190,10 @@ export function ErrorState({
           <p className="text-sm font-medium">{summary}</p>
           {detail !== undefined && detail !== null && detail !== '' && (
             <details className="mt-2">
-              <summary className="cursor-pointer text-xs text-(--color-text-secondary) hover:text-(--color-text-primary)">
+              <summary className="cursor-pointer text-xs text-(--color-text-secondary) hover:text-(--color-text)">
                 View technical details
               </summary>
-              <p className="mt-1.5 rounded-md bg-black/25 p-2 font-mono text-xs break-words text-(--color-text-secondary) select-text">
+              <p className="mt-1.5 rounded-md bg-(--color-page) p-2 font-mono text-xs break-words text-(--color-text-secondary) select-text">
                 {detail}
               </p>
             </details>
@@ -211,17 +211,21 @@ export function ErrorState({
   );
 }
 
-/** A placeholder with the shape of the content that is still loading. */
+/**
+ * A placeholder with the shape of the content that is still loading.
+ *
+ * Static rather than shimmering. The shimmer was built for a dark palette, where a
+ * moving highlight was the only thing that separated a placeholder from the card behind
+ * it. On a white card a flat grey block reads as "not here yet" on its own, and an
+ * animation that carries no information is one more thing moving on screen.
+ */
 export function Skeleton({
   className = '',
 }: {
   readonly className?: string | undefined;
 }): React.JSX.Element {
   return (
-    <span
-      aria-hidden="true"
-      className={`animate-skeleton block rounded-md bg-(--color-surface-raised) ${className}`}
-    />
+    <span aria-hidden="true" className={`block rounded-md bg-(--color-border) ${className}`} />
   );
 }
 

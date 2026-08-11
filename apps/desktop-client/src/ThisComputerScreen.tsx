@@ -294,7 +294,7 @@ function DeviceHero({
 }): React.JSX.Element {
   return (
     <Card className="flex flex-wrap items-center gap-x-5 gap-y-4">
-      <span className="flex size-14 shrink-0 items-center justify-center rounded-xl border border-(--color-border-subtle) bg-(--color-surface-overlay) text-(--color-accent)">
+      <span className="flex size-14 shrink-0 items-center justify-center rounded-xl border border-(--color-border) bg-(--color-card) text-(--color-accent)">
         <MonitorSmartphone aria-hidden="true" className="size-7" />
       </span>
 
@@ -309,7 +309,7 @@ function DeviceHero({
           {info.osVersion} · <span className="font-mono text-xs">{info.architecture}</span>
         </p>
         {identity !== null && (
-          <p className="mt-1.5 font-mono text-xs break-all text-(--color-text-muted) select-text">
+          <p className="mt-1.5 font-mono text-xs break-all text-(--color-text-secondary) select-text">
             {identity.deviceId}
           </p>
         )}
@@ -336,8 +336,8 @@ function ReadinessBanner({ readiness }: { readonly readiness: Readiness }): Reac
     readiness.tone === 'danger'
       ? 'border-(--color-danger)/40 bg-(--color-danger-soft)'
       : readiness.tone === 'warning'
-        ? 'border-(--color-warning)/40 bg-(--color-warning-soft)'
-        : 'border-(--color-border-subtle) bg-(--color-surface-raised)';
+        ? 'border-(--color-danger)/40 bg-(--color-danger-soft)'
+        : 'border-(--color-border) bg-(--color-card)';
 
   return (
     <section
@@ -364,7 +364,7 @@ function ReadinessBanner({ readiness }: { readonly readiness: Readiness }): Reac
             ) : check.pending === true ? (
               <Circle
                 aria-hidden="true"
-                className="mt-0.5 size-4 shrink-0 text-(--color-text-muted)"
+                className="mt-0.5 size-4 shrink-0 text-(--color-text-secondary)"
               />
             ) : (
               <CircleAlert
@@ -436,7 +436,7 @@ function RemoteAccessCard({
               ? 'Renewal due'
               : `Valid to ${formatTimestamp(identity.certificateNotAfterMs)}`
         }
-        tone={identity?.needsRenewal === true ? 'text-(--color-warning)' : undefined}
+        tone={identity?.needsRenewal === true ? 'text-(--color-danger)' : undefined}
       />
     </InfoCard>
   );
@@ -462,7 +462,7 @@ function SecurityCard({
       title="Security"
       footer={
         info.elevated ? (
-          <p className="flex items-start gap-2 text-xs text-(--color-warning)">
+          <p className="flex items-start gap-2 text-xs text-(--color-danger)">
             <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0" />
             Close this window and start it normally. Privileged work is routed through the agent
             service, so the client gains nothing from elevation.
@@ -551,7 +551,7 @@ function DeviceDetailsCard({
       <InfoRow label="Operating system" value={info.osVersion} />
       <InfoRow label="Architecture" value={info.architecture} mono />
       {identity === null ? (
-        <InfoRow label="Device ID" value="Unavailable" tone="text-(--color-text-muted)" />
+        <InfoRow label="Device ID" value="Unavailable" tone="text-(--color-text-secondary)" />
       ) : (
         <>
           <InfoRow label="Device ID" value={identity.deviceId} mono copyable={identity.deviceId} />
@@ -611,13 +611,13 @@ function RecentActivityCard({
           {activity.map((entry) => (
             <li
               key={entry.id}
-              className="flex min-h-11 items-center justify-between gap-3 border-b border-(--color-border-subtle) py-2 last:border-b-0"
+              className="flex min-h-11 items-center justify-between gap-3 border-b border-(--color-border) py-2 last:border-b-0"
             >
               <span className="flex min-w-0 items-center gap-2.5">
                 <StatusDot tone={tones[entry.result]} />
                 <span className="min-w-0">
                   <span className="block truncate text-sm">{describeAction(entry)}</span>
-                  <span className="block truncate text-xs text-(--color-text-muted)">
+                  <span className="block truncate text-xs text-(--color-text-secondary)">
                     {humanise(entry.category)}
                   </span>
                 </span>

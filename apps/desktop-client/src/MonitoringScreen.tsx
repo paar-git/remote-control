@@ -298,7 +298,7 @@ export default function MonitoringScreen(): React.JSX.Element {
       {notice === null ? null : (
         <p
           role="status"
-          className="mb-4 rounded-xl border border-(--color-warning)/40 bg-(--color-warning-soft) p-3 text-sm text-(--color-text-secondary)"
+          className="mb-4 rounded-xl border border-(--color-danger)/40 bg-(--color-danger-soft) p-3 text-sm text-(--color-text-secondary)"
         >
           {notice} These readings are being polled instead.
         </p>
@@ -539,7 +539,7 @@ function Metric({
     <Card>
       <div className="text-xs font-medium text-(--color-text-secondary)">{label}</div>
       <div className="mt-1 text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
-      <div className="mt-0.5 truncate text-xs text-(--color-text-muted)" title={detail}>
+      <div className="mt-0.5 truncate text-xs text-(--color-text-secondary)" title={detail}>
         {detail}
       </div>
       {history.length > 1 && <Sparkline values={history} />}
@@ -597,7 +597,7 @@ function Bar({
   const clamped = Math.min(Math.max(percent, 0), 100);
   return (
     <div
-      className="h-1.5 w-full overflow-hidden rounded-full bg-(--color-surface-overlay)"
+      className="h-1.5 w-full overflow-hidden rounded-full bg-(--color-card)"
       role="img"
       aria-label={`${clamped.toFixed(0)} percent`}
     >

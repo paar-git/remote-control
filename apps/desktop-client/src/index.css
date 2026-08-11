@@ -3,49 +3,38 @@
 /*
  * Design tokens.
  *
- * This is a dense administration tool, so the system is built from a small number of
- * decisions rather than per-view improvisation:
+ * One light theme, matching the product this is modelled on. There is no dark variant
+ * and no `data-theme` opt-in: this file previously carried a whole second palette for a
+ * theme nothing could select, and a token defined for a theme nobody can reach is dead
+ * code.
  *
- * * **Four surface levels.** Sunken (the sidebar) sits below the page, raised is a
- *   card, overlay is a popover or a hover state. Depth comes from surface and border,
- *   not from shadow — shadow is reserved for things that genuinely float.
- * * **One accent.** Reserved for the primary action and the current navigation item.
- *   Status colours (success, warning, danger) are never used decoratively; each one
- *   means the state it names.
- * * **Soft variants.** Every status colour has a low-alpha companion used as a fill
+ * * **Two surfaces.** A pale page, white cards on top of it. Depth comes from the
+ *   hairline border and one soft shadow, not from a stack of greys.
+ * * **One accent.** Reserved for the primary action and for the current state of a
+ *   control. Status colours mean the state they name and are never decorative.
+ * * **Soft variants.** Each status colour has a low-alpha companion used as a fill
  *   behind the solid colour, so a badge reads as a state rather than as a button.
- *
- * Dark is the product's design, not a preference: the app defines the dark palette on
- * `:root` and keeps a light equivalent behind an explicit `data-theme` opt-in so a
- * future setting has somewhere to land.
  */
 @theme {
-  /* Surfaces, darkest first. */
-  --color-surface-sunken: #0b0e13;
-  --color-surface: #0f1218;
-  --color-surface-raised: #161b23;
-  --color-surface-overlay: #1c222c;
+  --color-page: #f5f6f8;
+  --color-card: #ffffff;
+  --color-border: #e3e5e9;
 
-  /* Hairlines. Alpha rather than a flat colour so they read correctly on any surface. */
-  --color-border-subtle: rgb(255 255 255 / 7%);
-  --color-border-strong: rgb(255 255 255 / 13%);
+  --color-text: #1a1a1a;
+  --color-text-secondary: #6b7280;
 
-  /* Text, brightest first. `muted` is for de-emphasised metadata only. */
-  --color-text-primary: #e6eaf2;
-  --color-text-secondary: #9ba6b8;
-  --color-text-muted: #6c778a;
-
-  --color-accent: #4c7df0;
-  --color-accent-hover: #5f8bf4;
-  --color-accent-soft: rgb(76 125 240 / 15%);
+  --color-accent: #ef443b;
+  --color-accent-hover: #d93a32;
+  --color-accent-soft: rgb(239 68 59 / 10%);
   --color-accent-text: #ffffff;
 
-  --color-success: #3fb950;
-  --color-success-soft: rgb(63 185 80 / 14%);
-  --color-warning: #d8a02a;
-  --color-warning-soft: rgb(216 160 42 / 15%);
-  --color-danger: #f0505f;
-  --color-danger-soft: rgb(240 80 95 / 14%);
+  --color-success: #2e9e4f;
+  --color-success-soft: rgb(46 158 79 / 12%);
+  --color-danger: #c62828;
+  --color-danger-soft: rgb(198 40 40 / 10%);
+
+  --radius-card: 8px;
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 4%);
 
   /* One motion vocabulary, so nothing invents its own timing. */
   --ease-ui: cubic-bezier(0.2, 0, 0.2, 1);
@@ -53,40 +42,7 @@
 
 @layer base {
   :root {
-    color-scheme: dark;
-  }
-
-  /* An explicit in-app choice must win in both directions. */
-  :root[data-theme='dark'] {
-    color-scheme: dark;
-  }
-
-  :root[data-theme='light'] {
     color-scheme: light;
-
-    --color-surface-sunken: #f2f4f8;
-    --color-surface: #f8fafc;
-    --color-surface-raised: #ffffff;
-    --color-surface-overlay: #ffffff;
-
-    --color-border-subtle: rgb(15 18 24 / 10%);
-    --color-border-strong: rgb(15 18 24 / 18%);
-
-    --color-text-primary: #131720;
-    --color-text-secondary: #545e70;
-    --color-text-muted: #7b8494;
-
-    --color-accent: #2f5fd0;
-    --color-accent-hover: #2751bb;
-    --color-accent-soft: rgb(47 95 208 / 11%);
-    --color-accent-text: #ffffff;
-
-    --color-success: #1a7f37;
-    --color-success-soft: rgb(26 127 55 / 11%);
-    --color-warning: #9a6700;
-    --color-warning-soft: rgb(154 103 0 / 12%);
-    --color-danger: #c62c3c;
-    --color-danger-soft: rgb(198 44 60 / 11%);
   }
 
   html,
@@ -96,13 +52,13 @@
   }
 
   body {
-    background-color: var(--color-surface);
-    color: var(--color-text-primary);
+    background-color: var(--color-page);
+    color: var(--color-text);
     font-family:
-      'Inter var',
-      'Inter',
       'Segoe UI Variable Text',
       'Segoe UI',
+      'Inter var',
+      'Inter',
       system-ui,
       -apple-system,
       sans-serif;
@@ -139,7 +95,7 @@
   /* Scrollbars styled to belong to the app rather than to the platform. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: var(--color-border-strong) transparent;
+    scrollbar-color: var(--color-border) transparent;
   }
 
   *::-webkit-scrollbar {
@@ -148,14 +104,14 @@
   }
 
   *::-webkit-scrollbar-thumb {
-    background-color: var(--color-border-strong);
+    background-color: var(--color-border);
     border: 3px solid transparent;
     border-radius: 999px;
     background-clip: content-box;
   }
 
   *::-webkit-scrollbar-thumb:hover {
-    background-color: var(--color-text-muted);
+    background-color: var(--color-text-secondary);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -184,27 +140,6 @@
 
   .animate-status-pulse {
     animation: rc-pulse 1.4s var(--ease-ui) infinite;
-  }
-
-  /* Skeleton shimmer. Deliberately slow and low-contrast. */
-  @keyframes rc-shimmer {
-    from {
-      background-position: 200% 0;
-    }
-    to {
-      background-position: -200% 0;
-    }
-  }
-
-  .animate-skeleton {
-    background-image: linear-gradient(
-      90deg,
-      var(--color-surface-raised) 0%,
-      var(--color-surface-overlay) 50%,
-      var(--color-surface-raised) 100%
-    );
-    background-size: 200% 100%;
-    animation: rc-shimmer 1.6s linear infinite;
   }
 
   /* A state change should settle rather than jump. */

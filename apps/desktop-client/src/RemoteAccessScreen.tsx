@@ -267,11 +267,11 @@ export function RemoteAccessScreen({
             {revoked.map((device) => (
               <li
                 key={device.deviceId}
-                className="flex items-center gap-3 rounded-xl border border-(--color-border-subtle) px-4 py-3 opacity-60"
+                className="flex items-center gap-3 rounded-xl border border-(--color-border) px-4 py-3 opacity-60"
               >
                 <MonitorSmartphone
                   aria-hidden="true"
-                  className="size-4 shrink-0 text-(--color-text-muted)"
+                  className="size-4 shrink-0 text-(--color-text-secondary)"
                 />
                 <span className="min-w-0 flex-1 truncate text-sm">{device.displayName}</span>
                 <StatusBadge tone="danger">Revoked</StatusBadge>
@@ -290,8 +290,8 @@ export function RemoteAccessScreen({
           pendingRevoke === null ? null : (
             <>
               <p className="mb-2">
-                <strong className="text-(--color-text-primary)">{pendingRevoke.displayName}</strong>{' '}
-                will no longer be able to connect. This takes effect immediately.
+                <strong className="text-(--color-text)">{pendingRevoke.displayName}</strong> will no
+                longer be able to connect. This takes effect immediately.
               </p>
               <p className="mb-2 font-mono text-xs break-all">
                 {formatFingerprintGroups(pendingRevoke.identityFingerprint)}
@@ -350,7 +350,7 @@ function DeviceRow({
 
   if (renaming) {
     return (
-      <li className="rounded-xl border border-(--color-accent)/40 bg-(--color-surface-raised) p-4">
+      <li className="rounded-xl border border-(--color-accent)/40 bg-(--color-card) p-4">
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -369,7 +369,7 @@ function DeviceRow({
             }}
             maxLength={128}
             autoFocus
-            className="h-9 min-w-0 flex-1 rounded-lg border border-(--color-border-strong) bg-(--color-surface) px-3 text-sm"
+            className="h-9 min-w-0 flex-1 rounded-lg border border-(--color-border) bg-(--color-page) px-3 text-sm"
           />
           <Button type="submit" variant="primary">
             Save
@@ -391,13 +391,13 @@ function DeviceRow({
         aria-label={
           live ? `Disconnect from ${device.displayName}` : `Connect to ${device.displayName}`
         }
-        className="flex w-full cursor-pointer items-center gap-4 rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised) py-4 pr-24 pl-4 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border-strong) hover:bg-(--color-surface-overlay) active:translate-y-px disabled:pointer-events-none disabled:opacity-60"
+        className="flex w-full cursor-pointer items-center gap-4 rounded-xl border border-(--color-border) bg-(--color-card) py-4 pr-24 pl-4 text-left transition-[background-color,border-color] duration-150 ease-(--ease-ui) hover:border-(--color-border) hover:bg-(--color-card) active:translate-y-px disabled:pointer-events-none disabled:opacity-60"
       >
         <span
           className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors duration-150 ease-(--ease-ui) ${
             live
               ? 'bg-(--color-success-soft) text-(--color-success)'
-              : 'bg-(--color-surface-overlay) text-(--color-text-secondary) group-hover/row:bg-(--color-accent-soft) group-hover/row:text-(--color-accent)'
+              : 'bg-(--color-card) text-(--color-text-secondary) group-hover/row:bg-(--color-accent-soft) group-hover/row:text-(--color-accent)'
           }`}
         >
           <MonitorSmartphone aria-hidden="true" className="size-5" />

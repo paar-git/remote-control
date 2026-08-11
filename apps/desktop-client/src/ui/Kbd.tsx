@@ -6,7 +6,7 @@
  */
 export function Kbd({ children }: { readonly children: React.ReactNode }): React.JSX.Element {
   return (
-    <kbd className="rounded border border-(--color-border-strong) bg-(--color-surface-overlay) px-1.5 py-px font-sans text-[10px] leading-4 font-medium text-(--color-text-muted)">
+    <kbd className="rounded border border-(--color-border) bg-(--color-card) px-1.5 py-px font-sans text-[10px] leading-4 font-medium text-(--color-text-secondary)">
       {children}
     </kbd>
   );

@@ -349,14 +349,14 @@ export default function UpdateScreen({
         </section>
       )}
 
-      <section className="mt-6 border-t border-(--color-border-subtle) pt-4">
+      <section className="mt-6 border-t border-(--color-border) pt-4">
         <button
           type="button"
           aria-expanded={advancedOpen}
           onClick={() => {
             setAdvancedOpen((open) => !open);
           }}
-          className="flex items-center gap-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:text-(--color-text-primary)"
+          className="flex items-center gap-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:text-(--color-text)"
         >
           <ChevronRight
             aria-hidden="true"
@@ -389,7 +389,7 @@ export default function UpdateScreen({
                     setManifestUrl(event.currentTarget.value);
                   }}
                   placeholder="https://example.com/releases/release-index.json"
-                  className="min-w-0 flex-1 rounded border border-(--color-border-subtle) bg-(--color-surface) px-3 py-1.5 text-sm"
+                  className="min-w-0 flex-1 rounded border border-(--color-border) bg-(--color-page) px-3 py-1.5 text-sm"
                 />
                 <Button type="submit" disabled={busy}>
                   Check
@@ -397,7 +397,7 @@ export default function UpdateScreen({
               </div>
             </form>
 
-            <dl className="divide-y divide-(--color-border-subtle) rounded border border-(--color-border-subtle)">
+            <dl className="divide-y divide-(--color-border) rounded border border-(--color-border)">
               {(
                 [
                   ['Current version', status.currentVersion],
@@ -501,7 +501,7 @@ function DownloadProgressPanel({
         aria-valuemin={0}
         aria-valuemax={100}
         aria-label="Download progress"
-        className="h-2 overflow-hidden rounded-full bg-(--color-surface-sunken)"
+        className="h-2 overflow-hidden rounded-full bg-(--color-page)"
       >
         <div
           className="h-full rounded-full bg-(--color-accent) transition-[width] duration-500"

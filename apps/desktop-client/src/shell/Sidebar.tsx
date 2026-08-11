@@ -50,7 +50,7 @@ export function Sidebar({
   return (
     <nav
       aria-label="Sections"
-      className={`flex shrink-0 flex-col border-r border-(--color-border-subtle) bg-(--color-surface-sunken) transition-[width] duration-200 ease-(--ease-ui) ${
+      className={`flex shrink-0 flex-col border-r border-(--color-border) bg-(--color-page) transition-[width] duration-200 ease-(--ease-ui) ${
         collapsed ? 'w-[64px]' : 'w-60'
       }`}
     >
@@ -92,7 +92,7 @@ function SidebarHeader({
 }): React.JSX.Element {
   return (
     <div
-      className={`flex h-14 shrink-0 items-center gap-2.5 border-b border-(--color-border-subtle) ${
+      className={`flex h-14 shrink-0 items-center gap-2.5 border-b border-(--color-border) ${
         collapsed ? 'justify-center px-2' : 'px-3'
       }`}
     >
@@ -105,7 +105,7 @@ function SidebarHeader({
             <span className="block truncate text-sm font-semibold tracking-[-0.01em]">
               Remote Control
             </span>
-            <span className="block truncate text-[11px] text-(--color-text-muted)">
+            <span className="block truncate text-[11px] text-(--color-text-secondary)">
               Secure device access
             </span>
           </span>
@@ -117,7 +117,7 @@ function SidebarHeader({
           onClick={onToggleCollapsed}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-expanded={!collapsed}
-          className="flex size-8 shrink-0 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+          className="flex size-8 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
         >
           {collapsed ? (
             <ChevronsRight aria-hidden="true" className="size-4" />
@@ -153,7 +153,7 @@ function ServiceIndicator({
   return (
     <div className="px-3 py-3">
       <Tooltip label={service.detail} side="right">
-        <span className="flex w-full items-center gap-2 rounded-lg border border-(--color-border-subtle) bg-(--color-surface)/60 px-2.5 py-1.5">
+        <span className="flex w-full items-center gap-2 rounded-lg border border-(--color-border) bg-(--color-page)/60 px-2.5 py-1.5">
           <StatusDot tone={service.tone} />
           <span className="min-w-0 truncate text-xs text-(--color-text-secondary)">
             {service.label}
@@ -178,9 +178,9 @@ export function SidebarSection({
     <div className="mb-4 last:mb-0">
       {collapsed ? (
         // A rule instead of a heading: the separation survives, the text does not fit.
-        <div aria-hidden="true" className="mx-2 mb-2 border-t border-(--color-border-subtle)" />
+        <div aria-hidden="true" className="mx-2 mb-2 border-t border-(--color-border)" />
       ) : (
-        <h2 className="mb-1 px-2.5 text-[10px] font-semibold tracking-[0.08em] text-(--color-text-muted) uppercase">
+        <h2 className="mb-1 px-2.5 text-[10px] font-semibold tracking-[0.08em] text-(--color-text-secondary) uppercase">
           {label}
         </h2>
       )}
@@ -233,12 +233,12 @@ export function SidebarItem({
             'relative flex h-8 w-full items-center rounded-lg text-sm transition-[background-color,color] duration-150 ease-(--ease-ui) ' +
             (collapsed ? 'justify-center px-0 ' : 'gap-2.5 px-2.5 ') +
             (!available
-              ? 'cursor-not-allowed text-(--color-text-muted) '
+              ? 'cursor-not-allowed text-(--color-text-secondary) '
               : current
-                ? 'bg-(--color-accent-soft) font-medium text-(--color-text-primary) '
+                ? 'bg-(--color-accent-soft) font-medium text-(--color-text) '
                 : idle
-                  ? 'text-(--color-text-muted) hover:bg-(--color-surface-overlay) hover:text-(--color-text-secondary) '
-                  : 'text-(--color-text-secondary) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary) ')
+                  ? 'text-(--color-text-secondary) hover:bg-(--color-card) hover:text-(--color-text-secondary) '
+                  : 'text-(--color-text-secondary) hover:bg-(--color-card) hover:text-(--color-text) ')
           }
         >
           {/* The active marker. Absolutely positioned so it never shifts the row. */}
@@ -256,7 +256,7 @@ export function SidebarItem({
             />
             {/* Collapsed, the row has no room for a badge, so the icon carries it. */}
             {collapsed && badge !== null && (
-              <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-(--color-accent) ring-2 ring-(--color-surface-sunken)" />
+              <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-(--color-accent) ring-2 ring-(--color-page)" />
             )}
           </span>
 
@@ -275,7 +275,7 @@ export function SidebarItem({
                 <Kbd>{item.shortcut.replace('Ctrl+', 'Ctrl ')}</Kbd>
               )}
               {!available && (
-                <span className="flex items-center gap-1 text-[10px] text-(--color-text-muted)">
+                <span className="flex items-center gap-1 text-[10px] text-(--color-text-secondary)">
                   <Lock aria-hidden="true" className="size-3" />
                   Soon
                 </span>
@@ -302,7 +302,7 @@ function SidebarFooter({
 
   if (collapsed) {
     return (
-      <div className="flex flex-col items-center gap-1.5 border-t border-(--color-border-subtle) p-2">
+      <div className="flex flex-col items-center gap-1.5 border-t border-(--color-border) p-2">
         <Tooltip label={`${username} · Local owner`} side="right">
           <span className="flex size-8 items-center justify-center rounded-full bg-(--color-accent-soft) text-xs font-semibold text-(--color-accent)">
             {initial}
@@ -313,7 +313,7 @@ function SidebarFooter({
             type="button"
             onClick={onLock}
             aria-label="Lock session"
-            className="flex size-8 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+            className="flex size-8 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
           >
             <Lock aria-hidden="true" className="size-4" />
           </button>
@@ -323,14 +323,14 @@ function SidebarFooter({
   }
 
   return (
-    <div className="border-t border-(--color-border-subtle) p-2">
+    <div className="border-t border-(--color-border) p-2">
       <div className="flex items-center gap-2.5 rounded-lg px-1.5 py-1.5">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-(--color-accent-soft) text-xs font-semibold text-(--color-accent)">
           {initial}
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{username}</span>
-          <span className="flex items-center gap-1 text-[11px] text-(--color-text-muted)">
+          <span className="flex items-center gap-1 text-[11px] text-(--color-text-secondary)">
             <ShieldCheck aria-hidden="true" className="size-3" />
             Local owner
           </span>
@@ -339,7 +339,7 @@ function SidebarFooter({
       <button
         type="button"
         onClick={onLock}
-        className="mt-1 flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+        className="mt-1 flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
       >
         <Lock aria-hidden="true" className="size-4 shrink-0" />
         Lock session

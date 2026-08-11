@@ -150,7 +150,7 @@ export function SessionScreen({
             }}
             aria-label="Open session options"
             aria-expanded={false}
-            className="absolute top-1/2 right-0 z-20 flex h-16 w-5 -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-(--color-border-strong) bg-(--color-surface-raised)/90 text-(--color-text-secondary) backdrop-blur transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+            className="absolute top-1/2 right-0 z-20 flex h-16 w-5 -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-(--color-border) bg-(--color-card)/90 text-(--color-text-secondary) backdrop-blur transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
           >
             <ChevronRight aria-hidden="true" className="size-3.5 rotate-180" />
           </button>
@@ -160,18 +160,18 @@ export function SessionScreen({
       <aside
         aria-label="Session options"
         aria-hidden={!panelOpen}
-        className={`absolute inset-y-0 right-0 z-20 flex w-72 flex-col border-l border-(--color-border-subtle) bg-(--color-surface) transition-transform duration-200 ease-(--ease-ui) ${
+        className={`absolute inset-y-0 right-0 z-20 flex w-72 flex-col border-l border-(--color-border) bg-(--color-page) transition-transform duration-200 ease-(--ease-ui) ${
           panelOpen ? 'translate-x-0' : 'pointer-events-none translate-x-full'
         }`}
       >
-        <header className="flex items-start gap-2 border-b border-(--color-border-subtle) px-4 py-3">
+        <header className="flex items-start gap-2 border-b border-(--color-border) px-4 py-3">
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold">{deviceName ?? 'Remote computer'}</p>
             <p className="mt-0.5 flex items-center gap-1.5 text-xs text-(--color-text-secondary)">
               <StatusDot tone={connectionTone(connection)} />
               {connectionLabel(connection)}
               {latencyMs !== null && (
-                <span className="text-(--color-text-muted)">· {latencyMs} ms</span>
+                <span className="text-(--color-text-secondary)">· {latencyMs} ms</span>
               )}
             </p>
           </div>
@@ -181,7 +181,7 @@ export function SessionScreen({
               setPanelOpen(false);
             }}
             aria-label="Close session options"
-            className="flex size-7 shrink-0 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+            className="flex size-7 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
           >
             <X aria-hidden="true" className="size-4" />
           </button>
@@ -231,11 +231,11 @@ export function SessionScreen({
           </PanelGroup>
         </div>
 
-        <footer className="border-t border-(--color-border-subtle) px-3 py-2">
+        <footer className="border-t border-(--color-border) px-3 py-2">
           <button
             type="button"
             onClick={onLeave}
-            className="h-8 w-full rounded-lg text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+            className="h-8 w-full rounded-lg text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
           >
             Back to my computers
           </button>
@@ -264,10 +264,10 @@ function Viewport({
   return (
     <div className="flex min-w-0 flex-1 items-center justify-center p-8">
       <div className="max-w-md text-center">
-        <span className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl border border-(--color-border-subtle) bg-(--color-surface-raised) text-(--color-text-muted)">
+        <span className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl border border-(--color-border) bg-(--color-card) text-(--color-text-secondary)">
           <MonitorOff aria-hidden="true" className="size-6" />
         </span>
-        <h2 className="text-base font-semibold text-(--color-text-primary)">
+        <h2 className="text-base font-semibold text-(--color-text)">
           The screen of {deviceName ?? 'this computer'} isn’t available yet
         </h2>
         <p className="mt-1.5 text-sm text-(--color-text-secondary)">
@@ -303,7 +303,7 @@ function PanelGroup({
 }): React.JSX.Element {
   return (
     <section className="mt-5">
-      <h3 className="mb-1 px-1 text-[10px] font-semibold tracking-[0.08em] text-(--color-text-muted) uppercase">
+      <h3 className="mb-1 px-1 text-[10px] font-semibold tracking-[0.08em] text-(--color-text-secondary) uppercase">
         {label}
       </h3>
       <div className="flex flex-col">{children}</div>
@@ -328,7 +328,7 @@ function PanelToggle({
   if (unavailable !== undefined) {
     return (
       <Tooltip label={unavailable} side="top">
-        <span className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-muted)">
+        <span className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary)">
           <Icon aria-hidden="true" className="size-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate text-left">{label}</span>
           <span className="shrink-0 text-[10px]">Soon</span>
@@ -343,14 +343,14 @@ function PanelToggle({
       role="switch"
       aria-checked={checked}
       onClick={onToggle}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
     >
       <Icon aria-hidden="true" className="size-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
       <span
         aria-hidden="true"
         className={`flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors duration-150 ease-(--ease-ui) ${
-          checked ? 'bg-(--color-accent)' : 'bg-(--color-surface-overlay)'
+          checked ? 'bg-(--color-accent)' : 'bg-(--color-card)'
         }`}
       >
         <span
@@ -378,7 +378,7 @@ function PanelAction({
   if (unavailable !== undefined) {
     return (
       <Tooltip label={unavailable} side="top">
-        <span className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-muted)">
+        <span className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary)">
           <Icon aria-hidden="true" className="size-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate text-left">{label}</span>
           <span className="shrink-0 text-[10px]">Soon</span>
@@ -391,7 +391,7 @@ function PanelAction({
     <button
       type="button"
       onClick={onSelect}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-surface-overlay) hover:text-(--color-text-primary)"
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-card) hover:text-(--color-text)"
     >
       <Icon aria-hidden="true" className="size-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>

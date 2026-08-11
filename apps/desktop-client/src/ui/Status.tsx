@@ -28,21 +28,20 @@ const TONES: Record<StatusTone, ToneStyle> = {
     badge: 'border-(--color-accent)/35 bg-(--color-accent-soft) text-(--color-accent)',
   },
   warning: {
-    dot: 'bg-(--color-warning)',
-    badge: 'border-(--color-warning)/35 bg-(--color-warning-soft) text-(--color-warning)',
+    dot: 'bg-(--color-danger)',
+    badge: 'border-(--color-danger)/35 bg-(--color-danger-soft) text-(--color-danger)',
   },
   danger: {
     dot: 'bg-(--color-danger)',
     badge: 'border-(--color-danger)/35 bg-(--color-danger-soft) text-(--color-danger)',
   },
   idle: {
-    dot: 'bg-(--color-text-muted)',
-    badge:
-      'border-(--color-border-strong) bg-(--color-surface-overlay) text-(--color-text-secondary)',
+    dot: 'bg-(--color-text-secondary)',
+    badge: 'border-(--color-border) bg-(--color-card) text-(--color-text-secondary)',
   },
   unavailable: {
-    dot: 'bg-(--color-text-muted)/60',
-    badge: 'border-(--color-border-subtle) bg-transparent text-(--color-text-muted)',
+    dot: 'bg-(--color-text-secondary)/60',
+    badge: 'border-(--color-border) bg-transparent text-(--color-text-secondary)',
   },
 };
 
@@ -109,11 +108,10 @@ export function Badge({
   readonly tone?: 'neutral' | 'success' | 'danger' | 'warning' | 'accent' | undefined;
 }): React.JSX.Element {
   const tones: Record<string, string> = {
-    neutral:
-      'border-(--color-border-strong) bg-(--color-surface-overlay) text-(--color-text-secondary)',
+    neutral: 'border-(--color-border) bg-(--color-card) text-(--color-text-secondary)',
     success: 'border-(--color-success)/35 bg-(--color-success-soft) text-(--color-success)',
     danger: 'border-(--color-danger)/35 bg-(--color-danger-soft) text-(--color-danger)',
-    warning: 'border-(--color-warning)/35 bg-(--color-warning-soft) text-(--color-warning)',
+    warning: 'border-(--color-danger)/35 bg-(--color-danger-soft) text-(--color-danger)',
     accent: 'border-(--color-accent)/35 bg-(--color-accent-soft) text-(--color-accent)',
   };
   return (

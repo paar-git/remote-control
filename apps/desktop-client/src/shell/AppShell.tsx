@@ -20,7 +20,7 @@ export function AppShell({
   readonly children: React.ReactNode;
 }): React.JSX.Element {
   return (
-    <div className="flex h-full overflow-hidden bg-(--color-surface)">
+    <div className="flex h-full overflow-hidden bg-(--color-page)">
       {sidebar}
       <main className="flex min-w-0 flex-1 flex-col">
         {toolbar}

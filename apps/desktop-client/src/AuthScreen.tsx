@@ -60,7 +60,7 @@ export function AuthScreen({
   };
 
   return (
-    <div className="flex h-full items-center justify-center overflow-y-auto bg-(--color-surface) p-6">
+    <div className="flex h-full items-center justify-center overflow-y-auto bg-(--color-page) p-6">
       <div className="animate-fade-in w-full max-w-sm">
         <div className="mb-6 flex flex-col items-center text-center">
           <span className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-(--color-accent) text-(--color-accent-text) shadow-lg shadow-black/30">
@@ -78,7 +78,7 @@ export function AuthScreen({
 
         <form
           onSubmit={submit}
-          className="rounded-xl border border-(--color-border-subtle) bg-(--color-surface-raised) p-5 shadow-xl shadow-black/20"
+          className="rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-xl shadow-black/20"
         >
           <div className="flex flex-col gap-4">
             <TextField
@@ -135,7 +135,7 @@ export function AuthScreen({
         </form>
 
         {setupMode && (
-          <p className="mt-4 text-center text-xs text-(--color-text-muted)">
+          <p className="mt-4 text-center text-xs text-(--color-text-secondary)">
             There is no default password and no recovery. Choose something you will not lose.
           </p>
         )}

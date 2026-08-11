@@ -118,7 +118,7 @@ export function Tooltip({
             id={id}
             role="tooltip"
             style={{ left: position.x, top: position.y, transform }}
-            className="animate-fade-in pointer-events-none fixed z-100 max-w-64 rounded-md border border-(--color-border-strong) bg-(--color-surface-overlay) px-2 py-1 text-xs leading-snug text-(--color-text-primary) shadow-lg shadow-black/40"
+            className="animate-fade-in pointer-events-none fixed z-100 max-w-64 rounded-md border border-(--color-border) bg-(--color-card) px-2 py-1 text-xs leading-snug text-(--color-text) shadow-md shadow-[rgb(16_24_40_/_12%)]"
           >
             {label}
           </span>,

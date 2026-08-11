@@ -32,10 +32,10 @@ export function TopBar({
   const Icon = item?.icon;
 
   return (
-    <div className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-(--color-border-subtle) bg-(--color-surface) px-5">
+    <div className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-(--color-border) bg-(--color-page) px-5">
       <div className="flex min-w-0 items-center gap-2 text-(--color-text-secondary)">
         {Icon !== undefined && <Icon aria-hidden="true" className="size-4 shrink-0" />}
-        <span className="truncate text-sm font-medium text-(--color-text-primary)">
+        <span className="truncate text-sm font-medium text-(--color-text)">
           {item?.label ?? 'Remote Control'}
         </span>
       </div>
@@ -66,7 +66,7 @@ export function TopBar({
             />
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute top-1 right-1 size-1.5 rounded-full bg-(--color-accent) ring-2 ring-(--color-surface)"
+              className="pointer-events-none absolute top-1 right-1 size-1.5 rounded-full bg-(--color-accent) ring-2 ring-(--color-page)"
             />
           </span>
         )}
