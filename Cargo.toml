@@ -10,7 +10,6 @@ members = [
     "crates/updater",
     "crates/platform",
     "crates/host-agent",
-    "apps/coordination-server",
     "apps/desktop-client/src-tauri",
 ]
 

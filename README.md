@@ -16,9 +16,7 @@ device identity and no third-party cloud in the path.
 A **host agent** runs as a system service on the machine being controlled. A
 **desktop client** runs unelevated on your main PC. They authenticate each other with
 mutually-authenticated TLS 1.3 over QUIC using self-signed, **fingerprint-pinned**
-device certificates established during a short, single-use pairing exchange. An
-optional **self-hosted coordination service** helps them find each other across
-networks but never terminates encryption and never sees session contents. Privileged
+device certificates established during a short, single-use pairing exchange. Privileged
 operating-system work happens only in the agent, only through a closed allowlist of
 fixed program paths and explicit argument vectors.
 
@@ -27,9 +25,8 @@ fixed program paths and explicit argument vectors.
 ```text
 .
 ├─ apps/
-│  ├─ desktop-client/          Tauri 2 + React + TypeScript client
-│  │  └─ src-tauri/            Client backend (unelevated)
-│  └─ coordination-server/     Optional self-hosted signalling service
+│  └─ desktop-client/          Tauri 2 + React + TypeScript client
+│     └─ src-tauri/            Client backend (unelevated)
 ├─ crates/
 │  ├─ protocol/                Wire protocol, framing, limits, replay guard
 │  ├─ security/                Identity, keystore, pairing, passwords, permissions
