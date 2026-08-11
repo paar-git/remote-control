@@ -13,78 +13,12 @@
 use std::sync::Arc;
 
 use rc_security::Permission;
-use rc_storage::audit::{AuditCategory, AuditEvent, AuditResult, actions};
 
 use crate::AppState;
 use crate::commands::CommandError;
-use crate::connection::{ConnectionState, SavedServer};
+use crate::connection::ConnectionState;
 
 type CommandResult<T> = Result<T, CommandError>;
-
-/// Connect to a saved server.
-///
-/// # Errors
-/// [`CommandError`] describing what to do about it: the server is off, the identity
-/// changed, or this device is no longer authorized.
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command]
-pub async fn connect_to_server(
-    state: tauri::State<'_, Arc<AppState>>,
-    device_id: String,
-) -> CommandResult<ConnectionState> {
-    state.require_permission(Permission::ControlInput)?;
-
-    let server = load_saved_server(&state, &device_id).await?;
-
-    let manager = state.connection.as_ref().ok_or_else(|| {
-        CommandError::new(
-            "no_identity",
-            "This device has no identity to connect with.",
-        )
-    })?;
-
-    match manager.connect(&server).await {
-        Ok(_session_id) => {
-            if let Some(address) = manager.connected_address().await
-                && let Some(trust) = state.trust.as_ref()
-                && let Err(err) = trust
-                    .record_successful_address(server.device_id, address)
-                    .await
-            {
-                tracing::warn!(%err, "could not record the connected address");
-            }
-
-            state
-                .audit(
-                    AuditEvent::new(
-                        AuditCategory::Connection,
-                        actions::SESSION_STARTED,
-                        AuditResult::Success,
-                    )
-                    .target_device(&device_id),
-                )
-                .await;
-
-            Ok(manager.state())
-        }
-        Err(err) => {
-            state
-                .audit(
-                    AuditEvent::new(
-                        AuditCategory::Connection,
-                        actions::CONNECTION_REFUSED,
-                        AuditResult::Failure,
-                    )
-                    .target_device(&device_id)
-                    .meta("reason", &err),
-                )
-                .await;
-            // The state carries the precise reason; returning it rather than an error
-            // lets the UI show the same thing whether the call succeeded or not.
-            Ok(manager.state())
-        }
-    }
-}
 
 /// Disconnect deliberately.
 ///
@@ -105,49 +39,6 @@ pub async fn disconnect_from_server(
         .ok_or_else(CommandError::no_identity)?;
 
     manager.disconnect().await;
-
-    state
-        .audit(AuditEvent::new(
-            AuditCategory::Connection,
-            actions::SESSION_ENDED,
-            AuditResult::Success,
-        ))
-        .await;
-
-    Ok(manager.state())
-}
-
-/// Reconnect to a saved server, applying the backoff.
-///
-/// # Errors
-/// [`CommandError`] only if the application is locked or the server is unknown; the
-/// outcome of the attempt is carried in the returned state.
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command]
-pub async fn reconnect_to_server(
-    state: tauri::State<'_, Arc<AppState>>,
-    device_id: String,
-) -> CommandResult<ConnectionState> {
-    state.require_permission(Permission::ControlInput)?;
-
-    let server = load_saved_server(&state, &device_id).await?;
-    let manager = state
-        .connection
-        .as_ref()
-        .ok_or_else(CommandError::no_identity)?;
-
-    let _ = manager.reconnect(&server).await;
-
-    state
-        .audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::RECONNECTED,
-                AuditResult::Success,
-            )
-            .target_device(&device_id),
-        )
-        .await;
 
     Ok(manager.state())
 }
@@ -183,39 +74,4 @@ pub async fn ping_server(state: tauri::State<'_, Arc<AppState>>) -> CommandResul
         .ping()
         .await
         .map_err(|err| CommandError::from_transport(&err))
-}
-
-/// Load a saved server and turn it into what the connection manager needs.
-async fn load_saved_server(state: &AppState, device_id: &str) -> CommandResult<SavedServer> {
-    let trust = state.trust.as_ref().ok_or_else(CommandError::no_database)?;
-
-    let parsed = device_id
-        .parse()
-        .map_err(|_| CommandError::new("invalid", "That device identifier is not valid."))?;
-
-    let device = trust
-        .find(parsed)
-        .await
-        .map_err(|err| CommandError::internal("load_saved_server", &err))?
-        .ok_or_else(|| {
-            CommandError::new("not_found", "That server is no longer in the saved list.")
-        })?;
-
-    // Checked here as well as at the agent. A client that knows it revoked a server
-    // should say so immediately rather than dialling out to be told.
-    if device.revoked {
-        return Err(CommandError::new(
-            "revoked",
-            "Access to this server was revoked.",
-        ));
-    }
-
-    Ok(SavedServer {
-        device_id: device.device_id,
-        display_name: device.display_name,
-        certificate_fingerprint: device.certificate_fingerprint,
-        identity_fingerprint: device.identity_fingerprint,
-        last_known_address: device.last_known_address,
-        configured_endpoint: device.remote_endpoint,
-    })
 }

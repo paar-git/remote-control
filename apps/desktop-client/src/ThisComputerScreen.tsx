@@ -15,7 +15,6 @@ import {
   Circle,
   CircleAlert,
   Info,
-  KeyRound,
   MonitorSmartphone,
   Package,
   ShieldCheck,
@@ -24,24 +23,19 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 
 import {
-  type AuditEntry,
   type ClientInfo,
   type ConnectionState,
   type LocalIdentity,
-  type TrustedDevice,
   describeConnectionState,
   getClientInfo,
   getLocalIdentity,
-  getRecentAuditEvents,
   isConnected,
-  listTrustedDevices,
 } from './api.js';
-import { abbreviateFingerprint, formatRelative, formatTimestamp, humanise } from './format.js';
+import { abbreviateFingerprint, formatTimestamp, humanise } from './format.js';
 import { connectionLabel, connectionTone } from './useConnection.js';
 import {
   Button,
   Card,
-  CardHeader,
   CopyButton,
   ErrorState,
   InfoCard,
@@ -58,8 +52,6 @@ import {
 interface HomeData {
   readonly info: ClientInfo;
   readonly identity: LocalIdentity | null;
-  readonly devices: readonly TrustedDevice[];
-  readonly activity: readonly AuditEntry[];
 }
 
 type Load =
@@ -80,15 +72,10 @@ export function ThisComputerScreen({
     setLoad({ status: 'loading' });
 
     // `client_info` is the only required call. The rest degrade individually: a client
-    // with no identity yet, or an unreadable audit log, still has a usable Home screen.
-    Promise.all([
-      getClientInfo(),
-      getLocalIdentity().catch(() => null),
-      listTrustedDevices().catch((): TrustedDevice[] => []),
-      getRecentAuditEvents(6).catch((): AuditEntry[] => []),
-    ])
-      .then(([info, identity, devices, activity]) => {
-        setLoad({ status: 'ready', data: { info, identity, devices, activity } });
+    // with no identity yet still has a usable Home screen.
+    Promise.all([getClientInfo(), getLocalIdentity().catch(() => null)])
+      .then(([info, identity]) => {
+        setLoad({ status: 'ready', data: { info, identity } });
       })
       .catch((error: unknown) => {
         setLoad({
@@ -112,9 +99,8 @@ export function ThisComputerScreen({
 
   if (load.status === 'loading') return <ThisComputerSkeleton />;
 
-  const { info, identity, devices, activity } = load.data;
-  const paired = devices.filter((device) => !device.revoked);
-  const readiness = assessReadiness(info, identity, paired.length, connection);
+  const { info, identity } = load.data;
+  const readiness = assessReadiness(info, identity, connection);
 
   return (
     <div className="animate-fade-in flex flex-col gap-6">
@@ -130,26 +116,12 @@ export function ThisComputerScreen({
         }
       />
 
-      <DeviceHero
-        info={info}
-        identity={identity}
-        readiness={readiness}
-        onManage={() => {
-          onNavigate('remote-access');
-        }}
-      />
+      <DeviceHero info={info} identity={identity} readiness={readiness} />
 
       <ReadinessBanner readiness={readiness} />
 
       <div className="grid gap-4 lg:grid-cols-3">
-        <RemoteAccessCard
-          identity={identity}
-          pairedCount={paired.length}
-          connection={connection}
-          onOpenDevices={() => {
-            onNavigate('remote-access');
-          }}
-        />
+        <RemoteAccessCard identity={identity} connection={connection} />
         <SecurityCard info={info} identity={identity} />
         <ApplicationCard
           info={info}
@@ -159,10 +131,7 @@ export function ThisComputerScreen({
         />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <DeviceDetailsCard info={info} identity={identity} />
-        <RecentActivityCard activity={activity} />
-      </div>
+      <DeviceDetailsCard info={info} identity={identity} />
     </div>
   );
 }
@@ -191,14 +160,12 @@ interface Readiness {
 /**
  * Turn the raw state into the one sentence the operator needs.
  *
- * The order matters: a broken identity or database outranks "no computers yet", which
- * outranks "known but idle". Reporting the least severe true statement would bury the
- * one that needs attention.
+ * The order matters: a broken identity or database outranks "connected but idle".
+ * Reporting the least severe true statement would bury the one that needs attention.
  */
 function assessReadiness(
   info: ClientInfo,
   identity: LocalIdentity | null,
-  pairedCount: number,
   connection: ConnectionState,
 ): Readiness {
   const checks: Check[] = [
@@ -213,18 +180,9 @@ function assessReadiness(
     {
       label: 'Local database',
       detail: info.databaseReady
-        ? 'Saved computers and activity are stored locally.'
+        ? 'This computer’s settings are stored locally.'
         : 'The local database could not be opened, so nothing can be saved.',
       met: info.databaseReady,
-    },
-    {
-      label: 'Saved computers',
-      detail:
-        pairedCount === 0
-          ? 'No computers saved yet.'
-          : `${String(pairedCount)} server${pairedCount === 1 ? '' : 's'} saved on this computer.`,
-      met: pairedCount > 0,
-      pending: pairedCount === 0,
     },
     {
       label: 'Connection',
@@ -242,17 +200,7 @@ function assessReadiness(
       summary:
         identity === null
           ? 'The device identity could not be read, so connecting is not possible.'
-          : 'The local database could not be opened, so saved servers cannot be kept.',
-      checks,
-    };
-  }
-
-  if (pairedCount === 0) {
-    return {
-      tone: 'warning',
-      label: 'Setup incomplete',
-      headline: 'No computers yet',
-      summary: 'This computer’s identity is set up. No servers are saved on it yet.',
+          : 'The local database could not be opened, so settings cannot be kept.',
       checks,
     };
   }
@@ -271,7 +219,7 @@ function assessReadiness(
     tone: 'ready',
     label: 'Ready',
     headline: 'Ready for connections',
-    summary: 'Identity is set up. Connect to a saved server to start working.',
+    summary: 'This computer’s identity is set up.',
     checks,
   };
 }
@@ -285,12 +233,10 @@ function DeviceHero({
   info,
   identity,
   readiness,
-  onManage,
 }: {
   readonly info: ClientInfo;
   readonly identity: LocalIdentity | null;
   readonly readiness: Readiness;
-  readonly onManage: () => void;
 }): React.JSX.Element {
   return (
     <Card className="flex flex-wrap items-center gap-x-5 gap-y-4">
@@ -315,12 +261,11 @@ function DeviceHero({
         )}
       </div>
 
-      <div className="flex shrink-0 flex-wrap gap-2">
-        <Button variant="primary" icon={MonitorSmartphone} onClick={onManage}>
-          Manage devices
-        </Button>
-        {identity !== null && <CopyButton value={identity.deviceId} label="device ID" />}
-      </div>
+      {identity !== null && (
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <CopyButton value={identity.deviceId} label="device ID" />
+        </div>
+      )}
     </Card>
   );
 }
@@ -386,38 +331,18 @@ function ReadinessBanner({ readiness }: { readonly readiness: Readiness }): Reac
 /** Identity, pairing and the live session, in one card. */
 function RemoteAccessCard({
   identity,
-  pairedCount,
   connection,
-  onOpenDevices,
 }: {
   readonly identity: LocalIdentity | null;
-  readonly pairedCount: number;
   readonly connection: ConnectionState;
-  readonly onOpenDevices: () => void;
 }): React.JSX.Element {
   return (
-    <InfoCard
-      icon={Wifi}
-      title="Remote access"
-      footer={
-        <Button size="sm" variant="ghost" onClick={onOpenDevices}>
-          Open Remote Access
-        </Button>
-      }
-    >
+    <InfoCard icon={Wifi} title="Remote access">
       <InfoRow
         label="Identity"
         value={
           <StateText tone={identity === null ? 'danger' : 'ready'}>
             {identity === null ? 'Unavailable' : 'Configured'}
-          </StateText>
-        }
-      />
-      <InfoRow
-        label="Saved computers"
-        value={
-          <StateText tone={pairedCount === 0 ? 'idle' : 'ready'}>
-            {pairedCount === 0 ? 'None yet' : String(pairedCount)}
           </StateText>
         }
       />
@@ -482,10 +407,6 @@ function SecurityCard({
             {info.elevated ? 'Running as administrator' : 'Standard user'}
           </StateText>
         }
-      />
-      <InfoRow
-        label="Owner account"
-        value={<StateText tone="ready">Argon2id password</StateText>}
       />
       <InfoRow
         label="Device key"
@@ -568,71 +489,6 @@ function DeviceDetailsCard({
         </>
       )}
     </InfoCard>
-  );
-}
-
-/**
- * The action, without repeating the category next to it.
- *
- * Audit actions are namespaced — `auth.login_succeeded` — and the category is already
- * shown on the line below, so printing the qualified name puts "Auth" on screen twice.
- */
-function describeAction(entry: AuditEntry): string {
-  const prefix = `${entry.category}.`;
-  return humanise(
-    entry.action.startsWith(prefix) ? entry.action.slice(prefix.length) : entry.action,
-  );
-}
-
-/** What this client has done recently, straight from the local audit log. */
-function RecentActivityCard({
-  activity,
-}: {
-  readonly activity: readonly AuditEntry[];
-}): React.JSX.Element {
-  const tones: Record<AuditEntry['result'], StatusTone> = {
-    success: 'ready',
-    failure: 'danger',
-    denied: 'warning',
-  };
-
-  return (
-    <Card padded={false} className="flex flex-col">
-      <div className="px-4 pt-4">
-        <CardHeader icon={KeyRound} title="Recent activity" />
-      </div>
-
-      {activity.length === 0 ? (
-        <p className="px-4 pb-4 text-sm text-(--color-text-secondary)">
-          Nothing recorded yet. Connecting and privileged operations are logged here.
-        </p>
-      ) : (
-        <ul className="px-4 pb-1">
-          {activity.map((entry) => (
-            <li
-              key={entry.id}
-              className="flex min-h-11 items-center justify-between gap-3 border-b border-(--color-border) py-2 last:border-b-0"
-            >
-              <span className="flex min-w-0 items-center gap-2.5">
-                <StatusDot tone={tones[entry.result]} />
-                <span className="min-w-0">
-                  <span className="block truncate text-sm">{describeAction(entry)}</span>
-                  <span className="block truncate text-xs text-(--color-text-secondary)">
-                    {humanise(entry.category)}
-                  </span>
-                </span>
-              </span>
-              <span
-                className="shrink-0 text-xs text-(--color-text-secondary)"
-                title={formatTimestamp(entry.occurredAtMs)}
-              >
-                {formatRelative(entry.occurredAtMs)}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Card>
   );
 }
 

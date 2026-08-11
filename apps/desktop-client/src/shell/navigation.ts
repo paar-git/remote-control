@@ -57,7 +57,7 @@ export const UNAVAILABLE_REASON = 'Not available in this version yet';
 export const NO_SESSION_REASON = 'Connect to a computer first';
 
 /** The section the app opens on. */
-export const DEFAULT_SECTION = 'remote-access';
+export const DEFAULT_SECTION = 'this-computer';
 
 export const NAV_GROUPS: readonly NavGroup[] = [
   {
@@ -68,8 +68,12 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         id: 'remote-access',
         label: 'Remote Access',
         icon: MonitorSmartphone,
-        description: 'Your saved computers',
-        availableInPhase: null,
+        description: 'Type an address to connect to another computer',
+        // The saved/trusted-device list this screen showed no longer exists — that
+        // model is deleted along with the owner account and the audit log. Its
+        // replacement, typing an address and accepting a request, is rebuilt here
+        // once the admission work lands.
+        availableInPhase: 12,
         shortcut: 'Ctrl+1',
       },
     ],

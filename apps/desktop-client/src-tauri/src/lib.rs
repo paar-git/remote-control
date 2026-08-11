@@ -21,7 +21,6 @@ use std::sync::{Arc, Mutex};
 
 use rc_platform::{AppPaths, HostInfo};
 use rc_security::{Clock, DeviceIdentity, Permission, PermissionSet, SystemClock};
-use rc_storage::audit::AuditEvent;
 use serde::Serialize;
 
 /// An authenticated owner session, held in memory only.
@@ -57,12 +56,6 @@ pub struct AppState {
     /// since duplicating a private key is not something that should be easy to do by
     /// accident.
     pub identity: Option<Arc<DeviceIdentity>>,
-    /// Owner account repository.
-    pub owner: Option<rc_storage::OwnerRepository>,
-    /// Trusted-device repository.
-    pub trust: Option<rc_storage::TrustRepository>,
-    /// Audit repository.
-    pub audit_repo: Option<rc_storage::AuditRepository>,
     /// The authenticated session, if the application is unlocked.
     pub session: Mutex<Option<OwnerSession>>,
     /// The connection to a saved server, when this client has an identity to use.
@@ -110,19 +103,6 @@ impl AppState {
         match self.authorization() {
             Some(_) => Ok(()),
             None => Err(commands::CommandError::locked()),
-        }
-    }
-
-    /// Append an audit record, logging rather than failing if the write does not work.
-    ///
-    /// Losing an audit row is bad; aborting a completed security action because the
-    /// log write failed would be worse.
-    async fn audit(&self, event: AuditEvent) {
-        let Some(repo) = self.audit_repo.as_ref() else {
-            return;
-        };
-        if let Err(err) = repo.record(&event, self.clock.now_ms()).await {
-            tracing::error!(%err, action = event.action, "could not write an audit record");
         }
     }
 }
@@ -208,9 +188,6 @@ async fn initialise() -> Arc<AppState> {
         paths: paths.clone(),
         database: None,
         identity: None,
-        owner: None,
-        trust: None,
-        audit_repo: None,
         session: Mutex::new(None),
         connection: None,
         clock: Arc::clone(&clock),
@@ -264,14 +241,6 @@ async fn initialise() -> Arc<AppState> {
         }
     };
 
-    let (owner, trust, audit_repo) = database.as_ref().map_or((None, None, None), |db| {
-        (
-            Some(rc_storage::OwnerRepository::new(db)),
-            Some(rc_storage::TrustRepository::new(db)),
-            Some(rc_storage::AuditRepository::new(db)),
-        )
-    });
-
     // The connection manager needs an identity: without one this client cannot
     // authenticate to anything, and offering a Connect button that could only fail
     // would be worse than not offering it.
@@ -289,9 +258,6 @@ async fn initialise() -> Arc<AppState> {
         paths: paths.clone(),
         database,
         identity,
-        owner,
-        trust,
-        audit_repo,
         session: Mutex::new(None),
         connection,
         clock,
@@ -335,17 +301,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             client_info,
             commands::local_identity,
-            commands::owner_status,
-            commands::create_owner,
-            commands::owner_login,
-            commands::owner_logout,
-            commands::list_trusted_devices,
-            commands::rename_trusted_device,
-            commands::revoke_trusted_device,
-            commands::recent_audit_events,
-            connect_commands::connect_to_server,
             connect_commands::disconnect_from_server,
-            connect_commands::reconnect_to_server,
             connect_commands::connection_state,
             connect_commands::ping_server,
             session_commands::system_snapshot,

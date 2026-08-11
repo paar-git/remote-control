@@ -12,7 +12,7 @@
  *   becomes its name once the rail is narrow.
  */
 
-import { ChevronsLeft, ChevronsRight, Lock, MonitorCog, ShieldCheck } from 'lucide-react';
+import { ChevronsLeft, ChevronsRight, Lock, MonitorCog } from 'lucide-react';
 
 import { Kbd, StatusDot, Tooltip, type StatusTone } from '../ui';
 import { NAV_GROUPS, NO_SESSION_REASON, UNAVAILABLE_REASON, type NavItem } from './navigation';
@@ -29,8 +29,6 @@ export function Sidebar({
   onSelect,
   collapsed,
   onToggleCollapsed,
-  username,
-  onLock,
   updateBadge,
   service,
   sessionActive,
@@ -39,8 +37,6 @@ export function Sidebar({
   readonly onSelect: (id: string) => void;
   readonly collapsed: boolean;
   readonly onToggleCollapsed: () => void;
-  readonly username: string;
-  readonly onLock: () => void;
   /** The version waiting to be installed, if any. */
   readonly updateBadge: string | null;
   readonly service: ServiceStatus;
@@ -76,8 +72,6 @@ export function Sidebar({
           </SidebarSection>
         ))}
       </div>
-
-      <SidebarFooter collapsed={collapsed} username={username} onLock={onLock} />
     </nav>
   );
 }
@@ -285,65 +279,5 @@ export function SidebarItem({
         </button>
       </Tooltip>
     </li>
-  );
-}
-
-/** The account and session-security block. */
-function SidebarFooter({
-  collapsed,
-  username,
-  onLock,
-}: {
-  readonly collapsed: boolean;
-  readonly username: string;
-  readonly onLock: () => void;
-}): React.JSX.Element {
-  const initial = username.trim().slice(0, 1).toUpperCase() || '?';
-
-  if (collapsed) {
-    return (
-      <div className="flex flex-col items-center gap-1.5 border-t border-(--color-border) p-2">
-        <Tooltip label={`${username} · Local owner`} side="right">
-          <span className="flex size-8 items-center justify-center rounded-full bg-(--color-accent-soft) text-xs font-semibold text-(--color-accent)">
-            {initial}
-          </span>
-        </Tooltip>
-        <Tooltip label="Lock session" side="right">
-          <button
-            type="button"
-            onClick={onLock}
-            aria-label="Lock session"
-            className="flex size-8 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-          >
-            <Lock aria-hidden="true" className="size-4" />
-          </button>
-        </Tooltip>
-      </div>
-    );
-  }
-
-  return (
-    <div className="border-t border-(--color-border) p-2">
-      <div className="flex items-center gap-2.5 rounded-lg px-1.5 py-1.5">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-(--color-accent-soft) text-xs font-semibold text-(--color-accent)">
-          {initial}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">{username}</span>
-          <span className="flex items-center gap-1 text-[11px] text-(--color-text-secondary)">
-            <ShieldCheck aria-hidden="true" className="size-3" />
-            Local owner
-          </span>
-        </span>
-      </div>
-      <button
-        type="button"
-        onClick={onLock}
-        className="mt-1 flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-      >
-        <Lock aria-hidden="true" className="size-4 shrink-0" />
-        Lock session
-      </button>
-    </div>
   );
 }

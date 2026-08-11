@@ -1,8 +1,10 @@
 /**
  * Application shell.
  *
- * The app is gated: on first run it asks for an owner account, thereafter it asks for
- * the owner password. Only once unlocked does the shell appear.
+ * There is no account and no login: the app opens straight to the shell once the
+ * backend answers. The one gate that remains is whether the backend can be reached at
+ * all, which is a real condition — the webview can load without its Tauri host ever
+ * responding — not a placeholder for the deleted owner account.
  *
  * # Two modes
  *
@@ -20,17 +22,9 @@
 import { AlertTriangle, MonitorCog } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import {
-  type OwnerStatus,
-  getClientInfo,
-  getOwnerStatus,
-  isConnected,
-  ownerLogout,
-} from './api.js';
-import { AuthScreen } from './AuthScreen';
+import { getClientInfo, isConnected } from './api.js';
 import FilesScreen from './FilesScreen';
 import MonitoringScreen from './MonitoringScreen';
-import { RemoteAccessScreen } from './RemoteAccessScreen';
 import { SessionScreen } from './SessionScreen';
 import { ThisComputerScreen } from './ThisComputerScreen';
 import UpdateScreen from './UpdateScreen';
@@ -47,9 +41,7 @@ import { Button, ToastBar, type Toast } from './ui';
 type Gate =
   | { readonly status: 'loading' }
   | { readonly status: 'unavailable'; readonly message: string }
-  | { readonly status: 'setup' }
-  | { readonly status: 'locked' }
-  | { readonly status: 'unlocked'; readonly username: string };
+  | { readonly status: 'ready' };
 
 /** Remembered so the window opens the way it was left. */
 const COLLAPSED_KEY = 'rc.sidebar.collapsed';
@@ -59,30 +51,19 @@ export default function App(): React.JSX.Element {
   const [section, setSection] = useState(DEFAULT_SECTION);
   const [toast, setToast] = useState<Toast | null>(null);
   const [inSession, setInSession] = useState(false);
-  const [sessionDevice, setSessionDevice] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(
     () => globalThis.localStorage?.getItem(COLLAPSED_KEY) === 'true',
   );
 
-  const unlocked = gate.status === 'unlocked';
+  const ready = gate.status === 'ready';
 
-  // Only poll for releases once the app is unlocked; before that the backend
-  // refuses the capability check anyway.
-  const updates = useUpdateWatcher(unlocked);
+  // Only poll once the backend is known reachable; before that every call would just
+  // fail the same way the reachability probe already did.
+  const updates = useUpdateWatcher(ready);
   const pendingVersion = pendingUpdateVersion(updates.status);
-  const connection = useConnectionState(unlocked);
+  const connection = useConnectionState(ready);
   const service = useServiceStatus(gate.status);
   const live = isConnected(connection.state);
-
-  const applyStatus = useCallback((status: OwnerStatus) => {
-    if (status.authenticated && status.username !== null) {
-      setGate({ status: 'unlocked', username: status.username });
-    } else if (status.accountExists) {
-      setGate({ status: 'locked' });
-    } else {
-      setGate({ status: 'setup' });
-    }
-  }, []);
 
   useEffect(() => {
     if (!isTauriAvailable()) {
@@ -96,9 +77,11 @@ export default function App(): React.JSX.Element {
     }
 
     let cancelled = false;
-    getOwnerStatus()
-      .then((status) => {
-        if (!cancelled) applyStatus(status);
+    // `client_info` is a cheap, side-effect-free call — it exists to answer this
+    // question, not because its value is needed here.
+    getClientInfo()
+      .then(() => {
+        if (!cancelled) setGate({ status: 'ready' });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -111,15 +94,12 @@ export default function App(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [applyStatus]);
+  }, []);
 
   // A session that ends — deliberately or not — must not leave the window pretending to
   // be a remote computer. The backend's state is the authority.
   useEffect(() => {
-    if (!live) {
-      setInSession(false);
-      setSessionDevice(null);
-    }
+    if (!live) setInSession(false);
   }, [live]);
 
   const navigate = useCallback((id: string) => {
@@ -130,10 +110,10 @@ export default function App(): React.JSX.Element {
     setSection(id);
   }, []);
 
-  // Shortcuts are only advertised on items that are bound, and only bound while the app
-  // is unlocked — nothing behind the gate should be reachable by keyboard.
+  // Shortcuts are only advertised on items that are bound, and only bound once the
+  // backend is reachable — nothing behind the gate should be reachable by keyboard.
   useEffect(() => {
-    if (!unlocked) return;
+    if (!ready) return;
 
     const onKey = (event: KeyboardEvent): void => {
       const target = sectionForShortcut(event);
@@ -146,7 +126,7 @@ export default function App(): React.JSX.Element {
     return () => {
       window.removeEventListener('keydown', onKey);
     };
-  }, [unlocked, navigate]);
+  }, [ready, navigate]);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((current) => {
@@ -154,18 +134,6 @@ export default function App(): React.JSX.Element {
       globalThis.localStorage?.setItem(COLLAPSED_KEY, String(next));
       return next;
     });
-  }, []);
-
-  const lock = useCallback(() => {
-    ownerLogout()
-      .then(() => {
-        setGate({ status: 'locked' });
-        setInSession(false);
-        setSection(DEFAULT_SECTION);
-      })
-      .catch(() => {
-        setToast({ kind: 'error', message: 'Could not lock the application.' });
-      });
   }, []);
 
   const dismissToast = useCallback(() => {
@@ -176,22 +144,13 @@ export default function App(): React.JSX.Element {
 
   if (gate.status === 'unavailable') return <BackendUnavailable message={gate.message} />;
 
-  if (gate.status === 'setup' || gate.status === 'locked') {
-    return (
-      <>
-        <AuthScreen mode={gate.status} onAuthenticated={applyStatus} onToast={setToast} />
-        <ToastBar toast={toast} onDismiss={dismissToast} />
-      </>
-    );
-  }
-
   // The session owns the whole window, with no sidebar and no toolbar over it.
   if (inSession && live) {
     return (
       <>
         <SessionScreen
           connection={connection.state}
-          deviceName={sessionDevice}
+          deviceName={null}
           onToast={setToast}
           onLeave={() => {
             setInSession(false);
@@ -212,8 +171,6 @@ export default function App(): React.JSX.Element {
             onSelect={navigate}
             collapsed={collapsed}
             onToggleCollapsed={toggleCollapsed}
-            username={gate.username}
-            onLock={lock}
             updateBadge={pendingVersion}
             service={service}
             sessionActive={live}
@@ -254,12 +211,6 @@ export default function App(): React.JSX.Element {
           onNavigate={navigate}
           onToast={setToast}
           onUpdateChange={updates.refresh}
-          onEnterSession={(name) => {
-            // `null` means "resume whatever is open", so the name already recorded
-            // when the session started is kept rather than blanked.
-            if (name !== null) setSessionDevice(name);
-            setInSession(true);
-          }}
         />
       </AppShell>
 
@@ -279,7 +230,7 @@ function useServiceStatus(gate: Gate['status']): ServiceStatus {
   const [databaseReady, setDatabaseReady] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (gate !== 'unlocked') return;
+    if (gate !== 'ready') return;
     let cancelled = false;
     getClientInfo()
       .then((info) => {
@@ -381,7 +332,7 @@ function UpdateBanner({
  * The screen for the selected sidebar section.
  *
  * Sections that are not yet built are unreachable — the sidebar disables them, the
- * shortcuts skip them and `navigate` refuses them — so this falls back to Remote Access
+ * shortcuts skip them and `navigate` refuses them — so this falls back to This computer
  * rather than rendering a placeholder that would look like a broken page.
  */
 function Section({
@@ -390,18 +341,14 @@ function Section({
   onNavigate,
   onToast,
   onUpdateChange,
-  onEnterSession,
 }: {
   readonly id: string;
   readonly connection: Connection;
   readonly onNavigate: (section: string) => void;
   readonly onToast: (toast: Toast) => void;
   readonly onUpdateChange: () => void;
-  readonly onEnterSession: (deviceName: string | null) => void;
 }): React.JSX.Element {
   switch (id) {
-    case 'this-computer':
-      return <ThisComputerScreen connection={connection.state} onNavigate={onNavigate} />;
     case 'monitoring':
       return <MonitoringScreen />;
     case 'updates':
@@ -409,12 +356,6 @@ function Section({
     case 'files':
       return <FilesScreen onToast={onToast} />;
     default:
-      return (
-        <RemoteAccessScreen
-          onToast={onToast}
-          connection={connection}
-          onOpenSession={onEnterSession}
-        />
-      );
+      return <ThisComputerScreen connection={connection.state} onNavigate={onNavigate} />;
   }
 }
