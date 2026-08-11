@@ -90,7 +90,7 @@ Argon2 parameters are recorded **inside** the stored PHC string, so a stored has
 carries the settings it was made with. The `owner_account` table additionally records them
 in typed columns for queryability.
 
-`OwnerCredential::needs_rehash` reports when a stored hash was made with weaker settings
+`PasswordCredential::needs_rehash` reports when a stored hash was made with weaker settings
 than current policy. On the next **successful** login — the only moment the plaintext is
 available — the hash is transparently recomputed at current policy and rewritten. The
 result is reported as `password_hash_upgraded` and audited as
