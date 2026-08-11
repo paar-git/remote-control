@@ -8,11 +8,16 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "rc_host_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rc-agent"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 rc-protocol = { workspace = true }
 rc-platform = { workspace = true }
 rc-security = { workspace = true }

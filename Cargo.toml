@@ -54,6 +54,7 @@ tar = "0.4"
 # --- errors / logging ---
 thiserror = "2.0"
 anyhow = "1.0"
+async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"

@@ -17,20 +17,12 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-mod config;
-mod file_service;
-mod health;
-mod identity;
-mod logging;
-mod metrics_service;
-mod server;
-mod sessions;
-
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use config::AgentConfig;
+use rc_host_agent::config::AgentConfig;
+use rc_host_agent::{health, identity, logging, server};
 use rc_platform::{AppPaths, HostInfo};
 
 /// Command-line interface.
