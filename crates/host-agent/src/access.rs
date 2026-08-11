@@ -27,6 +27,11 @@ use crate::error::Result;
 /// What the person at the keyboard is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptRequest {
+    /// Correlates the dialog with the connection waiting on it.
+    ///
+    /// The answer arrives from a window, not from the connection, so without this an
+    /// answer could be applied to whichever request happened to be open.
+    pub request_id: String,
     /// The address the connection came from, as it will be displayed.
     pub address: String,
     /// The peer's certificate fingerprint, taken from the TLS connection.
@@ -44,6 +49,21 @@ pub enum AcceptDecision {
     Dismiss,
 }
 
+/// An answer to a specific [`AcceptRequest`].
+///
+/// Carries back the ID it answers, so `authorize_connection` can tell a genuine answer
+/// to the request it is holding open from a stale answer to some other request — a
+/// dismissed dialog that finally reports in, or an answer meant for a request that has
+/// since been superseded. A prompt implementation gets this ID from the
+/// [`AcceptRequest`] it was shown; nothing here trusts an ID the peer could supply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptAnswer {
+    /// The [`AcceptRequest::request_id`] this answers.
+    pub request_id: String,
+    /// What the human decided.
+    pub decision: AcceptDecision,
+}
+
 /// Asks a human.
 #[async_trait]
 pub trait AcceptPrompt: Send + Sync {
@@ -51,8 +71,10 @@ pub trait AcceptPrompt: Send + Sync {
     ///
     /// Implementations must return [`AcceptDecision::Dismiss`] on a timeout rather than
     /// blocking forever: a connection held open waiting for someone who went home is a
-    /// resource leak with an authorisation decision attached.
-    async fn ask(&self, request: AcceptRequest) -> AcceptDecision;
+    /// resource leak with an authorisation decision attached. The returned
+    /// [`AcceptAnswer::request_id`] must be `request.request_id` — echoing it back is
+    /// what lets the caller detect a stale or misrouted answer.
+    async fn ask(&self, request: AcceptRequest) -> AcceptAnswer;
 }
 
 /// An incoming connection, after TLS and before any authorisation.
@@ -172,16 +194,30 @@ pub async fn authorize_connection(
     }
 
     // 3. Ask a human.
-    let decision = deps
+    //
+    // Generated here, never accepted from the peer or from any caller-supplied value:
+    // it exists only to match this specific answer back to this specific request.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let answer = deps
         .prompt
         .ask(AcceptRequest {
+            request_id: request_id.clone(),
             address: key,
             fingerprint: request.fingerprint,
             machine_name: request.machine_name.clone(),
         })
         .await;
 
-    Ok(match decision {
+    // An answer to a different request — stale, from a dialog that timed out, or
+    // otherwise misrouted — must never be applied here, no matter what it says. This
+    // is checked before looking at the decision at all: a mismatched Accept is refused
+    // exactly like a mismatched Dismiss, so there is no path from "wrong ID" to
+    // "granted anyway".
+    if answer.request_id != request_id {
+        return Ok(Authorization::Refused(RefusalReason::Dismissed));
+    }
+
+    Ok(match answer.decision {
         // Accepting with nothing ticked is a session that can do nothing and that
         // nobody can see. Refusing says the same thing more clearly.
         AcceptDecision::Accept(granted) if !granted.is_empty() => Authorization::Granted(granted),
@@ -200,8 +236,15 @@ mod tests {
     use super::*;
 
     /// A prompt that answers however the test says, and counts how often it was asked.
+    ///
+    /// By default it echoes back the real `request_id` it was shown, like a correct
+    /// implementation must. [`ScriptedPrompt::stale`] builds one that answers with a
+    /// different ID instead, standing in for a dialog answering out of turn.
     struct ScriptedPrompt {
         answer: AcceptDecision,
+        /// `None` echoes the request's own ID, as a correct prompt does. `Some` forces
+        /// a mismatched answer, simulating a stale or misrouted response.
+        respond_with: Option<String>,
         asked: std::sync::atomic::AtomicUsize,
     }
 
@@ -209,9 +252,21 @@ mod tests {
         fn new(answer: AcceptDecision) -> Self {
             Self {
                 answer,
+                respond_with: None,
                 asked: std::sync::atomic::AtomicUsize::new(0),
             }
         }
+
+        /// A prompt whose answer always carries `wrong_request_id`, regardless of what
+        /// request it was actually shown.
+        fn stale(answer: AcceptDecision, wrong_request_id: impl Into<String>) -> Self {
+            Self {
+                answer,
+                respond_with: Some(wrong_request_id.into()),
+                asked: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
         fn asked(&self) -> usize {
             self.asked.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -219,9 +274,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AcceptPrompt for ScriptedPrompt {
-        async fn ask(&self, _request: AcceptRequest) -> AcceptDecision {
+        async fn ask(&self, request: AcceptRequest) -> AcceptAnswer {
             self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.answer
+            let request_id = self.respond_with.clone().unwrap_or(request.request_id);
+            AcceptAnswer {
+                request_id,
+                decision: self.answer,
+            }
         }
     }
 
@@ -485,5 +544,27 @@ mod tests {
         .await;
         let outcome = harness.authorize(request(None)).await.unwrap();
         assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
+    }
+
+    #[tokio::test]
+    async fn a_stale_answer_with_the_wrong_request_id_is_never_applied() {
+        // The dangerous direction: a human said Accept(ALL), but not to *this*
+        // request — a dialog that timed out, or an answer meant for a different,
+        // superseded connection. Applying it anyway would grant a peer permissions a
+        // human approved for someone else. The correlation ID exists to make this
+        // path structurally unreachable, not merely unlikely.
+        let harness = Harness::new(ScriptedPrompt::stale(
+            AcceptDecision::Accept(PermissionSet::ALL),
+            "not-the-request-that-is-pending",
+        ))
+        .await;
+
+        let outcome = harness.authorize(request(None)).await.unwrap();
+        assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
+        assert_eq!(
+            harness.prompt().asked(),
+            1,
+            "the prompt was reached; its mismatched answer must simply not count"
+        );
     }
 }
