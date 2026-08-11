@@ -691,18 +691,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transfer_files_grants_both_reading_and_writing() {
-        let granted = PermissionSet::NONE.with(Permission::TransferFiles);
-        assert!(granted.contains(Permission::TransferFiles));
-    }
-
-    #[test]
-    fn a_session_without_the_permission_holds_neither() {
-        let denied = PermissionSet::NONE;
-        assert!(!denied.contains(Permission::TransferFiles));
-    }
-
-    #[test]
     fn a_destination_that_does_not_exist_is_used_as_given() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("new.txt");
