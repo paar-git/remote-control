@@ -1,7 +1,8 @@
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { metricsTickSchema, type MetricsTick, type Snapshot } from './api.js';
-import { applyTick } from './MonitoringScreen.js';
+import { applyTick, MonitoringStrip } from './MonitoringScreen.js';
 
 /** A snapshot with a process list and static CPU identity, as one arrives from a fetch. */
 function snapshot(): Snapshot {
@@ -100,5 +101,19 @@ describe('the tick schema', () => {
     // real zero, and will eventually trust the wrong one.
     const parsed = metricsTickSchema.safeParse(tick({ loadAverage: null }));
     expect(parsed.success).toBe(true);
+  });
+});
+
+describe('the monitoring strip', () => {
+  it('renders no process table', () => {
+    render(<MonitoringStrip />);
+    expect(screen.queryByRole('table')).toBeNull();
+  });
+
+  it('omits a reading the server could not measure rather than showing zero', () => {
+    // An operator cannot tell a cold machine from a missing sensor if both read 0.
+    render(<MonitoringStrip snapshot={{ cpuPercent: 12, memoryPercent: 44 }} />);
+    expect(screen.getByText(/12/)).toBeInTheDocument();
+    expect(screen.queryByText(/disk/i)).toBeNull();
   });
 });
