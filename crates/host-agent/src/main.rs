@@ -239,20 +239,14 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
     // operator running `rc-agent pair`, and live only in this process's memory.
     let pairing = std::sync::Arc::new(rc_security::PairingManager::with_defaults());
     let health_port = config.network.health_port;
-    let privileged_port = config.network.privileged_port;
     let device_identity = std::sync::Arc::new(device_identity);
 
-    let privileged = connect_privileged_helper(&paths, privileged_port).await;
-
-    let server = std::sync::Arc::new(
-        server::AgentServer::new(
-            std::sync::Arc::clone(&device_identity),
-            config,
-            database.clone(),
-            std::sync::Arc::clone(&pairing),
-        )
-        .with_privileged_helper(privileged),
-    );
+    let server = std::sync::Arc::new(server::AgentServer::new(
+        std::sync::Arc::clone(&device_identity),
+        config,
+        database.clone(),
+        std::sync::Arc::clone(&pairing),
+    ));
 
     // One shutdown signal, observed by both the listener and the local endpoint. A
     // broadcast rather than two waiters on the OS signal, because only one task can
@@ -292,64 +286,6 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
     database.close().await;
     tracing::info!("agent stopped cleanly");
     Ok(())
-}
-
-/// Connect to the privileged helper, if one is configured.
-///
-/// Returns `None` when no helper is installed, which is a supported configuration: the
-/// agent then refuses operations needing Administrator or root with a message saying so.
-///
-/// The state is logged once, at startup, so an operator finds out here rather than when
-/// a power button does nothing.
-async fn connect_privileged_helper(
-    paths: &AppPaths,
-    port: u16,
-) -> Option<rc_privileged::PrivilegedClient> {
-    if port == 0 {
-        tracing::info!(
-            "no privileged helper is configured; operations needing Administrator or \
-             root will be refused"
-        );
-        return None;
-    }
-
-    let token_path = rc_privileged::client::token_path(paths.data_dir());
-    let client = match rc_privileged::PrivilegedClient::from_token_file(port, &token_path) {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                path = %token_path.display(),
-                "could not read the privileged helper's token; is the helper running?"
-            );
-            return None;
-        }
-    };
-
-    // Confirmed rather than assumed: a token file left by a helper that has since
-    // stopped would otherwise look like a working helper until the first real request.
-    match client.ping().await {
-        Ok((version, elevated)) => {
-            if elevated {
-                tracing::info!(helper_version = %version, "privileged helper ready");
-            } else {
-                tracing::warn!(
-                    helper_version = %version,
-                    "the privileged helper is running but not elevated; operations \
-                     needing Administrator or root will fail"
-                );
-            }
-            Some(client)
-        }
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "the privileged helper did not answer; privileged operations will be \
-                 refused"
-            );
-            None
-        }
-    }
 }
 
 /// Start the loopback control endpoint, if it is enabled.

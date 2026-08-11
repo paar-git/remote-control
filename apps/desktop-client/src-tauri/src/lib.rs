@@ -1,9 +1,7 @@
 //! Desktop client backend.
 //!
 //! The client process runs **unelevated**, by design. It never performs privileged
-//! operating-system work itself; anything requiring Administrator or root is sent to
-//! the host agent over an authenticated session and executed there through the
-//! allowlist in `rc-platform::privileged`.
+//! operating-system work itself.
 //!
 //! Commands exposed to the webview are declared in [`run`]. Each one returns a typed
 //! error string rather than a Rust error, because the webview must never receive an

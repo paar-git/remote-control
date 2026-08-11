@@ -107,12 +107,6 @@ pub struct NetworkConfig {
     /// Always bound to `127.0.0.1`; the address is deliberately not configurable, so no
     /// configuration mistake can expose it to the network.
     pub health_port: u16,
-    /// TCP port the privileged helper listens on, or `0` when no helper is installed.
-    ///
-    /// Always loopback; the address is not configurable. With no helper, operations
-    /// needing Administrator or root are refused with a message saying so rather than
-    /// failing with an obscure operating-system error.
-    pub privileged_port: u16,
     /// Maximum concurrent authenticated sessions.
     pub max_sessions: u16,
     /// Failed authentication attempts permitted per source address per minute.
@@ -125,7 +119,6 @@ impl Default for NetworkConfig {
             listen_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             listen_port: rc_protocol::DEFAULT_AGENT_PORT,
             health_port: rc_protocol::DEFAULT_AGENT_HEALTH_PORT,
-            privileged_port: rc_protocol::DEFAULT_PRIVILEGED_PORT,
             discovery_enabled: true,
             remote_access_enabled: false,
             coordination_url: None,
@@ -348,23 +341,6 @@ impl AgentConfig {
             return invalid(
                 "network.health_port",
                 "must differ from the QUIC listener port",
-            );
-        }
-        // `0` disables the helper; any other value must be bindable without root and
-        // must not collide with a port the agent already uses.
-        if self.network.privileged_port != 0 && self.network.privileged_port < 1024 {
-            return invalid(
-                "network.privileged_port",
-                "must be 0 when no helper is installed, or above 1023",
-            );
-        }
-        if self.network.privileged_port != 0
-            && (self.network.privileged_port == self.network.listen_port
-                || self.network.privileged_port == self.network.health_port)
-        {
-            return invalid(
-                "network.privileged_port",
-                "must differ from the agent's own ports",
             );
         }
         if self.network.max_sessions == 0 {

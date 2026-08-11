@@ -15,10 +15,8 @@
 //!
 //! Application authorization and operating-system privilege are separate axes.
 //! Holding [`Capability::PowerControl`] means the *application* will forward a power
-//! request to the agent. The agent still resolves it through
-//! `rc_platform::privileged`, still requires elevation where the OS requires it, and
-//! still enforces its own deny-rules. An owner cannot use application permissions to
-//! bypass UAC, polkit, or the protected-services list.
+//! request to the agent. Application permissions alone do not confer operating-system
+//! privilege.
 
 use serde::{Deserialize, Serialize};
 

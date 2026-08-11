@@ -8,7 +8,6 @@ members = [
     "crates/monitoring",
     "crates/file-transfer",
     "crates/updater",
-    "crates/privileged",
     "crates/platform",
     "crates/host-agent",
     "apps/coordination-server",
@@ -33,7 +32,6 @@ rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }
 rc-file-transfer = { path = "crates/file-transfer" }
 rc-updater = { path = "crates/updater" }
-rc-privileged = { path = "crates/privileged" }
 rc-remote-desktop = { path = "crates/remote-desktop" }
 
 # --- async runtime ---

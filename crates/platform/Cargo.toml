@@ -1,6 +1,6 @@
 [package]
 name = "rc-platform"
-description = "Platform abstraction: host facts, privileged command allowlist, power actions, secret storage."
+description = "Platform abstraction: host facts and per-OS directory resolution."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

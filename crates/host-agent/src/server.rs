@@ -76,12 +76,6 @@ pub struct AgentServer {
     /// measured across an interval, so several collectors would each pay for their own
     /// process enumeration and none would agree with the others.
     metrics: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
-    /// Talks to the privileged helper, when one is configured and reachable.
-    ///
-    /// `None` means no helper is installed. Operations needing Administrator or root
-    /// are then refused with a message saying so, rather than failing with an obscure
-    /// operating-system error the operator cannot act on.
-    privileged: Option<Arc<rc_privileged::PrivilegedClient>>,
     /// Set once the QUIC listener is bound, cleared when it stops.
     ///
     /// Read by the health endpoint, which must be able to distinguish "the process is
@@ -111,37 +105,8 @@ impl AgentServer {
             metrics: Arc::new(tokio::sync::Mutex::new(
                 rc_monitoring::MetricsCollector::new(),
             )),
-            privileged: None,
             listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
-    }
-
-    /// Attach a privileged helper client.
-    ///
-    /// Separate from `new` because connecting involves reading a token file, which is
-    /// I/O the constructor should not be doing — and because an agent with no helper is
-    /// a supported configuration rather than a failure.
-    #[must_use]
-    pub fn with_privileged_helper(
-        mut self,
-        client: Option<rc_privileged::PrivilegedClient>,
-    ) -> Self {
-        self.privileged = client.map(Arc::new);
-        self
-    }
-
-    /// The privileged helper, if one is attached.
-    ///
-    /// Returning `None` is a supported state, not an error: the caller refuses the
-    /// operation with a message naming the cause.
-    // Reached only from tests until phase 7 adds the service and power handlers. The
-    // allow is scoped and deliberate: the accessor is exercised by
-    // `the_helper_is_absent_by_default`, and deleting it to satisfy dead-code analysis
-    // would mean writing it again in a fortnight without that coverage.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn privileged(&self) -> Option<Arc<rc_privileged::PrivilegedClient>> {
-        self.privileged.as_ref().map(Arc::clone)
     }
 
     /// The live session registry, shared with the health endpoint.
@@ -174,24 +139,19 @@ impl AgentServer {
 
     /// What this build of this agent, with this configuration, can actually do.
     ///
-    /// Derived from the feature switches *and* from what is actually installed, so an
-    /// operator running a monitoring-only agent, or one with no privileged helper, has
-    /// that reflected in what the client offers to do. A capability advertised but
-    /// unavailable is a button that fails when pressed.
+    /// Derived from the feature switches, so an operator running a monitoring-only
+    /// agent has that reflected in what the client offers to do.
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
         let features = &self.config.features;
-        // Service and power control go through the privileged helper. Without one the
-        // agent genuinely cannot perform them, whatever the configuration says.
-        let privileged_available = self.privileged.is_some();
 
         Capabilities {
             remote_desktop: features.remote_desktop,
             file_transfer: features.file_transfer,
             monitoring: true,
             process_management: features.process_management,
-            service_management: features.service_management && privileged_available,
-            power_control: features.power_control && privileged_available,
+            service_management: features.service_management,
+            power_control: features.power_control,
             clipboard: features.clipboard_sync,
             wake_on_lan: false,
             display_count: 0,
@@ -1070,28 +1030,6 @@ mod tests {
             server.identity.public().certificate_fingerprint.to_hex()
         );
         assert!(!descriptor.hostname.is_empty());
-    }
-
-    #[tokio::test]
-    async fn the_helper_is_absent_by_default() {
-        // An agent with no helper is a supported configuration, not a failure.
-        let server = server().await;
-        assert!(server.privileged().is_none());
-    }
-
-    #[tokio::test]
-    async fn power_and_service_control_are_not_advertised_without_a_helper() {
-        // A capability advertised but unavailable is a button that fails when pressed.
-        let server = server().await;
-        let capabilities = server.capabilities();
-
-        assert!(
-            !capabilities.power_control,
-            "no helper is attached, so the agent cannot perform power actions"
-        );
-        assert!(!capabilities.service_management);
-        // Everything that does not need the helper is unaffected.
-        assert!(capabilities.monitoring);
     }
 
     #[tokio::test]
