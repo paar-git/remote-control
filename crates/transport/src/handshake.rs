@@ -46,7 +46,7 @@ use rc_protocol::control::{
 
 use rc_protocol::frame::Channel;
 use rc_protocol::{DeviceId, ProtocolVersion, SessionId};
-use rc_security::{Fingerprint, Role};
+use rc_security::{Fingerprint, PermissionSet};
 
 use crate::channel::{ChannelReader, ChannelWriter};
 use crate::error::{Result, TransportError};
@@ -64,8 +64,8 @@ pub struct AuthenticatedPeer {
     pub device_id: DeviceId,
     /// Name to show in the UI. Untrusted text; sanitise before rendering.
     pub display_name: String,
-    /// Role this session was admitted with.
-    pub role: Role,
+    /// Permissions this session was admitted with.
+    pub permissions: PermissionSet,
     /// Certificate fingerprint observed on this connection.
     pub certificate_fingerprint: Fingerprint,
     /// Version both peers agreed on.

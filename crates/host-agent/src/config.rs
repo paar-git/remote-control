@@ -163,10 +163,6 @@ pub struct FeatureConfig {
     pub file_transfer: bool,
     /// Allow process termination.
     pub process_management: bool,
-    /// Allow service control.
-    pub service_management: bool,
-    /// Allow power actions.
-    pub power_control: bool,
     /// Allow clipboard synchronisation.
     pub clipboard_sync: bool,
     /// Roots the file manager is confined to. Empty means the whole filesystem, which
@@ -182,8 +178,6 @@ impl Default for FeatureConfig {
             remote_desktop: true,
             file_transfer: true,
             process_management: true,
-            service_management: true,
-            power_control: true,
             clipboard_sync: true,
             file_transfer_roots: Vec::new(),
             max_transfer_bytes: 64 * 1024 * 1024 * 1024,

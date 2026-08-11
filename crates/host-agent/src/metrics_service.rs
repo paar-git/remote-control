@@ -27,13 +27,13 @@
 use std::sync::Arc;
 
 use rc_protocol::system::{MetricsAgentMessage, MetricsStopReason};
-use rc_security::permissions::{AuthorizationContext, Capability};
+use rc_security::{Permission, PermissionSet};
 use rc_transport::ChannelWriter;
 
 /// Serves the metrics channel for one connection.
 pub struct MetricsService {
     writer: ChannelWriter,
-    authorization: AuthorizationContext,
+    authorization: PermissionSet,
     /// The agent-wide collector.
     ///
     /// Shared rather than owned: CPU utilisation is measured *across an interval*, so a
@@ -52,7 +52,7 @@ impl MetricsService {
     #[must_use]
     pub const fn new(
         writer: ChannelWriter,
-        authorization: AuthorizationContext,
+        authorization: PermissionSet,
         collector: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
         clock: Arc<dyn rc_security::Clock>,
         interval: tokio::sync::watch::Receiver<Option<u32>>,
@@ -125,7 +125,7 @@ impl MetricsService {
                 _ = ticker.tick() => {
                     // Re-checked here, every tick, against the live session rather than
                     // captured when the subscription was created.
-                    if self.authorization.require(Capability::RemoteDesktopView).is_err() {
+                    if !self.authorization.contains(Permission::ViewMetrics) {
                         return self.stop(MetricsStopReason::NotAuthorized).await;
                     }
 
@@ -183,8 +183,6 @@ async fn await_subscription(
 
 #[cfg(test)]
 mod tests {
-    use rc_security::Role;
-
     use super::*;
 
     #[tokio::test]
@@ -224,20 +222,19 @@ mod tests {
     }
 
     #[test]
-    fn a_view_only_device_may_watch_but_a_revoked_one_may_not() {
-        // The capability the service re-checks on every tick, decided by the permission
-        // table rather than by a role check written here.
+    fn a_session_with_view_metrics_may_watch_but_one_without_it_may_not() {
+        // The permission the service re-checks on every tick, decided by the granted
+        // set rather than by a role check written here.
         assert!(
-            AuthorizationContext::new(Role::ViewOnly)
-                .require(Capability::RemoteDesktopView)
-                .is_ok(),
-            "watching a server is what View Only is for"
+            PermissionSet::NONE
+                .with(Permission::ViewMetrics)
+                .contains(Permission::ViewMetrics),
+            "granting ViewMetrics is what lets a session watch"
         );
         assert!(
-            AuthorizationContext::revoked(Role::Owner)
-                .require(Capability::RemoteDesktopView)
-                .is_err(),
-            "revocation must stop a stream mid-flight, not at the next connection"
+            !PermissionSet::NONE.contains(Permission::ViewMetrics),
+            "a session stripped of the permission must stop a stream mid-flight, not at \
+             the next connection"
         );
     }
 }

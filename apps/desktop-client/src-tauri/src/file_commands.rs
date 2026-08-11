@@ -25,7 +25,7 @@ use std::sync::Arc;
 use rc_file_transfer::PathPolicy;
 use rc_protocol::TransferId;
 use rc_protocol::files::{Checksum, ConflictPolicy, DirEntry, FileAgentMessage, FileClientMessage};
-use rc_security::permissions::Capability;
+use rc_security::Permission;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -129,7 +129,7 @@ pub async fn list_remote_directory(
     path: String,
     include_hidden: bool,
 ) -> CommandResult<ListingDto> {
-    state.require_capability(Capability::FileRead)?;
+    state.require_permission(Permission::TransferFiles)?;
     let manager = connection(&state)?;
 
     let replies = manager
@@ -178,7 +178,7 @@ pub fn list_local_directory(
 ) -> CommandResult<ListingDto> {
     // The local pane still needs an unlocked application: the file manager is not a
     // way around the lock screen.
-    state.require_capability(Capability::FileRead)?;
+    state.require_permission(Permission::TransferFiles)?;
 
     // Unconfined, because confining an operator to part of their own machine would be
     // theatre — but still *resolved*, so a NUL, a traversal or a reserved name is
@@ -228,7 +228,7 @@ pub async fn create_remote_directory(
     state: tauri::State<'_, Arc<AppState>>,
     path: String,
 ) -> CommandResult<()> {
-    state.require_capability(Capability::FileWrite)?;
+    state.require_permission(Permission::TransferFiles)?;
     simple_request(&state, FileClientMessage::CreateDirectory { path }).await
 }
 
@@ -246,7 +246,7 @@ pub async fn delete_remote_path(
     path: String,
     recursive: bool,
 ) -> CommandResult<()> {
-    state.require_capability(Capability::FileWrite)?;
+    state.require_permission(Permission::TransferFiles)?;
     simple_request(
         &state,
         FileClientMessage::Delete {
@@ -271,7 +271,7 @@ pub async fn rename_remote_path(
     from: String,
     to: String,
 ) -> CommandResult<()> {
-    state.require_capability(Capability::FileWrite)?;
+    state.require_permission(Permission::TransferFiles)?;
     simple_request(
         &state,
         FileClientMessage::Rename {
@@ -296,7 +296,7 @@ pub async fn upload_file(
     state: tauri::State<'_, Arc<AppState>>,
     input: TransferInput,
 ) -> CommandResult<TransferResultDto> {
-    state.require_capability(Capability::FileWrite)?;
+    state.require_permission(Permission::TransferFiles)?;
     let manager = connection(&state)?;
 
     let source = PathPolicy::unconfined()
@@ -392,7 +392,7 @@ pub async fn download_file(
     state: tauri::State<'_, Arc<AppState>>,
     input: TransferInput,
 ) -> CommandResult<TransferResultDto> {
-    state.require_capability(Capability::FileRead)?;
+    state.require_permission(Permission::TransferFiles)?;
     let manager = connection(&state)?;
 
     let destination = PathPolicy::unconfined()

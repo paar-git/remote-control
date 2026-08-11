@@ -17,9 +17,8 @@
 //!   updates it, but only for a device whose identity fingerprint still matches.
 
 use rc_protocol::DeviceId;
-use rc_security::Fingerprint;
 use rc_security::error::SecurityError;
-use rc_security::permissions::{AuthorizationContext, Capability, Role};
+use rc_security::{Fingerprint, Permission, PermissionSet};
 
 use crate::error::{Result, StorageError};
 use crate::models::PeerRoleRow;
@@ -43,10 +42,8 @@ pub struct TrustedDevice {
     pub certificate_fingerprint: Fingerprint,
     /// Certificate generation counter.
     pub certificate_version: u32,
-    /// Permission role granted.
-    pub role: Role,
-    /// Capabilities granted at pairing time.
-    pub granted_capabilities: Vec<Capability>,
+    /// Permissions granted at pairing time.
+    pub granted_permissions: PermissionSet,
     /// When pairing completed.
     pub paired_at_ms: i64,
     /// Last successful mutual authentication.
@@ -75,27 +72,22 @@ pub struct TrustedDevice {
 }
 
 impl TrustedDevice {
-    /// The authorization context for this device.
+    /// The permissions this device may currently exercise.
     ///
-    /// A revoked device yields a context that grants nothing, regardless of its role.
+    /// A revoked device holds none, regardless of what was granted at pairing.
     #[must_use]
-    pub fn authorization(&self) -> AuthorizationContext {
+    pub const fn permissions(&self) -> PermissionSet {
         if self.revoked {
-            AuthorizationContext::revoked(self.role)
+            PermissionSet::NONE
         } else {
-            AuthorizationContext::new(self.role)
+            self.granted_permissions
         }
     }
 
-    /// Whether this device currently holds `capability`.
-    ///
-    /// Requires *both* that the role grants it and that it was granted at pairing
-    /// time, so widening a role later cannot retroactively widen an existing device.
+    /// Whether this device currently holds `permission`.
     #[must_use]
-    pub fn holds(&self, capability: Capability) -> bool {
-        !self.revoked
-            && self.role.grants(capability)
-            && self.granted_capabilities.contains(&capability)
+    pub const fn holds(&self, permission: Permission) -> bool {
+        !self.revoked && self.granted_permissions.contains(permission)
     }
 }
 
@@ -141,8 +133,7 @@ impl TrustRepository {
         identity_public_key: &[u8; 32],
         identity_fingerprint: Fingerprint,
         certificate_fingerprint: Fingerprint,
-        role: Role,
-        capabilities: &[Capability],
+        permissions: PermissionSet,
         transcript_digest: Option<&str>,
         now_ms: i64,
     ) -> Result<()> {
@@ -154,9 +145,9 @@ impl TrustRepository {
             return Err(StorageError::Conflict);
         }
 
-        let granted = capabilities
+        let granted = permissions
             .iter()
-            .map(|c| c.name())
+            .map(Permission::name)
             .collect::<Vec<_>>()
             .join(",");
 
@@ -175,7 +166,7 @@ impl TrustRepository {
         .bind(certificate_fingerprint.to_hex())
         .bind(hex::encode(identity_public_key))
         .bind(identity_fingerprint.to_hex())
-        .bind(role.name())
+        .bind(permissions.bits().to_string())
         .bind(granted)
         .bind(now_ms)
         .bind(transcript_digest)
@@ -346,7 +337,7 @@ impl TrustRepository {
     pub async fn authorize(
         &self,
         presented: PresentedIdentity,
-    ) -> Result<std::result::Result<(TrustedDevice, AuthorizationContext), SecurityError>> {
+    ) -> Result<std::result::Result<(TrustedDevice, PermissionSet), SecurityError>> {
         let Some(device) = self
             .find_by_identity(presented.identity_fingerprint)
             .await?
@@ -362,8 +353,8 @@ impl TrustRepository {
             return Ok(Err(SecurityError::DeviceRevoked));
         }
 
-        let context = device.authorization();
-        Ok(Ok((device, context)))
+        let permissions = device.permissions();
+        Ok(Ok((device, permissions)))
     }
 
     /// Record a successful authentication.
@@ -553,11 +544,33 @@ impl TryFrom<TrustedDeviceRaw> for TrustedDevice {
                 column: "peer_role",
             })?;
 
-        // An unrecognised role fails closed rather than defaulting to something
+        // An unrecognised bit fails closed rather than defaulting to something
         // permissive.
-        let role = Role::from_name(&raw.permission_role).ok_or(StorageError::MalformedColumn {
-            column: "permission_role",
-        })?;
+        let bits: u8 = raw
+            .permission_role
+            .parse()
+            .map_err(|_| StorageError::MalformedColumn {
+                column: "permission_role",
+            })?;
+        let granted_permissions =
+            PermissionSet::from_bits(bits).ok_or(StorageError::MalformedColumn {
+                column: "permission_role",
+            })?;
+
+        // Cross-checked against the human-readable mirror written alongside it: the two
+        // must always agree, and a mismatch — a tampered or half-written row — fails
+        // closed rather than picking one arbitrarily.
+        let mirrored = raw
+            .granted_capabilities
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .filter_map(|name| Permission::ALL.into_iter().find(|p| p.name() == name))
+            .fold(PermissionSet::NONE, PermissionSet::with);
+        if mirrored != granted_permissions {
+            return Err(StorageError::MalformedColumn {
+                column: "granted_capabilities",
+            });
+        }
 
         let identity_fingerprint =
             raw.identity_fingerprint
@@ -584,16 +597,6 @@ impl TryFrom<TrustedDeviceRaw> for TrustedDevice {
                     column: "identity_public_key",
                 })?;
 
-        // Unknown capability names are dropped rather than rejected: a database
-        // written by a newer build must still be readable by an older one, and
-        // dropping an unknown capability fails closed.
-        let granted_capabilities = raw
-            .granted_capabilities
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .filter_map(|name| Capability::all().iter().copied().find(|c| c.name() == name))
-            .collect();
-
         Ok(Self {
             device_id,
             peer_role,
@@ -603,8 +606,7 @@ impl TryFrom<TrustedDeviceRaw> for TrustedDevice {
             identity_fingerprint,
             certificate_fingerprint,
             certificate_version: u32::try_from(raw.certificate_version).unwrap_or(1),
-            role,
-            granted_capabilities,
+            granted_permissions,
             paired_at_ms: raw.paired_at_ms,
             last_authenticated_at_ms: raw.last_authenticated_at_ms,
             revoked: raw.revoked != 0,

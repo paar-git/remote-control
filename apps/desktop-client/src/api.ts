@@ -93,15 +93,15 @@ export function ownerLogout(): Promise<null> {
 /* Trusted devices                                                            */
 /* -------------------------------------------------------------------------- */
 
-/** Permission roles, mirroring the Rust `Role`. */
-export const roleSchema = z.enum(['owner', 'view_only', 'operator']);
-export type DeviceRole = z.infer<typeof roleSchema>;
+/** Permissions a device may hold, mirroring the Rust `Permission`. */
+export const permissionSchema = z.enum(['control_input', 'transfer_files', 'view_metrics']);
+export type Permission = z.infer<typeof permissionSchema>;
 
-/** Human labels for roles. */
-export const ROLE_LABELS: Record<DeviceRole, string> = {
-  owner: 'Owner',
-  view_only: 'View only',
-  operator: 'Operator',
+/** Human labels for permissions. */
+export const PERMISSION_LABELS: Record<Permission, string> = {
+  control_input: 'Control input',
+  transfer_files: 'Transfer files',
+  view_metrics: 'View metrics',
 };
 
 /**
@@ -117,8 +117,7 @@ export const trustedDeviceSchema = z.object({
   hostname: untrustedText(253),
   identityFingerprint: fingerprintSchema,
   certificateFingerprint: fingerprintSchema,
-  role: roleSchema,
-  capabilities: z.array(z.string()),
+  permissions: z.array(permissionSchema),
   pairedAtMs: z.number().int(),
   lastAuthenticatedAtMs: z.number().int().nullable(),
   revoked: z.boolean(),

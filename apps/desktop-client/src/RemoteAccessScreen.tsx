@@ -15,7 +15,7 @@ import { MonitorSmartphone, Pencil, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import {
-  ROLE_LABELS,
+  PERMISSION_LABELS,
   type ConnectionState,
   type TrustedDevice,
   connectToServer,
@@ -406,7 +406,9 @@ function DeviceRow({
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center gap-2">
             <span className="truncate text-[15px] font-medium">{device.displayName}</span>
-            <Badge>{ROLE_LABELS[device.role]}</Badge>
+            {device.permissions.map((permission) => (
+              <Badge key={permission}>{PERMISSION_LABELS[permission]}</Badge>
+            ))}
           </span>
           <span className="mt-0.5 flex items-center gap-1.5 text-xs text-(--color-text-secondary)">
             <StatusDot tone={live ? 'ready' : busy ? 'busy' : 'idle'} />

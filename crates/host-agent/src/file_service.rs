@@ -1,14 +1,11 @@
 //! Serving the file channel for one authenticated connection.
 //!
-//! # Two authorization checks, not one
+//! # One authorization check
 //!
-//! Reading needs [`Capability::FileRead`]; anything that changes the filesystem needs
-//! [`Capability::FileWrite`]. Both are checked **per message** against the live session
-//! rather than once when the channel opens, so a device revoked mid-connection stops
-//! being served immediately.
-//!
-//! Splitting read from write is what makes a View Only device useful: it can browse and
-//! download without being able to alter anything.
+//! Every file operation, read or write, needs [`Permission::TransferFiles`]. It is
+//! checked **per message** against the live session rather than once when the channel
+//! opens, so a device whose permissions change mid-connection stops being served
+//! immediately.
 //!
 //! # Every path is resolved before it is touched
 //!
@@ -32,7 +29,7 @@ use rc_file_transfer::{
 use rc_protocol::TransferId;
 use rc_protocol::control::ErrorCode;
 use rc_protocol::files::{ConflictPolicy, FileAgentMessage, FileClientMessage};
-use rc_security::permissions::{AuthorizationContext, Capability};
+use rc_security::{Permission, PermissionSet};
 use rc_storage::audit::{AuditCategory, AuditEvent, AuditResult, actions};
 use rc_transport::{ChannelReader, ChannelWriter, TransportError};
 use tokio::sync::Mutex;
@@ -47,7 +44,7 @@ pub struct FileService {
     transfers: Arc<TransferRegistry>,
     /// Shared so a download pump and the message loop can both write.
     writer: Arc<Mutex<ChannelWriter>>,
-    authorization: AuthorizationContext,
+    authorization: PermissionSet,
     database: rc_storage::Database,
     device_id: rc_protocol::DeviceId,
     session_id: rc_protocol::SessionId,
@@ -64,7 +61,7 @@ impl FileService {
         writer: ChannelWriter,
         policy: PathPolicy,
         max_transfer_bytes: u64,
-        authorization: AuthorizationContext,
+        authorization: PermissionSet,
         database: rc_storage::Database,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
@@ -139,14 +136,14 @@ impl FileService {
                 path,
                 include_hidden,
             } => {
-                if self.refuse_without(Capability::FileRead).await {
+                if self.refuse_without().await {
                     return;
                 }
                 self.list(&path, include_hidden).await;
             }
 
             FileClientMessage::Stat { path } => {
-                if self.refuse_without(Capability::FileRead).await {
+                if self.refuse_without().await {
                     return;
                 }
                 match self.resolve(&path) {
@@ -169,7 +166,7 @@ impl FileService {
                 offset,
                 length,
             } => {
-                if self.refuse_without(Capability::FileRead).await {
+                if self.refuse_without().await {
                     return;
                 }
                 match self
@@ -189,7 +186,7 @@ impl FileService {
                 source,
                 start_offset,
             } => {
-                if self.refuse_without(Capability::FileRead).await {
+                if self.refuse_without().await {
                     return;
                 }
                 self.download(transfer_id, &source, start_offset).await;
@@ -210,7 +207,7 @@ impl FileService {
     async fn handle_write(&self, message: FileClientMessage) {
         match message {
             FileClientMessage::CreateDirectory { path } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 let outcome = self.resolve(&path).and_then(|resolved| {
@@ -221,14 +218,14 @@ impl FileService {
             }
 
             FileClientMessage::Rename { from, to, conflict } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 self.rename(&from, &to, conflict).await;
             }
 
             FileClientMessage::Copy { from, to, conflict } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 self.copy(&from, &to, conflict).await;
@@ -239,7 +236,7 @@ impl FileService {
                 permanent,
                 recursive,
             } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 self.delete(&path, permanent, recursive).await;
@@ -252,7 +249,7 @@ impl FileService {
                 checksum,
                 conflict,
             } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 self.upload_begin(transfer_id, &destination, total_bytes, checksum, conflict)
@@ -264,7 +261,7 @@ impl FileService {
                 offset,
                 data,
             } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 // The bytes are never logged: file contents are not something the audit
@@ -275,7 +272,7 @@ impl FileService {
             }
 
             FileClientMessage::UploadEnd { transfer_id } => {
-                if self.refuse_without(Capability::FileWrite).await {
+                if self.refuse_without().await {
                     return;
                 }
                 match self.transfers.finish(transfer_id) {
@@ -514,18 +511,16 @@ impl FileService {
         self.policy.resolve(raw)
     }
 
-    /// Refuse the message when the session lacks `capability`. Returns whether it did.
-    async fn refuse_without(&self, capability: Capability) -> bool {
-        if self.authorization.require(capability).is_ok() {
+    /// Refuse the message when the session lacks [`Permission::TransferFiles`]. Returns
+    /// whether it did.
+    async fn refuse_without(&self) -> bool {
+        if self.authorization.contains(Permission::TransferFiles) {
             return false;
         }
 
         self.send_error(
             ErrorCode::PermissionDenied,
-            match capability {
-                Capability::FileWrite => "this device may read files but not change them",
-                _ => "this device is not permitted to browse files on this server",
-            },
+            "this device is not permitted to transfer files on this server",
         )
         .await;
         true
@@ -615,7 +610,8 @@ impl FileService {
     }
 }
 
-/// Whether a message only reads, and so needs [`Capability::FileRead`] alone.
+/// Whether a message only reads. Read and write both need
+/// [`Permission::TransferFiles`], but the split still decides routing.
 ///
 /// Written as an exhaustive-by-listing match rather than a negation: a message added
 /// later falls through to the write half, which is the safe side to default to. A new
@@ -692,32 +688,18 @@ fn partial_resume_point(
 
 #[cfg(test)]
 mod tests {
-    use rc_security::Role;
-
     use super::*;
 
     #[test]
-    fn reading_and_writing_are_separate_capabilities() {
-        // What makes View Only useful: browse and download, but change nothing.
-        let view_only = AuthorizationContext::new(Role::ViewOnly);
-
-        assert!(view_only.require(Capability::FileRead).is_ok());
-        assert!(view_only.require(Capability::FileWrite).is_err());
+    fn transfer_files_grants_both_reading_and_writing() {
+        let granted = PermissionSet::NONE.with(Permission::TransferFiles);
+        assert!(granted.contains(Permission::TransferFiles));
     }
 
     #[test]
-    fn an_operator_may_write_and_a_revoked_device_may_not_even_read() {
-        assert!(
-            AuthorizationContext::new(Role::Operator)
-                .require(Capability::FileWrite)
-                .is_ok()
-        );
-        assert!(
-            AuthorizationContext::revoked(Role::Owner)
-                .require(Capability::FileRead)
-                .is_err(),
-            "revocation must override the role entirely"
-        );
+    fn a_session_without_the_permission_holds_neither() {
+        let denied = PermissionSet::NONE;
+        assert!(!denied.contains(Permission::TransferFiles));
     }
 
     #[test]

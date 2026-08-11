@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use rc_security::permissions::Capability;
+use rc_security::Permission;
 use rc_storage::audit::{AuditCategory, AuditEvent, AuditResult, actions};
 use rc_storage::models::PeerRoleRow;
 use serde::{Deserialize, Serialize};
@@ -111,13 +111,13 @@ impl CommandError {
         Self::new("locked", "Sign in to continue.")
     }
 
-    /// The session exists but lacks the required capability.
-    pub(crate) fn permission_denied(capability: Capability) -> Self {
+    /// The session exists but lacks the required permission.
+    pub(crate) fn permission_denied(permission: Permission) -> Self {
         Self::new(
             "permission_denied",
             format!(
                 "This account is not permitted to {}.",
-                capability.name().replace('_', " ")
+                permission.name().replace('_', " ")
             ),
         )
     }
@@ -171,10 +171,8 @@ pub struct TrustedDeviceDto {
     pub identity_fingerprint: String,
     /// Current certificate fingerprint, lowercase hex.
     pub certificate_fingerprint: String,
-    /// Permission role name.
-    pub role: String,
-    /// Capability names granted at pairing time.
-    pub capabilities: Vec<String>,
+    /// Permission names granted at pairing time.
+    pub permissions: Vec<String>,
     /// When pairing completed.
     pub paired_at_ms: i64,
     /// Last successful mutual authentication, if any.
@@ -193,11 +191,10 @@ impl From<rc_storage::TrustedDevice> for TrustedDeviceDto {
             hostname: device.hostname,
             identity_fingerprint: device.identity_fingerprint.to_hex(),
             certificate_fingerprint: device.certificate_fingerprint.to_hex(),
-            role: device.role.name().to_string(),
-            capabilities: device
-                .granted_capabilities
+            permissions: device
+                .granted_permissions
                 .iter()
-                .map(|c| c.name().to_string())
+                .map(|p| p.name().to_string())
                 .collect(),
             paired_at_ms: device.paired_at_ms,
             last_authenticated_at_ms: device.last_authenticated_at_ms,
@@ -360,7 +357,7 @@ pub async fn owner_login(
                 *session = Some(crate::OwnerSession {
                     account_id: authenticated.account_id.clone(),
                     username: authenticated.username.clone(),
-                    role: authenticated.role,
+                    permissions: authenticated.permissions,
                 });
             }
 
@@ -433,7 +430,7 @@ pub fn owner_logout(state: tauri::State<'_, Arc<AppState>>) -> CommandResult<()>
 pub async fn list_trusted_devices(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<Vec<TrustedDeviceDto>> {
-    state.require_capability(Capability::TrustedDeviceManagement)?;
+    state.require_unlocked()?;
 
     let trust = state
         .trust
@@ -457,7 +454,7 @@ pub async fn rename_trusted_device(
     device_id: String,
     new_name: String,
 ) -> CommandResult<()> {
-    state.require_capability(Capability::TrustedDeviceManagement)?;
+    state.require_unlocked()?;
 
     let trust = state
         .trust
@@ -504,7 +501,7 @@ pub async fn revoke_trusted_device(
     state: tauri::State<'_, Arc<AppState>>,
     device_id: String,
 ) -> CommandResult<()> {
-    state.require_capability(Capability::TrustedDeviceManagement)?;
+    state.require_unlocked()?;
 
     let trust = state
         .trust

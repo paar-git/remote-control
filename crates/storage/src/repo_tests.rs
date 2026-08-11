@@ -7,8 +7,7 @@ use rc_security::clock::{Clock, OsRandom, TestClock};
 use rc_security::error::SecurityError;
 use rc_security::identity::derive_device_id;
 use rc_security::password::HashingPolicy;
-use rc_security::permissions::{Capability, Role};
-use rc_security::{DeviceIdentity, Fingerprint};
+use rc_security::{DeviceIdentity, Fingerprint, Permission, PermissionSet};
 
 use crate::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
 use crate::models::PeerRoleRow;
@@ -47,7 +46,7 @@ impl Peer {
 async fn trust_peer(
     repo: &TrustRepository,
     peer: &Peer,
-    role: Role,
+    permissions: PermissionSet,
     now_ms: i64,
 ) -> crate::Result<()> {
     let public = peer.identity.public();
@@ -59,8 +58,7 @@ async fn trust_peer(
         &public.identity_public_key,
         public.identity_fingerprint,
         public.certificate_fingerprint,
-        role,
-        &role.capabilities(),
+        permissions,
         Some("abc123"),
         now_ms,
     )
@@ -78,7 +76,7 @@ async fn a_paired_device_is_stored_and_authorised() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -86,9 +84,9 @@ async fn a_paired_device_is_stored_and_authorised() {
     let (device, context) = outcome.expect("a freshly paired device must be authorised");
 
     assert_eq!(device.device_id, peer.identity.device_id());
-    assert_eq!(device.role, Role::Owner);
-    assert!(context.is_active());
-    assert!(context.allows(Capability::Terminal));
+    assert_eq!(device.granted_permissions, PermissionSet::ALL);
+    assert_eq!(context, PermissionSet::ALL);
+    assert!(context.contains(Permission::ControlInput));
 }
 
 #[tokio::test]
@@ -103,7 +101,7 @@ async fn trust_survives_a_process_restart() {
         trust_peer(
             &TrustRepository::new(&db),
             &peer,
-            Role::Owner,
+            PermissionSet::ALL,
             clock.now_ms(),
         )
         .await
@@ -127,7 +125,7 @@ async fn revocation_takes_effect_immediately() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
     assert!(repo.authorize(peer.presented()).await.unwrap().is_ok());
@@ -142,13 +140,13 @@ async fn revocation_takes_effect_immediately() {
 }
 
 #[tokio::test]
-async fn a_revoked_device_grants_no_capabilities() {
+async fn a_revoked_device_grants_no_permissions() {
     let db = database().await;
     let repo = TrustRepository::new(&db);
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
     repo.revoke(peer.identity.device_id(), clock.now_ms())
@@ -157,13 +155,13 @@ async fn a_revoked_device_grants_no_capabilities() {
 
     let device = repo.find(peer.identity.device_id()).await.unwrap().unwrap();
     assert!(device.revoked);
-    for capability in Capability::all() {
+    for permission in Permission::ALL {
         assert!(
-            !device.holds(*capability),
-            "revoked device still holds {capability:?}"
+            !device.holds(permission),
+            "revoked device still holds {permission:?}"
         );
     }
-    assert!(!device.authorization().is_active());
+    assert!(device.permissions().is_empty());
 }
 
 #[tokio::test]
@@ -173,7 +171,7 @@ async fn revocation_is_idempotent_and_preserves_the_original_timestamp() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
     repo.revoke(peer.identity.device_id(), 1000).await.unwrap();
@@ -194,7 +192,7 @@ async fn revoked_devices_are_retained_for_the_audit_trail() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
     repo.revoke(peer.identity.device_id(), clock.now_ms())
@@ -228,7 +226,7 @@ async fn a_changed_identity_fingerprint_is_never_silently_accepted() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -251,7 +249,7 @@ async fn a_known_identity_claiming_the_wrong_device_id_is_rejected() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -273,7 +271,7 @@ async fn the_same_identity_cannot_register_under_two_device_ids() {
     let peer = Peer::new("main-pc", &clock);
     let public = peer.identity.public();
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -286,8 +284,7 @@ async fn the_same_identity_cannot_register_under_two_device_ids() {
             &public.identity_public_key,
             public.identity_fingerprint, // but the same identity
             public.certificate_fingerprint,
-            Role::Owner,
-            &Role::Owner.capabilities(),
+            PermissionSet::ALL,
             None,
             clock.now_ms(),
         )
@@ -304,7 +301,7 @@ async fn certificate_rotation_keeps_the_same_trusted_device() {
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
 
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -362,7 +359,7 @@ async fn renaming_validates_the_new_name() {
     let repo = TrustRepository::new(&db);
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -413,7 +410,7 @@ async fn recording_authentication_updates_the_timestamp() {
     let repo = TrustRepository::new(&db);
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 
@@ -445,7 +442,7 @@ async fn a_revoked_device_cannot_record_an_authentication() {
     let repo = TrustRepository::new(&db);
     let clock = TestClock::default();
     let peer = Peer::new("main-pc", &clock);
-    trust_peer(&repo, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&repo, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
     repo.revoke(peer.identity.device_id(), clock.now_ms())
@@ -460,21 +457,21 @@ async fn a_revoked_device_cannot_record_an_authentication() {
 }
 
 #[tokio::test]
-async fn granted_capabilities_are_recorded_and_bound() {
+async fn granted_permissions_are_recorded_and_bound() {
     let db = database().await;
     let repo = TrustRepository::new(&db);
     let clock = TestClock::default();
     let peer = Peer::new("viewer", &clock);
 
-    trust_peer(&repo, &peer, Role::ViewOnly, clock.now_ms())
+    let granted = PermissionSet::NONE.with(Permission::ViewMetrics);
+    trust_peer(&repo, &peer, granted, clock.now_ms())
         .await
         .unwrap();
 
     let device = repo.find(peer.identity.device_id()).await.unwrap().unwrap();
-    assert!(device.holds(Capability::RemoteDesktopView));
-    assert!(device.holds(Capability::FileRead));
-    assert!(!device.holds(Capability::Terminal));
-    assert!(!device.holds(Capability::PowerControl));
+    assert!(device.holds(Permission::ViewMetrics));
+    assert!(!device.holds(Permission::ControlInput));
+    assert!(!device.holds(Permission::TransferFiles));
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +506,7 @@ async fn the_owner_can_authenticate() {
         .expect("correct credentials must authenticate");
 
     assert_eq!(result.username, "owner");
-    assert_eq!(result.role, Role::Owner);
+    assert_eq!(result.permissions, PermissionSet::ALL);
 }
 
 #[tokio::test]
@@ -991,7 +988,7 @@ async fn a_full_pairing_produces_a_correlated_audit_trail() {
         .await
         .unwrap();
 
-    trust_peer(&trust, &peer, Role::Owner, clock.now_ms())
+    trust_peer(&trust, &peer, PermissionSet::ALL, clock.now_ms())
         .await
         .unwrap();
 

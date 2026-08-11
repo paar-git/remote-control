@@ -20,10 +20,10 @@
 //! There is no default password and no way to create an account without supplying
 //! one.
 
+use rc_security::PermissionSet;
 use rc_security::clock::{Clock, RandomSource};
 use rc_security::error::SecurityError;
 use rc_security::password::{self, HashingPolicy, OwnerCredential};
-use rc_security::permissions::Role;
 use rc_security::throttle::Throttle;
 
 use crate::error::{Result, StorageError};
@@ -39,8 +39,9 @@ pub struct AuthenticatedOwner {
     pub account_id: String,
     /// Login name.
     pub username: String,
-    /// Role. Always [`Role::Owner`] in v1.
-    pub role: Role,
+    /// Permissions held. Always [`PermissionSet::ALL`] in v1: there is exactly one
+    /// owner account and it holds everything.
+    pub permissions: PermissionSet,
     /// Whether the stored password hash was upgraded during this login.
     pub password_hash_upgraded: bool,
 }
@@ -219,13 +220,16 @@ impl OwnerRepository {
 
         self.record_login(&account.id, clock).await?;
 
-        let role = Role::from_name(&account.role)
-            .ok_or(StorageError::MalformedColumn { column: "role" })?;
+        // There is exactly one role in v1's stored data — "owner" — and an
+        // unrecognised value fails closed rather than defaulting to full access.
+        if account.role != "owner" {
+            return Err(StorageError::MalformedColumn { column: "role" });
+        }
 
         Ok(Ok(AuthenticatedOwner {
             account_id: account.id,
             username: account.username,
-            role,
+            permissions: PermissionSet::ALL,
             password_hash_upgraded: upgraded,
         }))
     }

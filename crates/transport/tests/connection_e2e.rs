@@ -45,7 +45,6 @@ fn capabilities() -> Capabilities {
         remote_desktop: true,
         file_transfer: true,
         monitoring: true,
-        power_control: true,
         display_count: 1,
         ..Capabilities::default()
     }

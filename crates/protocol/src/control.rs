@@ -66,10 +66,6 @@ pub struct Capabilities {
     pub monitoring: bool,
     /// Process enumeration and termination are available.
     pub process_management: bool,
-    /// Service control is available.
-    pub service_management: bool,
-    /// Power actions are available.
-    pub power_control: bool,
     /// Clipboard can be synchronised.
     pub clipboard: bool,
     /// Wake-on-LAN is configured.
@@ -394,7 +390,7 @@ mod tests {
     fn capabilities_default_to_everything_off() {
         let caps = Capabilities::default();
         assert!(!caps.remote_desktop);
-        assert!(!caps.power_control);
+        assert!(!caps.clipboard);
         assert_eq!(caps.display_count, 0);
     }
 
@@ -427,6 +423,6 @@ mod tests {
         // A newer peer omitting fields an older peer expects must not fail to parse.
         let caps: Capabilities = serde_json::from_str(r#"{"remote_desktop":true}"#).unwrap();
         assert!(caps.remote_desktop);
-        assert!(!caps.power_control);
+        assert!(!caps.clipboard);
     }
 }

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rc_protocol::{DeviceId, SessionId};
-use rc_security::Role;
+use rc_security::PermissionSet;
 
 /// A session as the operator sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub struct LiveSession {
     /// Which trusted device is connected.
     pub device_id: DeviceId,
     /// What that device is permitted to do.
-    pub role: Role,
+    pub permissions: PermissionSet,
     /// Peer address, host only.
     pub source: String,
     /// When the session was admitted, milliseconds since the Unix epoch.
@@ -168,7 +168,7 @@ impl SessionSlot {
         &self,
         session_id: SessionId,
         device_id: DeviceId,
-        role: Role,
+        permissions: PermissionSet,
         source: SocketAddr,
         now_ms: i64,
     ) {
@@ -178,7 +178,7 @@ impl SessionSlot {
         self.registry.insert(LiveSession {
             session_id,
             device_id,
-            role,
+            permissions,
             source: source.ip().to_string(),
             started_at_ms: now_ms,
             last_active_ms: now_ms,
@@ -256,7 +256,7 @@ mod tests {
         slot.activate(
             session_id,
             DeviceId::generate(),
-            Role::Operator,
+            PermissionSet::ALL,
             address(),
             1_000,
         );
@@ -283,7 +283,7 @@ mod tests {
         slot.activate(
             session_id,
             DeviceId::generate(),
-            Role::Owner,
+            PermissionSet::ALL,
             address(),
             1_000,
         );
@@ -303,7 +303,7 @@ mod tests {
         slot.activate(
             SessionId::generate(),
             DeviceId::generate(),
-            Role::Owner,
+            PermissionSet::ALL,
             address(),
             1,
         );
@@ -325,8 +325,20 @@ mod tests {
 
         let old_id = SessionId::generate();
         let new_id = SessionId::generate();
-        older.activate(old_id, DeviceId::generate(), Role::Owner, address(), 1_000);
-        newer.activate(new_id, DeviceId::generate(), Role::Owner, address(), 9_000);
+        older.activate(
+            old_id,
+            DeviceId::generate(),
+            PermissionSet::ALL,
+            address(),
+            1_000,
+        );
+        newer.activate(
+            new_id,
+            DeviceId::generate(),
+            PermissionSet::ALL,
+            address(),
+            9_000,
+        );
 
         let listed = registry.list();
         assert_eq!(listed[0].session_id, new_id);

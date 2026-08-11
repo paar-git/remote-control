@@ -9,7 +9,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rc_security::permissions::Capability;
 use rc_updater::database::download_key;
 use rc_updater::disk::{check_disk_space, required_space};
 use rc_updater::download::{DownloadConfig, DownloadManager, create_record};
@@ -280,7 +279,7 @@ pub async fn check_for_updates(
     request: CheckUpdateRequest,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<UpdateStatusDto> {
-    state.require_capability(Capability::SettingsManagement)?;
+    state.require_unlocked()?;
     let _check_guard = state.updater.check_lock.lock().await;
     let manifest_url = resolve_manifest_url(&state.updater, request.manifest_url).await;
     {
@@ -366,7 +365,7 @@ pub async fn check_for_updates(
 pub async fn download_update(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<UpdateStatusDto> {
-    state.require_capability(Capability::SettingsManagement)?;
+    state.require_unlocked()?;
     // Validate before moving the state machine: an early return here used to
     // strand the runtime in `PreparingDownload` with no way back.
     let selected = {
@@ -507,7 +506,7 @@ async fn watch_download(
 pub async fn pause_update_download(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<UpdateStatusDto> {
-    state.require_capability(Capability::SettingsManagement)?;
+    state.require_unlocked()?;
     let key = active_key(&state.updater).await?;
     state
         .updater
@@ -531,7 +530,7 @@ pub async fn pause_update_download(
 pub async fn resume_update_download(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<UpdateStatusDto> {
-    state.require_capability(Capability::SettingsManagement)?;
+    state.require_unlocked()?;
     let key = active_key(&state.updater).await?;
     let selected = selected_artifact(&state.updater).await?;
     let handle = state
@@ -558,7 +557,7 @@ pub async fn cancel_update_download(
     delete_partial: bool,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<UpdateStatusDto> {
-    state.require_capability(Capability::SettingsManagement)?;
+    state.require_unlocked()?;
     let key = active_key(&state.updater).await?;
     state
         .updater
@@ -596,7 +595,7 @@ pub async fn install_update(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<InstallResultDto> {
-    state.require_capability(Capability::SettingsManagement)?;
+    state.require_unlocked()?;
     let _install_guard = state.updater.install_lock.lock().await;
     let (path, selected, version) = {
         let mut inner = state.updater.inner.lock().await;

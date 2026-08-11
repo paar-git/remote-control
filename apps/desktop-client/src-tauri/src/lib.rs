@@ -20,8 +20,7 @@ mod update_commands;
 use std::sync::{Arc, Mutex};
 
 use rc_platform::{AppPaths, HostInfo};
-use rc_security::permissions::{AuthorizationContext, Capability, Role};
-use rc_security::{Clock, DeviceIdentity, SystemClock};
+use rc_security::{Clock, DeviceIdentity, Permission, PermissionSet, SystemClock};
 use rc_storage::audit::AuditEvent;
 use serde::Serialize;
 
@@ -35,8 +34,9 @@ pub struct OwnerSession {
     pub account_id: String,
     /// Login name.
     pub username: String,
-    /// Role. Always [`Role::Owner`] in v1.
-    pub role: Role,
+    /// Permissions held. Always [`PermissionSet::ALL`] in v1: there is exactly one
+    /// owner account and it holds everything.
+    pub permissions: PermissionSet,
 }
 
 /// Shared backend state, created once during setup.
@@ -77,28 +77,39 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The authorization context for the current session.
+    /// The permissions held by the current session.
     ///
     /// Returns `None` when the application is locked. Note that this is *application*
     /// authorization only: it never implies operating-system privilege, which stays
     /// behind the agent's allowlist.
     #[must_use]
-    pub fn authorization(&self) -> Option<AuthorizationContext> {
+    pub fn authorization(&self) -> Option<PermissionSet> {
         let session = self.session.lock().ok()?;
-        session.as_ref().map(|s| AuthorizationContext::new(s.role))
+        session.as_ref().map(|s| s.permissions)
     }
 
-    /// Enforce that the current session holds `capability`.
+    /// Enforce that the current session holds `permission`.
     ///
-    /// Every capability check goes through here rather than through scattered
-    /// `is_owner` tests, so adding a role means changing the permission table and
-    /// nothing else.
-    fn require_capability(&self, capability: Capability) -> Result<(), commands::CommandError> {
+    /// Every permission check goes through here rather than through scattered
+    /// `is_owner` tests, so widening what a session may do means changing one place.
+    fn require_permission(&self, permission: Permission) -> Result<(), commands::CommandError> {
         match self.authorization() {
             None => Err(commands::CommandError::locked()),
-            Some(context) => context
-                .require(capability)
-                .map_err(|_| commands::CommandError::permission_denied(capability)),
+            Some(granted) if granted.contains(permission) => Ok(()),
+            Some(_) => Err(commands::CommandError::permission_denied(permission)),
+        }
+    }
+
+    /// Enforce that the application is unlocked.
+    ///
+    /// Used for actions that belong to the operator using this application locally —
+    /// trusted-device management, update handling — which are not gated by any of the
+    /// three permissions a remote peer can hold: there is exactly one local owner
+    /// account, and it always holds everything.
+    fn require_unlocked(&self) -> Result<(), commands::CommandError> {
+        match self.authorization() {
+            Some(_) => Ok(()),
+            None => Err(commands::CommandError::locked()),
         }
     }
 

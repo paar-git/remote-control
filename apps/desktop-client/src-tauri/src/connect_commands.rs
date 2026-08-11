@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use rc_security::permissions::Capability;
+use rc_security::Permission;
 use rc_storage::audit::{AuditCategory, AuditEvent, AuditResult, actions};
 
 use crate::AppState;
@@ -32,7 +32,7 @@ pub async fn connect_to_server(
     state: tauri::State<'_, Arc<AppState>>,
     device_id: String,
 ) -> CommandResult<ConnectionState> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
 
     let server = load_saved_server(&state, &device_id).await?;
 
@@ -97,7 +97,7 @@ pub async fn connect_to_server(
 pub async fn disconnect_from_server(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<ConnectionState> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
 
     let manager = state
         .connection
@@ -128,7 +128,7 @@ pub async fn reconnect_to_server(
     state: tauri::State<'_, Arc<AppState>>,
     device_id: String,
 ) -> CommandResult<ConnectionState> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
 
     let server = load_saved_server(&state, &device_id).await?;
     let manager = state
@@ -172,7 +172,7 @@ pub fn connection_state(state: tauri::State<'_, Arc<AppState>>) -> CommandResult
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub async fn ping_server(state: tauri::State<'_, Arc<AppState>>) -> CommandResult<u64> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
 
     let manager = state
         .connection

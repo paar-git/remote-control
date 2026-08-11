@@ -37,8 +37,7 @@ use rc_protocol::control::{
     ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload, ControlResult,
     DisconnectReason, Opening,
 };
-use rc_security::permissions::{AuthorizationContext, Capability};
-use rc_security::{Clock, DeviceIdentity, Fingerprint, SystemClock};
+use rc_security::{Clock, DeviceIdentity, Fingerprint, Permission, PermissionSet, SystemClock};
 use rc_storage::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
 use rc_storage::trust::TrustRepository;
 use rc_transport::{AgentListener, ChannelReader, ChannelWriter, PinPolicy, TransportError};
@@ -263,16 +262,16 @@ impl AgentServer {
         slot.activate(
             session_id,
             device_id,
-            peer.role,
+            peer.permissions,
             remote,
             self.clock.now_ms(),
         );
 
         self.record_session_start(&peer, remote).await;
 
-        // The authorization this connection was admitted with, re-checked on every
+        // The permissions this connection was admitted with, re-checked on every
         // request rather than assumed for the life of the session.
-        let authorization = AuthorizationContext::new(peer.role);
+        let authorization = peer.permissions;
 
         // A metrics subscription is asked for on the control channel and delivered on
         // the metrics channel, so the two need a handle in common. Created here, before
@@ -281,13 +280,8 @@ impl AgentServer {
 
         // Additional channels are served in their own task so a client's requests on
         // one do not block the control channel.
-        let channel_server = self.spawn_channel_server(
-            connection,
-            authorization.clone(),
-            device_id,
-            session_id,
-            subscribed,
-        );
+        let channel_server =
+            self.spawn_channel_server(connection, authorization, device_id, session_id, subscribed);
 
         let reason = self
             .run_session(
@@ -328,7 +322,7 @@ impl AgentServer {
         reader: &mut ChannelReader,
         writer: &mut ChannelWriter,
         slot: &SessionSlot,
-        authorization: &AuthorizationContext,
+        authorization: &PermissionSet,
         subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> DisconnectReason {
         let idle_timeout = self.config.session.idle_timeout_secs;
@@ -379,7 +373,7 @@ impl AgentServer {
     async fn answer(
         &self,
         payload: &ControlRequestPayload,
-        authorization: &AuthorizationContext,
+        authorization: &PermissionSet,
         subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> ControlResult {
         match payload {
@@ -393,10 +387,7 @@ impl AgentServer {
             ControlRequestPayload::SystemSnapshot => {
                 // Checked against this connection's authorization on every request, not
                 // once at connect: a device revoked mid-session must stop being answered.
-                if authorization
-                    .require(Capability::RemoteDesktopView)
-                    .is_err()
-                {
+                if !authorization.contains(Permission::ViewMetrics) {
                     return denied("view this server's status");
                 }
 
@@ -409,10 +400,7 @@ impl AgentServer {
             }
 
             ControlRequestPayload::HostInfo => {
-                if authorization
-                    .require(Capability::RemoteDesktopView)
-                    .is_err()
-                {
+                if !authorization.contains(Permission::ViewMetrics) {
                     return denied("view this server's status");
                 }
                 ControlResult::Ok(ControlResponsePayload::HostInfo(Box::new(
@@ -421,10 +409,7 @@ impl AgentServer {
             }
 
             ControlRequestPayload::SubscribeMetrics { interval_ms } => {
-                if authorization
-                    .require(Capability::RemoteDesktopView)
-                    .is_err()
-                {
+                if !authorization.contains(Permission::ViewMetrics) {
                     return denied("view this server's status");
                 }
                 // Clamped rather than honoured: a client asking for 10 ms would cost a
@@ -497,7 +482,7 @@ impl AgentServer {
             )
             .actor_device(peer.device_id)
             .meta("session_id", peer.session_id)
-            .meta("role", peer.role.name())
+            .meta("permissions", permission_names(peer.permissions))
             .meta("source", redact_address(remote))
             .meta("protocol", peer.negotiated_version),
         )
@@ -506,7 +491,7 @@ impl AgentServer {
         tracing::info!(
             device_id = %peer.device_id,
             session_id = %peer.session_id,
-            role = peer.role.name(),
+            permissions = %permission_names(peer.permissions),
             %remote,
             "session started"
         );
@@ -522,7 +507,7 @@ impl AgentServer {
     fn spawn_channel_server(
         self: &Arc<Self>,
         connection: &quinn::Connection,
-        authorization: AuthorizationContext,
+        authorization: PermissionSet,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
         subscribed: tokio::sync::watch::Receiver<Option<u32>>,
@@ -547,7 +532,7 @@ impl AgentServer {
                             writer,
                             server.file_policy(),
                             server.config.features.max_transfer_bytes,
-                            authorization.clone(),
+                            authorization,
                             server.database.clone(),
                             device_id,
                             session_id,
@@ -561,7 +546,7 @@ impl AgentServer {
                     rc_protocol::Channel::Metrics => {
                         let service = crate::metrics_service::MetricsService::new(
                             writer,
-                            authorization.clone(),
+                            authorization,
                             Arc::clone(&server.metrics),
                             Arc::clone(&server.clock),
                             subscribed.clone(),
@@ -748,6 +733,16 @@ fn redact_address(address: SocketAddr) -> String {
     address.ip().to_string()
 }
 
+/// Render a session's granted permissions for logs and audit records, as a
+/// comma-separated list of their stable names.
+fn permission_names(permissions: PermissionSet) -> String {
+    permissions
+        .iter()
+        .map(Permission::name)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,9 +757,9 @@ mod tests {
         Arc::new(AgentServer::new(identity, config(), database))
     }
 
-    /// An owner's authorization, which is what an ordinary session carries.
-    fn owner() -> AuthorizationContext {
-        AuthorizationContext::new(rc_security::Role::Owner)
+    /// Every permission, which is what an ordinary session carries.
+    fn owner() -> PermissionSet {
+        PermissionSet::ALL
     }
 
     /// A session's metrics-subscription handle.
@@ -847,11 +842,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_view_only_device_may_still_read_the_dashboard() {
-        // Watching a server is what View Only is for; refusing it would leave the role
-        // with nothing it could do.
+    async fn a_session_with_only_view_metrics_may_still_read_the_dashboard() {
+        // A session holding only ViewMetrics is what a metrics-only grant is for;
+        // refusing it would leave that permission with nothing it could do.
         let server = server().await;
-        let view_only = AuthorizationContext::new(rc_security::Role::ViewOnly);
+        let view_only = PermissionSet::NONE.with(Permission::ViewMetrics);
 
         let (subscription, _receiver) = subscription();
         let result = server
@@ -868,11 +863,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_revoked_device_is_refused_even_mid_session() {
-        // The check is against the live authorization on every request, so revocation
-        // does not wait for the connection to end.
+    async fn a_session_without_view_metrics_is_refused_even_mid_session() {
+        // The check is against the live permission set on every request, so a
+        // permission lost mid-session does not wait for the connection to end.
         let server = server().await;
-        let revoked = AuthorizationContext::revoked(rc_security::Role::Owner);
+        let revoked = PermissionSet::NONE;
 
         let (subscription, _receiver) = subscription();
         let result = server
@@ -994,7 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_revoked_device_cannot_subscribe_to_metrics() {
+    async fn a_session_without_view_metrics_cannot_subscribe_to_metrics() {
         // Denial must leave the handle untouched: a refused subscription that still
         // armed the pusher would stream readings to a device that was just refused.
         let server = server().await;
@@ -1003,7 +998,7 @@ mod tests {
         let result = server
             .answer(
                 &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
-                &AuthorizationContext::revoked(rc_security::Role::Owner),
+                &PermissionSet::NONE,
                 &subscription,
             )
             .await;

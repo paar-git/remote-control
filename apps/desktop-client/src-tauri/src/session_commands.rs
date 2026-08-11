@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use rc_protocol::control::{ControlRequestPayload, ControlResponsePayload, ControlResult};
-use rc_security::permissions::Capability;
+use rc_security::Permission;
 use serde::Serialize;
 
 use crate::AppState;
@@ -149,7 +149,7 @@ pub struct ServerFactsDto {
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub async fn system_snapshot(state: tauri::State<'_, Arc<AppState>>) -> CommandResult<SnapshotDto> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
     let manager = connection(&state)?;
 
     match manager
@@ -178,7 +178,7 @@ pub async fn system_snapshot(state: tauri::State<'_, Arc<AppState>>) -> CommandR
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub async fn server_facts(state: tauri::State<'_, Arc<AppState>>) -> CommandResult<ServerFactsDto> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
     let manager = connection(&state)?;
 
     match manager
@@ -267,7 +267,7 @@ pub async fn subscribe_metrics(
     state: tauri::State<'_, Arc<AppState>>,
     interval_ms: u32,
 ) -> CommandResult<u32> {
-    state.require_capability(Capability::RemoteDesktopView)?;
+    state.require_permission(Permission::ControlInput)?;
     let manager = connection(&state)?;
 
     manager

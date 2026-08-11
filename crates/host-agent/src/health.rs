@@ -234,7 +234,7 @@ mod tests {
         slot.activate(
             rc_protocol::SessionId::generate(),
             rc_protocol::DeviceId::generate(),
-            rc_security::Role::Owner,
+            rc_security::PermissionSet::ALL,
             "10.0.0.2:5000".parse().unwrap(),
             1,
         );

@@ -60,9 +60,6 @@ pub const DEFAULT_AGENT_PORT: u16 = 47_811;
 /// Default TCP port for the agent's loopback-only health endpoint.
 pub const DEFAULT_AGENT_HEALTH_PORT: u16 = 47_813;
 
-/// Default TCP port the privileged helper listens on, loopback only.
-pub const DEFAULT_PRIVILEGED_PORT: u16 = 47_814;
-
 /// Default TCP port the optional coordination service listens on.
 pub const DEFAULT_COORDINATION_PORT: u16 = 47_812;
 
@@ -115,10 +112,6 @@ mod tests {
         const { assert!(DEFAULT_AGENT_HEALTH_PORT > 1024) }
         const { assert!(DEFAULT_AGENT_HEALTH_PORT != DEFAULT_AGENT_PORT) }
         const { assert!(DEFAULT_AGENT_HEALTH_PORT != DEFAULT_COORDINATION_PORT) }
-        const { assert!(DEFAULT_PRIVILEGED_PORT > 1024) }
-        const { assert!(DEFAULT_PRIVILEGED_PORT != DEFAULT_AGENT_PORT) }
-        const { assert!(DEFAULT_PRIVILEGED_PORT != DEFAULT_AGENT_HEALTH_PORT) }
-        const { assert!(DEFAULT_PRIVILEGED_PORT != DEFAULT_COORDINATION_PORT) }
     }
 
     #[test]

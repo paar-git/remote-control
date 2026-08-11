@@ -898,8 +898,6 @@ pub const fn client_capabilities() -> Capabilities {
         file_transfer: false,
         monitoring: true,
         process_management: false,
-        service_management: false,
-        power_control: false,
         clipboard: false,
         wake_on_lan: false,
         display_count: 0,

@@ -32,5 +32,5 @@ pub use fingerprint::Fingerprint;
 pub use identity::{DeviceIdentity, DeviceIdentityPublic, derive_device_id};
 pub use keystore::Keystore;
 pub use password::{HashingPolicy, OwnerCredential};
-pub use permissions::{AuthorizationContext, Capability, Role};
+pub use permissions::{Permission, PermissionSet};
 pub use throttle::{Throttle, ThrottlePolicy};
