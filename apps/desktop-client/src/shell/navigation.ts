@@ -28,7 +28,6 @@ import {
   MonitorSmartphone,
   Power,
   Settings,
-  SquareTerminal,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -89,21 +88,12 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     label: 'Session tools',
     items: [
       {
-        id: 'terminal',
-        label: 'Terminal',
-        icon: SquareTerminal,
-        description: 'Open a real shell on the computer',
-        availableInPhase: null,
-        shortcut: 'Ctrl+3',
-        needsSession: true,
-      },
-      {
         id: 'files',
         label: 'Files',
         icon: Folder,
         description: 'Browse and transfer files',
         availableInPhase: null,
-        shortcut: 'Ctrl+4',
+        shortcut: 'Ctrl+3',
         needsSession: true,
       },
       {
@@ -112,7 +102,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         icon: Activity,
         description: 'Live CPU, memory, disk and network',
         availableInPhase: null,
-        shortcut: 'Ctrl+5',
+        shortcut: 'Ctrl+4',
         needsSession: true,
       },
       {
@@ -148,7 +138,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         icon: Settings,
         description: 'This computer’s identity, security and details',
         availableInPhase: null,
-        shortcut: 'Ctrl+6',
+        shortcut: 'Ctrl+5',
       },
       {
         id: 'activity',
@@ -163,7 +153,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         icon: DownloadCloud,
         description: 'Check for and install new versions',
         availableInPhase: null,
-        shortcut: 'Ctrl+7',
+        shortcut: 'Ctrl+6',
       },
     ],
   },

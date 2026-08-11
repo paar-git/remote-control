@@ -25,7 +25,6 @@ mod logging;
 mod metrics_service;
 mod server;
 mod sessions;
-mod terminal_service;
 
 use std::path::PathBuf;
 

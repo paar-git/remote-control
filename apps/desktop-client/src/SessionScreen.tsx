@@ -8,7 +8,7 @@
  *
  * # What is real here
  *
- * Disconnect, the round-trip measurement and the three session tools are real operations
+ * Disconnect, the round-trip measurement and the session tools are real operations
  * against the connected computer. The display, clipboard and input controls belong to a
  * remote-desktop pipeline this build does not have — there is no screen capture and no
  * input injection — so they are rendered in their unavailable state with the reason
@@ -25,7 +25,6 @@ import {
   Monitor,
   MonitorOff,
   Activity as PulseIcon,
-  SquareTerminal,
   Unplug,
   X,
 } from 'lucide-react';
@@ -216,13 +215,6 @@ export function SessionScreen({
 
           <PanelGroup label="Tools">
             <PanelAction
-              icon={SquareTerminal}
-              label="Terminal"
-              onSelect={() => {
-                onOpenTool('terminal');
-              }}
-            />
-            <PanelAction
               icon={Folder}
               label="Files"
               onSelect={() => {
@@ -285,14 +277,6 @@ function Viewport({
         <div className="mt-5 flex flex-wrap justify-center gap-2">
           <Button
             variant="primary"
-            icon={SquareTerminal}
-            onClick={() => {
-              onOpenTool('terminal');
-            }}
-          >
-            Open a terminal
-          </Button>
-          <Button
             icon={Folder}
             onClick={() => {
               onOpenTool('files');

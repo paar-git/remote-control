@@ -33,7 +33,6 @@ import MonitoringScreen from './MonitoringScreen';
 import { RemoteAccessScreen } from './RemoteAccessScreen';
 import { RemoteSupportScreen } from './RemoteSupportScreen';
 import { SessionScreen } from './SessionScreen';
-import TerminalScreen from './TerminalScreen';
 import { ThisComputerScreen } from './ThisComputerScreen';
 import UpdateScreen from './UpdateScreen';
 import { isTauriAvailable } from './ipc.js';
@@ -428,8 +427,6 @@ function Section({
       return <MonitoringScreen />;
     case 'updates':
       return <UpdateScreen onToast={onToast} onStatusChange={onUpdateChange} />;
-    case 'terminal':
-      return <TerminalScreen onToast={onToast} />;
     case 'files':
       return <FilesScreen onToast={onToast} />;
     default:

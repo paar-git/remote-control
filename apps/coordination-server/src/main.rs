@@ -5,7 +5,7 @@
 //! This service is **untrusted with respect to session contents**. Its only job is to
 //! help two devices that already trust each other find one another and exchange
 //! connection candidates. It never holds a device private key, never terminates a
-//! session's encryption, and never sees plaintext screen, terminal or file data —
+//! session's encryption, and never sees plaintext screen or file data —
 //! those are protected end-to-end between the client and the agent by mutually
 //! authenticated TLS 1.3 over QUIC, established *through* whatever path this service
 //! helped negotiate.

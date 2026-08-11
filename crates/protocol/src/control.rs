@@ -60,8 +60,6 @@ pub enum PeerRole {
 pub struct Capabilities {
     /// Screen capture and input injection are available.
     pub remote_desktop: bool,
-    /// A real PTY can be spawned.
-    pub terminal: bool,
     /// File browsing and transfer are available.
     pub file_transfer: bool,
     /// System metrics are available.
@@ -409,7 +407,6 @@ mod tests {
     fn capabilities_default_to_everything_off() {
         let caps = Capabilities::default();
         assert!(!caps.remote_desktop);
-        assert!(!caps.terminal);
         assert!(!caps.power_control);
         assert_eq!(caps.display_count, 0);
     }
@@ -458,8 +455,8 @@ mod tests {
     #[test]
     fn capabilities_deserialize_with_missing_fields() {
         // A newer peer omitting fields an older peer expects must not fail to parse.
-        let caps: Capabilities = serde_json::from_str(r#"{"terminal":true}"#).unwrap();
-        assert!(caps.terminal);
-        assert!(!caps.remote_desktop);
+        let caps: Capabilities = serde_json::from_str(r#"{"remote_desktop":true}"#).unwrap();
+        assert!(caps.remote_desktop);
+        assert!(!caps.power_control);
     }
 }

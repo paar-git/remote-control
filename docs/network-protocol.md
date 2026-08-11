@@ -54,7 +54,6 @@ before parsing anything.
 | Channel | Byte | Frame ceiling | Carries |
 |---|---|---|---|
 | Control | 1 | 256 KiB | Handshake, pairing, requests |
-| Terminal | 2 | 512 KiB | PTY input and output |
 | File transfer | 3 | 8 MiB | Directory listings, chunks |
 | Video | 4 | 16 MiB | Encoded frames |
 | Input | 5 | 256 KiB | Mouse and keyboard events |

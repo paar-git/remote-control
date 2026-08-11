@@ -6,7 +6,6 @@ members = [
     "crates/transport",
     "crates/storage",
     "crates/monitoring",
-    "crates/terminal",
     "crates/file-transfer",
     "crates/updater",
     "crates/privileged",
@@ -32,7 +31,6 @@ rc-transport = { path = "crates/transport" }
 rc-platform = { path = "crates/platform" }
 rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }
-rc-terminal = { path = "crates/terminal" }
 rc-file-transfer = { path = "crates/file-transfer" }
 rc-updater = { path = "crates/updater" }
 rc-privileged = { path = "crates/privileged" }

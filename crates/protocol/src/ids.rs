@@ -96,12 +96,6 @@ uuid_newtype!(
 );
 
 uuid_newtype!(
-    /// A single terminal (PTY) session inside a connection.
-    TerminalId,
-    "trm_"
-);
-
-uuid_newtype!(
     /// A single file transfer job, resumable across reconnects.
     TransferId,
     "trf_"
@@ -136,7 +130,6 @@ mod tests {
     fn display_carries_type_prefix() {
         let id = Uuid::nil();
         assert!(DeviceId::from_uuid(id).to_string().starts_with("dev_"));
-        assert!(TerminalId::from_uuid(id).to_string().starts_with("trm_"));
     }
 
     #[test]

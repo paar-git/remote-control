@@ -169,8 +169,6 @@ impl Default for SessionConfig {
 pub struct FeatureConfig {
     /// Allow screen capture and input injection.
     pub remote_desktop: bool,
-    /// Allow PTY sessions.
-    pub terminal: bool,
     /// Allow file browsing and transfer.
     pub file_transfer: bool,
     /// Allow process termination.
@@ -192,7 +190,6 @@ impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
             remote_desktop: true,
-            terminal: true,
             file_transfer: true,
             process_management: true,
             service_management: true,
@@ -690,7 +687,7 @@ mod tests {
         let config = AgentConfig {
             device_name: "home-server".into(),
             features: FeatureConfig {
-                terminal: false,
+                remote_desktop: false,
                 ..FeatureConfig::default()
             },
             ..AgentConfig::default()

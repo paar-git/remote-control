@@ -187,7 +187,6 @@ impl AgentServer {
 
         Capabilities {
             remote_desktop: features.remote_desktop,
-            terminal: features.terminal,
             file_transfer: features.file_transfer,
             monitoring: true,
             process_management: features.process_management,
@@ -467,10 +466,9 @@ impl AgentServer {
         // either exists, so neither ordering loses the subscription.
         let (subscription, subscribed) = tokio::sync::watch::channel(None);
 
-        // Terminals live on their own channel. Serving it in a task lets a shell
-        // produce output while the control channel is idle, and dropping the task's
-        // registry when the connection ends is what stops shells outliving it.
-        let terminals = self.spawn_channel_server(
+        // Additional channels are served in their own task so a client's requests on
+        // one do not block the control channel.
+        let channel_server = self.spawn_channel_server(
             connection,
             authorization.clone(),
             device_id,
@@ -489,7 +487,7 @@ impl AgentServer {
             )
             .await;
 
-        terminals.abort();
+        channel_server.abort();
 
         self.audit(
             AuditEvent::new(
@@ -704,12 +702,10 @@ impl AgentServer {
     /// Serve the channels a client opens after authenticating.
     ///
     /// The control channel is already established; this accepts the *additional*
-    /// streams — today the terminal channel — and serves each on its own task.
+    /// streams and serves each on its own task.
     ///
-    /// Aborting the returned handle when the session ends is what guarantees no shell
-    /// outlives the connection that started it: the terminal registry lives inside this
-    /// task, so cancelling it drops the registry, and dropping the registry kills every
-    /// PTY it holds.
+    /// Aborting the returned handle when the session ends is what guarantees no
+    /// per-channel task outlives the connection that started it.
     fn spawn_channel_server(
         self: &Arc<Self>,
         connection: &quinn::Connection,
@@ -733,20 +729,6 @@ impl AgentServer {
                 };
 
                 match reader.channel() {
-                    rc_protocol::Channel::Terminal => {
-                        let service = crate::terminal_service::TerminalService::new(
-                            writer,
-                            authorization.clone(),
-                            server.database.clone(),
-                            device_id,
-                            session_id,
-                            Arc::clone(&server.clock),
-                            server.config.features.terminal,
-                        );
-                        tokio::spawn(async move {
-                            service.run(&mut reader).await;
-                        });
-                    }
                     rc_protocol::Channel::FileTransfer => {
                         let service = crate::file_service::FileService::new(
                             writer,
@@ -1110,7 +1092,6 @@ mod tests {
         assert!(!capabilities.service_management);
         // Everything that does not need the helper is unaffected.
         assert!(capabilities.monitoring);
-        assert!(capabilities.terminal);
     }
 
     #[tokio::test]
@@ -1120,7 +1101,7 @@ mod tests {
         let database = rc_storage::Database::open_in_memory().await.unwrap();
 
         let mut config = config();
-        config.features.terminal = false;
+        config.features.remote_desktop = false;
         config.features.power_control = false;
 
         let server = AgentServer::new(
@@ -1131,7 +1112,7 @@ mod tests {
         );
         let capabilities = server.capabilities();
 
-        assert!(!capabilities.terminal);
+        assert!(!capabilities.remote_desktop);
         assert!(!capabilities.power_control);
         assert!(capabilities.file_transfer);
     }

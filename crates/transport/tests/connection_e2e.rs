@@ -83,7 +83,6 @@ fn descriptor(identity: &DeviceIdentity, name: &str) -> DeviceDescriptor {
 fn capabilities() -> Capabilities {
     Capabilities {
         remote_desktop: true,
-        terminal: true,
         file_transfer: true,
         monitoring: true,
         power_control: true,

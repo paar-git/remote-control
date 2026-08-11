@@ -36,8 +36,6 @@ pub const HEADER_LEN: usize = 7;
 pub enum Channel {
     /// Handshake, authorization, session lifecycle, dashboards, power actions.
     Control = 1,
-    /// PTY input/output.
-    Terminal = 2,
     /// Directory listings, transfer chunks and acknowledgements.
     FileTransfer = 3,
     /// Encoded video frames from host to client.
@@ -54,7 +52,6 @@ impl Channel {
     pub const fn max_frame_len(self) -> usize {
         match self {
             Self::Control | Self::Metrics => limits::MAX_CONTROL_FRAME,
-            Self::Terminal => limits::MAX_TERMINAL_FRAME,
             Self::FileTransfer => limits::MAX_FILE_FRAME,
             Self::Video => limits::MAX_VIDEO_FRAME,
             // Input events are tiny; keep the ceiling low to blunt flooding.
@@ -69,7 +66,6 @@ impl Channel {
     pub const fn from_wire(value: u8) -> Result<Self> {
         match value {
             1 => Ok(Self::Control),
-            2 => Ok(Self::Terminal),
             3 => Ok(Self::FileTransfer),
             4 => Ok(Self::Video),
             5 => Ok(Self::Input),
@@ -249,7 +245,7 @@ mod tests {
     fn decodes_two_frames_from_one_buffer() {
         let mut buf = BytesMut::new();
         encode(Channel::Control, &sample(), &mut buf).unwrap();
-        encode(Channel::Terminal, &sample(), &mut buf).unwrap();
+        encode(Channel::FileTransfer, &sample(), &mut buf).unwrap();
 
         let d = FrameDecoder::new();
         assert_eq!(
@@ -258,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             d.decode(&mut buf).unwrap().unwrap().channel,
-            Channel::Terminal
+            Channel::FileTransfer
         );
         assert!(d.decode(&mut buf).unwrap().is_none());
     }
@@ -360,7 +356,6 @@ mod tests {
     fn channel_wire_bytes_roundtrip() {
         for ch in [
             Channel::Control,
-            Channel::Terminal,
             Channel::FileTransfer,
             Channel::Video,
             Channel::Input,
