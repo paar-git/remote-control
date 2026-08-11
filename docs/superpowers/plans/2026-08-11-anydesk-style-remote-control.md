@@ -769,6 +769,14 @@ cargo build --workspace 2>&1 | grep -E "^error" | head -40
 
 Every remaining reference to `Capability`, `Role` or `AuthorizationContext` is now an error. Replace each with the corresponding `Permission`: file operations take `Permission::TransferFiles`, metrics take `Permission::ViewMetrics`, and anything that referenced `RemoteDesktopView`, `RemoteInput` or a deleted capability takes `Permission::ControlInput` or is deleted along with its handler.
 
+- [ ] **Step 4b: Delete the power and service capability surface**
+
+*Added 2026-08-11, from a finding in Task 2's review.* Task 2 deleted the privileged helper and, per its brief, the gating that withheld `service_management` and `power_control` from the agent's advertised capabilities. That left the two capabilities advertised straight from `FeatureConfig` with nothing anywhere in the tree able to perform either — a button that fails when pressed, which is exactly what the deleted gate existed to prevent. The spec lists services and power among the deleted subsystems, so the residue belongs here rather than being a decision to revisit.
+
+Delete the `power_control` and `service_management` fields from `FeatureConfig` in `crates/host-agent/src/config.rs`, from `Capabilities` in `crates/protocol/src/control.rs`, from `capabilities()` in `crates/host-agent/src/server.rs`, and from the Zod mirror in `packages/shared-types/`. Delete `DEFAULT_PRIVILEGED_PORT` and its self-tests from `crates/protocol/src/lib.rs`, which Task 2's review flagged as orphaned. Delete `PowerAction` and `ServiceAction` from the protocol if nothing else references them.
+
+`crates/host-agent/src/config.rs` uses `deny_unknown_fields`, so search for fixtures and example TOML that still set either switch — the compiler will not find those.
+
 - [ ] **Step 5: Run the tests and verify they pass**
 
 ```bash
