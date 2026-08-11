@@ -334,7 +334,7 @@ function DeviceHero({
 function ReadinessBanner({ readiness }: { readonly readiness: Readiness }): React.JSX.Element {
   const accent =
     readiness.tone === 'danger'
-      ? 'border-(--color-warning)/40 bg-(--color-warning-soft)'
+      ? 'border-(--color-danger)/40 bg-(--color-danger-soft)'
       : readiness.tone === 'warning'
         ? 'border-(--color-warning)/40 bg-(--color-warning-soft)'
         : 'border-(--color-border) bg-(--color-card)';

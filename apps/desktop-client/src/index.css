@@ -49,15 +49,15 @@
   --color-accent-soft: rgb(217 58 50 / 10%);
   --color-accent-text: #ffffff;
 
-  --color-success: #2e9e4f;
-  --color-success-soft: rgb(46 158 79 / 12%);
+  --color-success: #1a7333;
+  --color-success-soft: rgb(26 115 51 / 12%);
   /*
    * Warning is a distinct tone, not an alias for danger. Merging them made "no
    * computers yet" — a first-run state — render identically to "the database could not
    * be opened".
    */
-  --color-warning: #a16207;
-  --color-warning-soft: rgb(161 98 7 / 12%);
+  --color-warning: #8f5706;
+  --color-warning-soft: rgb(143 87 6 / 12%);
   --color-danger: #c62828;
   --color-danger-soft: rgb(198 40 40 / 10%);
 
