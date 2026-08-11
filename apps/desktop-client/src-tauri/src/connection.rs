@@ -3,13 +3,13 @@
 //! # The state machine
 //!
 //! ```text
-//!   Offline ──connect──► Discovering ──► Connecting ──► Authenticating ──► Connected
-//!      ▲                      │              │                │               │
-//!      │                      └──────────────┴────────────────┘               │
-//!      │                                   failure                            │
-//!      │                                      │                               │
-//!      │                          ┌───────────┴────────────┐                  │
-//!      │                          │                        │                  │
+//!   Offline ──connect──► Connecting ──► Authenticating ──► Connected
+//!      ▲                      │                │               │
+//!      │                      └────────────────┴───────────────┘
+//!      │                                   failure
+//!      │                                      │
+//!      │                          ┌───────────┴────────────┐
+//!      │                          │                        │
 //!      └────── refused ───────────┘              WaitingToRetry ◄─────lost ────┘
 //!         (identity changed,                        │
 //!          revoked, not paired)                     └──► Reconnecting ──► …
@@ -34,12 +34,7 @@
 //! In order, stopping at the first that works:
 //!
 //! 1. The address the last successful connection used.
-//! 2. An address discovered over mDNS for this device id.
-//! 3. The operator-configured hostname or address.
-//!
-//! Discovery is only ever a *hint*: the connection that follows pins the agent's
-//! certificate fingerprint, so a spoofed announcement costs one failed dial and nothing
-//! else.
+//! 2. The operator-typed hostname or address.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -58,9 +53,6 @@ use tokio::sync::Mutex;
 
 /// How long to wait for a connection attempt before trying the next address.
 pub const CONNECT_TIMEOUT_SECS: u64 = 8;
-
-/// How long to wait for local discovery when no saved address works.
-pub const DISCOVERY_TIMEOUT_SECS: u64 = 3;
 
 /// How long to wait for the server to answer a file request.
 ///
@@ -114,8 +106,6 @@ fn spawn_metrics_reader(mut reader: ChannelReader, sink: MetricsSink) {
 pub enum ConnectionState {
     /// Not connected, and not trying.
     Offline,
-    /// Looking for the server on the local network.
-    Discovering,
     /// A transport connection is being established.
     Connecting {
         /// Where the attempt is aimed.
@@ -269,12 +259,9 @@ pub struct SavedServer {
 ///
 /// Separated from the connecting itself so the ordering rule can be tested without a
 /// network: the last address that worked comes first, because on a home LAN it is
-/// almost always still right and trying it first avoids a discovery round trip.
+/// almost always still right.
 #[must_use]
-pub fn candidate_addresses(
-    server: &SavedServer,
-    discovered: Option<SocketAddr>,
-) -> Vec<SocketAddr> {
+pub fn candidate_addresses(server: &SavedServer) -> Vec<SocketAddr> {
     let mut candidates = Vec::new();
     let mut push = |address: SocketAddr| {
         if !candidates.contains(&address) {
@@ -283,9 +270,6 @@ pub fn candidate_addresses(
     };
 
     if let Some(address) = server.last_known_address {
-        push(address);
-    }
-    if let Some(address) = discovered {
         push(address);
     }
     if let Some(endpoint) = &server.configured_endpoint
@@ -402,17 +386,13 @@ impl ConnectionManager {
     /// # Errors
     /// The failure of the last address tried. A refusal is reported as-is and is not
     /// retried; see the module documentation.
-    pub async fn connect(
-        &self,
-        server: &SavedServer,
-        discovered: Option<SocketAddr>,
-    ) -> Result<SessionId, TransportError> {
+    pub async fn connect(&self, server: &SavedServer) -> Result<SessionId, TransportError> {
         // An explicit connect clears the flag: the operator has asked for a connection,
         // so a later accidental drop is eligible for automatic reconnect again.
         self.intentional_disconnect
             .store(false, std::sync::atomic::Ordering::Release);
 
-        let candidates = candidate_addresses(server, discovered);
+        let candidates = candidate_addresses(server);
         if candidates.is_empty() {
             let message = "No address is known for this server. Connect it to the network, or set \
                  its address in the device settings."
@@ -812,11 +792,7 @@ impl ConnectionManager {
     ///
     /// # Errors
     /// The last failure, after the retry budget is spent.
-    pub async fn reconnect(
-        &self,
-        server: &SavedServer,
-        discovered: Option<SocketAddr>,
-    ) -> Result<SessionId, TransportError> {
+    pub async fn reconnect(&self, server: &SavedServer) -> Result<SessionId, TransportError> {
         let mut attempt = 1;
 
         loop {
@@ -856,7 +832,7 @@ impl ConnectionManager {
 
             self.set_state(ConnectionState::Reconnecting { attempt });
 
-            match self.connect(server, discovered).await {
+            match self.connect(server).await {
                 Ok(session_id) => {
                     tracing::info!(attempt, "reconnected");
                     return Ok(session_id);
@@ -966,30 +942,23 @@ mod tests {
 
     #[test]
     fn the_last_working_address_is_tried_first() {
-        // On a home LAN it is nearly always still right, and trying it first avoids a
-        // discovery round trip on every connect.
+        // On a home LAN it is nearly always still right.
         let mut saved = server();
         saved.last_known_address = Some(address(50, 47811));
+        saved.configured_endpoint = Some("192.168.1.60:47811".to_owned());
 
-        let candidates = candidate_addresses(&saved, Some(address(60, 47811)));
+        let candidates = candidate_addresses(&saved);
         assert_eq!(candidates[0], address(50, 47811));
         assert_eq!(candidates[1], address(60, 47811));
     }
 
     #[test]
-    fn a_discovered_address_is_used_when_nothing_is_saved() {
-        let candidates = candidate_addresses(&server(), Some(address(60, 47811)));
-        assert_eq!(candidates, vec![address(60, 47811)]);
-    }
-
-    #[test]
-    fn a_configured_endpoint_is_the_last_resort() {
+    fn a_configured_endpoint_is_used_when_nothing_is_saved() {
         let mut saved = server();
-        saved.configured_endpoint = Some("192.168.1.70:47811".to_owned());
-        saved.last_known_address = Some(address(50, 47811));
+        saved.configured_endpoint = Some("192.168.1.60:47811".to_owned());
 
-        let candidates = candidate_addresses(&saved, None);
-        assert_eq!(candidates, vec![address(50, 47811), address(70, 47811)]);
+        let candidates = candidate_addresses(&saved);
+        assert_eq!(candidates, vec![address(60, 47811)]);
     }
 
     #[test]
@@ -998,15 +967,12 @@ mod tests {
         saved.last_known_address = Some(address(50, 47811));
         saved.configured_endpoint = Some("192.168.1.50:47811".to_owned());
 
-        assert_eq!(
-            candidate_addresses(&saved, Some(address(50, 47811))),
-            vec![address(50, 47811)]
-        );
+        assert_eq!(candidate_addresses(&saved), vec![address(50, 47811)]);
     }
 
     #[test]
     fn a_server_with_nowhere_to_dial_yields_no_candidates() {
-        assert!(candidate_addresses(&server(), None).is_empty());
+        assert!(candidate_addresses(&server()).is_empty());
     }
 
     #[test]
@@ -1066,7 +1032,7 @@ mod tests {
 
         // The connect fails — there is nothing to connect to — but the flag it clears
         // is what is being asserted.
-        let _ = manager.connect(&server(), None).await;
+        let _ = manager.connect(&server()).await;
         assert!(!manager.was_intentional());
     }
 
@@ -1209,7 +1175,7 @@ mod tests {
     async fn connecting_with_no_address_reports_what_the_operator_should_do() {
         // "Something went wrong" is not an acceptable answer here.
         let manager = manager();
-        let result = manager.connect(&server(), None).await;
+        let result = manager.connect(&server()).await;
 
         assert!(result.is_err());
         match manager.state() {
@@ -1227,7 +1193,6 @@ mod tests {
     fn every_connection_state_serialises_with_a_tag_the_ui_can_switch_on() {
         let states = [
             ConnectionState::Offline,
-            ConnectionState::Discovering,
             ConnectionState::Connecting {
                 address: "10.0.0.1:1".to_owned(),
             },
@@ -1261,7 +1226,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(tags.len(), 10);
+        assert_eq!(tags.len(), 9);
         assert!(tags.contains(&"connected".to_owned()));
         assert!(tags.contains(&"waiting_to_retry".to_owned()));
     }

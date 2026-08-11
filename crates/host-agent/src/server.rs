@@ -193,26 +193,6 @@ impl AgentServer {
         )
         .await;
 
-        // Discovery is a convenience. Failing to advertise must not stop the agent
-        // serving clients that already know its address.
-        let _advertiser = if self.config.network.discovery_enabled {
-            match rc_transport::Advertiser::start(
-                self.identity.device_id(),
-                &self.config.device_name,
-                self.identity.public().identity_fingerprint,
-                bound.port(),
-            ) {
-                Ok(advertiser) => Some(advertiser),
-                Err(err) => {
-                    tracing::warn!(%err, "could not advertise on the local network");
-                    None
-                }
-            }
-        } else {
-            tracing::info!("local discovery is disabled by configuration");
-            None
-        };
-
         let accepting = async {
             while let Some(incoming) = listener.accept().await {
                 match incoming {

@@ -71,8 +71,6 @@ export function connectionLabel(state: ConnectionState): string {
   switch (state.state) {
     case 'offline':
       return 'Not connected';
-    case 'discovering':
-      return 'Searching';
     case 'connecting':
       return 'Connecting';
     case 'authenticating':

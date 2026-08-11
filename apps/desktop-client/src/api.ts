@@ -177,29 +177,6 @@ export function checkPairingCodeFormat(code: string): Promise<boolean> {
   return call('check_pairing_code_format', z.boolean(), { code });
 }
 
-/**
- * A server seen on the local network.
- *
- * Every field here is **untrusted**: anyone on the LAN can broadcast an announcement
- * claiming any device id and name. It is shown so the operator can pick a machine to
- * pair with; the connection that follows authenticates regardless. `claimedFingerprint`
- * is named for what it is, and is never treated as the pinned value.
- */
-export const discoveredAgentSchema = z.object({
-  deviceId: z.string().min(1),
-  displayName: untrustedText(64),
-  address: z.string().min(1),
-  claimedFingerprint: z.string().nullable(),
-  alreadySaved: z.boolean(),
-});
-
-export type DiscoveredAgent = z.infer<typeof discoveredAgentSchema>;
-
-/** Search the local network for servers. An empty list is a normal outcome. */
-export function discoverAgents(): Promise<DiscoveredAgent[]> {
-  return call('discover_agents', z.array(discoveredAgentSchema));
-}
-
 /** What a completed pairing produced. */
 export const pairedServerSchema = z.object({
   deviceId: z.string().min(1),
@@ -249,7 +226,6 @@ export type RefusalReason = z.infer<typeof refusalReasonSchema>;
  */
 export const connectionStateSchema = z.discriminatedUnion('state', [
   z.object({ state: z.literal('offline') }),
-  z.object({ state: z.literal('discovering') }),
   z.object({ state: z.literal('connecting'), address: z.string() }),
   z.object({ state: z.literal('authenticating') }),
   z.object({
@@ -279,8 +255,6 @@ export function describeConnectionState(state: ConnectionState): string {
   switch (state.state) {
     case 'offline':
       return 'Not connected';
-    case 'discovering':
-      return 'Searching the local network…';
     case 'connecting':
       return `Connecting to ${state.address}…`;
     case 'authenticating':
@@ -308,7 +282,6 @@ export function isConnected(state: ConnectionState): boolean {
 /** Whether a state means something is in progress. */
 export function isBusy(state: ConnectionState): boolean {
   return (
-    state.state === 'discovering' ||
     state.state === 'connecting' ||
     state.state === 'authenticating' ||
     state.state === 'disconnecting' ||

@@ -55,19 +55,6 @@ impl CommandError {
         )
     }
 
-    /// Local discovery could not run.
-    ///
-    /// Distinguished from "found nothing" on purpose: an empty network is a normal
-    /// outcome the operator should not be alarmed by, whereas a responder that will not
-    /// start is something to investigate.
-    pub(crate) fn discovery_failed() -> Self {
-        Self::new(
-            "discovery_failed",
-            "Could not search the local network. You can still connect by typing the \
-             server's address.",
-        )
-    }
-
     /// Nothing answered at the given address.
     pub(crate) fn unreachable(address: std::net::SocketAddr) -> Self {
         Self::new(

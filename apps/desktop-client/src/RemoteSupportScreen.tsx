@@ -12,25 +12,11 @@
  * nobody could use would be a lie in the shape of a feature.
  */
 
-import { Radar, ShieldCheck } from 'lucide-react';
+import { ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import {
-  type DiscoveredAgent,
-  checkPairingCodeFormat,
-  discoverAgents,
-  pairWithServer,
-} from './api.js';
-import {
-  Button,
-  Card,
-  EmptyState,
-  PageHeader,
-  StatusBadge,
-  TextField,
-  Tooltip,
-  type Toast,
-} from './ui';
+import { checkPairingCodeFormat, pairWithServer } from './api.js';
+import { Button, Card, PageHeader, TextField, type Toast } from './ui';
 
 export function RemoteSupportScreen({
   onToast,
@@ -45,8 +31,6 @@ export function RemoteSupportScreen({
   const [code, setCode] = useState('');
   const [formatOk, setFormatOk] = useState<boolean | null>(null);
   const [pairing, setPairing] = useState(false);
-  const [found, setFound] = useState<readonly DiscoveredAgent[] | null>(null);
-  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     if (code.trim() === '') {
@@ -66,21 +50,6 @@ export function RemoteSupportScreen({
     };
   }, [code]);
 
-  const search = useCallback(() => {
-    setSearching(true);
-    discoverAgents()
-      .then(setFound)
-      .catch((error: unknown) => {
-        onToast({
-          kind: 'error',
-          message: error instanceof Error ? error.message : 'Could not search the local network.',
-        });
-      })
-      .finally(() => {
-        setSearching(false);
-      });
-  }, [onToast]);
-
   const submit = useCallback(() => {
     setPairing(true);
     pairWithServer(address, code, name)
@@ -88,7 +57,6 @@ export function RemoteSupportScreen({
         setCode('');
         setAddress('');
         setName('');
-        setFound(null);
         onToast({
           kind: 'success',
           message: `Added ${paired.displayName}. Check its fingerprint matches the computer: ${paired.identityFingerprint}`,
@@ -174,63 +142,6 @@ export function RemoteSupportScreen({
           After pairing, compare the fingerprint shown with the one printed on the other computer.
           That comparison is what confirms you paired with the machine you meant to.
         </p>
-      </Card>
-
-      <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold">Find computers on this network</h3>
-            <p className="mt-0.5 text-sm text-(--color-text-secondary)">
-              Fills in the address for you. You still need the access code.
-            </p>
-          </div>
-          <Button icon={Radar} onClick={search} disabled={searching}>
-            {searching ? 'Searching…' : 'Search'}
-          </Button>
-        </div>
-
-        {found !== null && found.length === 0 && (
-          <div className="mt-4">
-            <EmptyState
-              icon={Radar}
-              title="Nothing answered"
-              body="Many networks block discovery. Type the computer’s address above instead."
-            />
-          </div>
-        )}
-
-        {found !== null && found.length > 0 && (
-          <ul className="mt-4 flex flex-col gap-1.5">
-            {found.map((agent) => (
-              <li
-                key={agent.deviceId}
-                className="flex flex-wrap items-center gap-2.5 rounded-lg border border-(--color-border-subtle) bg-(--color-surface) px-3 py-2 text-xs"
-              >
-                {/* Every field here is a claim: anyone on the network can announce
-                    anything. It is a convenience for filling in the address, never a
-                    statement about identity. */}
-                <Tooltip label="Announced by the computer itself, and not verified until you pair">
-                  <span className="font-medium">{agent.displayName}</span>
-                </Tooltip>
-                <span className="font-mono text-(--color-text-secondary)">{agent.address}</span>
-                <span className="flex-1" />
-                {agent.alreadySaved ? (
-                  <StatusBadge tone="ready">Already added</StatusBadge>
-                ) : (
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setAddress(agent.address);
-                      setName(agent.displayName);
-                    }}
-                  >
-                    Use this
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
       </Card>
     </div>
   );

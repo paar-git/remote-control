@@ -93,8 +93,6 @@ pub struct NetworkConfig {
     pub listen_address: IpAddr,
     /// UDP port for QUIC.
     pub listen_port: u16,
-    /// Whether to advertise the agent over mDNS on the local network.
-    pub discovery_enabled: bool,
     /// Whether to register with a coordination server for connections from outside
     /// the LAN. Off by default: remote reachability must be a deliberate choice.
     pub remote_access_enabled: bool,
@@ -119,7 +117,6 @@ impl Default for NetworkConfig {
             listen_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             listen_port: rc_protocol::DEFAULT_AGENT_PORT,
             health_port: rc_protocol::DEFAULT_AGENT_HEALTH_PORT,
-            discovery_enabled: true,
             remote_access_enabled: false,
             coordination_url: None,
             relay_url: None,

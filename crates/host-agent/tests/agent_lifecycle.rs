@@ -52,8 +52,6 @@ impl RunningAgent {
         let quic_port = free_udp_port();
         let local_port = free_tcp_port();
 
-        // Discovery is off: the tests dial a known address, and a responder joining a
-        // multicast group is exactly the kind of thing a build agent forbids.
         let config = format!(
             "device_name = \"integration-agent\"\n\
              \n\
@@ -61,7 +59,6 @@ impl RunningAgent {
              listen_address = \"127.0.0.1\"\n\
              listen_port = {quic_port}\n\
              health_port = {local_port}\n\
-             discovery_enabled = false\n\
              remote_access_enabled = false\n"
         );
 

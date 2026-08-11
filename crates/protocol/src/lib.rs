@@ -68,9 +68,6 @@ pub const DEFAULT_PRIVILEGED_PORT: u16 = 47_814;
 /// Default TCP port the optional coordination service listens on.
 pub const DEFAULT_COORDINATION_PORT: u16 = 47_812;
 
-/// mDNS service type used for local discovery.
-pub const MDNS_SERVICE_TYPE: &str = "_remotectl._udp.local.";
-
 /// Current wall-clock time in milliseconds since the Unix epoch.
 ///
 /// Returns `0` if the system clock is set before the epoch, which the replay guard
@@ -132,11 +129,5 @@ mod tests {
         let now = now_ms();
         assert!(now > 1_577_836_800_000);
         assert!(now < 4_102_444_800_000);
-    }
-
-    #[test]
-    fn mdns_service_type_is_well_formed() {
-        assert!(MDNS_SERVICE_TYPE.starts_with('_'));
-        assert!(MDNS_SERVICE_TYPE.ends_with(".local."));
     }
 }

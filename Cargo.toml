@@ -82,7 +82,6 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # --- system / platform ---
 sysinfo = "0.39"
 portable-pty = "0.9"
-mdns-sd = "0.20"
 directories = "6.0"
 walkdir = "2.5"
 

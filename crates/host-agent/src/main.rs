@@ -223,7 +223,6 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
 
     tracing::info!(
         listen = %config.listen_socket(),
-        discovery = config.network.discovery_enabled,
         remote_access = config.network.remote_access_enabled,
         max_sessions = config.network.max_sessions,
         "network configuration loaded"

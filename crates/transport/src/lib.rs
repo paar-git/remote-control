@@ -39,7 +39,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod channel;
-pub mod discovery;
 pub mod endpoint;
 pub mod error;
 pub mod handshake;
@@ -47,7 +46,6 @@ pub mod pairing;
 pub mod tls;
 
 pub use channel::{ChannelReader, ChannelWriter, accept_channel, open_channel};
-pub use discovery::{Advertiser, DiscoveredAgent};
 pub use endpoint::{AgentListener, ClientConnector};
 pub use error::{RejectionCause, Result, TransportError};
 pub use handshake::{AuthenticatedPeer, TrustDirectory, TrustRecord};

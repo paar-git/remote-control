@@ -333,7 +333,6 @@ pub fn run() {
             commands::revoke_trusted_device,
             commands::recent_audit_events,
             commands::check_pairing_code_format,
-            connect_commands::discover_agents,
             connect_commands::pair_with_server,
             connect_commands::connect_to_server,
             connect_commands::disconnect_from_server,

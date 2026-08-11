@@ -1,4 +1,4 @@
-//! Commands for discovery, pairing and the connection lifecycle.
+//! Commands for pairing and the connection lifecycle.
 //!
 //! Kept separate from [`crate::commands`] because these are the only commands that
 //! touch the network, and because every one of them has to answer the same two
@@ -27,26 +27,6 @@ use crate::commands::CommandError;
 use crate::connection::{ConnectionState, SavedServer, parse_endpoint};
 
 type CommandResult<T> = Result<T, CommandError>;
-
-/// A server seen on the local network.
-///
-/// **Everything here is untrusted.** An announcement is attacker-controllable; it is
-/// carried so the operator can pick which machine to pair with, and the connection that
-/// follows still authenticates.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiscoveredAgentDto {
-    /// The device id the announcement claims.
-    pub device_id: String,
-    /// The name the announcement claims, already sanitised for display.
-    pub display_name: String,
-    /// The address to dial.
-    pub address: String,
-    /// The identity fingerprint the announcement claims. Not proof of anything.
-    pub claimed_fingerprint: Option<String>,
-    /// Whether this device is already in the saved list.
-    pub already_saved: bool,
-}
 
 /// What the operator typed into the pairing panel.
 #[derive(Debug, Deserialize)]
@@ -77,55 +57,6 @@ pub struct PairedServerDto {
     pub identity_fingerprint: String,
     /// The role granted.
     pub role: String,
-}
-
-/// Discover agents on the local network.
-///
-/// # Errors
-/// [`CommandError`] if the application is locked or the responder cannot start. An
-/// empty list is **not** an error: mDNS is frequently filtered, and the operator can
-/// still type an address.
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command]
-pub async fn discover_agents(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> CommandResult<Vec<DiscoveredAgentDto>> {
-    state.require_capability(Capability::TrustedDeviceManagement)?;
-
-    let timeout = std::time::Duration::from_secs(crate::connection::DISCOVERY_TIMEOUT_SECS);
-    let found = rc_transport::discovery::browse(timeout)
-        .await
-        .map_err(|err| {
-            tracing::warn!(%err, "local discovery failed");
-            CommandError::discovery_failed()
-        })?;
-
-    // Which of them are already saved, so the UI can offer Connect rather than Pair.
-    let saved: Vec<String> = match state.trust.as_ref() {
-        Some(trust) => trust
-            .list(PeerRoleRow::Agent)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|device| device.device_id.to_canonical_string())
-            .collect(),
-        None => Vec::new(),
-    };
-
-    Ok(found
-        .into_iter()
-        .filter_map(|agent| {
-            let address = agent.preferred_address()?;
-            let device_id = agent.device_id.to_canonical_string();
-            Some(DiscoveredAgentDto {
-                already_saved: saved.contains(&device_id),
-                device_id,
-                display_name: agent.display_name,
-                address: address.to_string(),
-                claimed_fingerprint: agent.identity_fingerprint.map(|f| f.to_display_groups()),
-            })
-        })
-        .collect())
 }
 
 /// Pair with a server and save it.
@@ -268,14 +199,6 @@ pub async fn connect_to_server(
 
     let server = load_saved_server(&state, &device_id).await?;
 
-    // Discovery is consulted only when there is no saved address, so the common case
-    // costs no round trip. A discovered address is a hint; the connection still pins.
-    let discovered = if server.last_known_address.is_some() {
-        None
-    } else {
-        find_by_discovery(server.device_id).await
-    };
-
     let manager = state.connection.as_ref().ok_or_else(|| {
         CommandError::new(
             "no_identity",
@@ -283,7 +206,7 @@ pub async fn connect_to_server(
         )
     })?;
 
-    match manager.connect(&server, discovered).await {
+    match manager.connect(&server).await {
         Ok(_session_id) => {
             if let Some(address) = manager.connected_address().await
                 && let Some(trust) = state.trust.as_ref()
@@ -376,8 +299,7 @@ pub async fn reconnect_to_server(
         .as_ref()
         .ok_or_else(CommandError::no_identity)?;
 
-    let discovered = find_by_discovery(server.device_id).await;
-    let _ = manager.reconnect(&server, discovered).await;
+    let _ = manager.reconnect(&server).await;
 
     state
         .audit(
@@ -461,24 +383,6 @@ async fn load_saved_server(state: &AppState, device_id: &str) -> CommandResult<S
     })
 }
 
-/// Look for one specific device on the local network.
-async fn find_by_discovery(device_id: rc_protocol::DeviceId) -> Option<std::net::SocketAddr> {
-    let timeout = std::time::Duration::from_secs(crate::connection::DISCOVERY_TIMEOUT_SECS);
-
-    match rc_transport::discovery::browse(timeout).await {
-        Ok(agents) => agents
-            .into_iter()
-            .find(|agent| agent.matches(device_id))
-            .and_then(|agent| agent.preferred_address()),
-        Err(err) => {
-            // Discovery being unavailable must never prevent connecting: the saved
-            // address and the configured endpoint still work.
-            tracing::debug!(%err, "discovery unavailable while looking for a server");
-            None
-        }
-    }
-}
-
 /// Make an operator-typed name safe to store and render.
 fn sanitise_display_name(raw: &str) -> String {
     let cleaned: String = raw
@@ -514,25 +418,6 @@ mod tests {
     fn an_overlong_name_is_bounded() {
         let long = "a".repeat(1000);
         assert!(sanitise_display_name(&long).len() <= rc_protocol::limits::MAX_DEVICE_NAME_BYTES);
-    }
-
-    #[test]
-    fn a_discovered_agent_dto_carries_nothing_that_could_be_mistaken_for_proof() {
-        // The fingerprint field is named for what it is: a claim.
-        let dto = DiscoveredAgentDto {
-            device_id: "dev_x".to_owned(),
-            display_name: "server".to_owned(),
-            address: "10.0.0.2:47811".to_owned(),
-            claimed_fingerprint: Some("AAAA".to_owned()),
-            already_saved: false,
-        };
-        let json = serde_json::to_value(&dto).unwrap();
-
-        assert!(json.get("claimedFingerprint").is_some());
-        assert!(
-            json.get("identityFingerprint").is_none(),
-            "an announced value must not be presented as the pinned one"
-        );
     }
 
     #[test]
