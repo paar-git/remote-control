@@ -19,7 +19,6 @@
 use rc_protocol::DeviceId;
 use rc_security::Fingerprint;
 use rc_security::error::SecurityError;
-use rc_security::pairing::RequestedPermissions;
 use rc_security::permissions::{AuthorizationContext, Capability, Role};
 
 use crate::error::{Result, StorageError};
@@ -142,7 +141,8 @@ impl TrustRepository {
         identity_public_key: &[u8; 32],
         identity_fingerprint: Fingerprint,
         certificate_fingerprint: Fingerprint,
-        permissions: &RequestedPermissions,
+        role: Role,
+        capabilities: &[Capability],
         transcript_digest: Option<&str>,
         now_ms: i64,
     ) -> Result<()> {
@@ -154,8 +154,7 @@ impl TrustRepository {
             return Err(StorageError::Conflict);
         }
 
-        let capabilities = permissions
-            .capabilities
+        let granted = capabilities
             .iter()
             .map(|c| c.name())
             .collect::<Vec<_>>()
@@ -176,8 +175,8 @@ impl TrustRepository {
         .bind(certificate_fingerprint.to_hex())
         .bind(hex::encode(identity_public_key))
         .bind(identity_fingerprint.to_hex())
-        .bind(permissions.role.name())
-        .bind(capabilities)
+        .bind(role.name())
+        .bind(granted)
         .bind(now_ms)
         .bind(transcript_digest)
         .execute(&self.pool)

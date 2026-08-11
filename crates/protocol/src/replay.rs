@@ -1,7 +1,7 @@
 //! Replay protection for timestamped, nonced messages.
 //!
 //! QUIC already prevents replay *within* a connection. This guard defends the layer
-//! above it: messages that are meaningful across connections (pairing proofs, control
+//! above it: messages that are meaningful across connections (control
 //! requests carrying an authorization token) must not be capturable and re-sent.
 //!
 //! A message is accepted only when both hold:

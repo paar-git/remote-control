@@ -167,17 +167,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.91"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
 name = "atk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3460,12 +3449,10 @@ name = "rc-host-agent"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "blake3",
  "chrono",
  "clap",
- "hex",
  "quinn",
  "rc-file-transfer",
  "rc-monitoring",
@@ -3477,7 +3464,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
- "subtle",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
@@ -3505,7 +3491,6 @@ dependencies = [
 name = "rc-platform"
 version = "0.1.1"
 dependencies = [
- "async-trait",
  "directories",
  "rc-protocol",
  "serde",
@@ -3579,7 +3564,6 @@ dependencies = [
 name = "rc-transport"
 version = "0.1.1"
 dependencies = [
- "async-trait",
  "bytes",
  "futures",
  "hex",

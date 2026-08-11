@@ -11,7 +11,7 @@
  * aiming slightly wrong at the thing you actually wanted.
  */
 
-import { MonitorSmartphone, Pencil, Plus, Trash2 } from 'lucide-react';
+import { MonitorSmartphone, Pencil, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import {
@@ -32,7 +32,6 @@ import { type Connection, connectionTone } from './useConnection.js';
 import {
   Badge,
   Button,
-  Card,
   ConfirmDialog,
   EmptyState,
   ErrorState,
@@ -42,7 +41,6 @@ import {
   Skeleton,
   StatusBadge,
   StatusDot,
-  Tooltip,
   type Toast,
 } from './ui';
 
@@ -55,13 +53,11 @@ export function RemoteAccessScreen({
   onToast,
   connection,
   onOpenSession,
-  onAddComputer,
 }: {
   readonly onToast: (toast: Toast) => void;
   readonly connection: Connection;
   /** Called once a connection is live, to hand the window over to the session. */
   readonly onOpenSession: (deviceName: string | null) => void;
-  readonly onAddComputer: () => void;
 }): React.JSX.Element {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   const [connectingTo, setConnectingTo] = useState<string | null>(null);
@@ -225,12 +221,7 @@ export function RemoteAccessScreen({
           <EmptyState
             icon={MonitorSmartphone}
             title="No computers yet"
-            body="Add a computer with a one-time access code, and it will appear here ready to connect to whenever you need it."
-            action={
-              <Button variant="primary" icon={Plus} onClick={onAddComputer}>
-                Add a computer
-              </Button>
-            }
+            body="Computers you can reach will appear here, ready to connect to whenever you need them."
           />
         ) : (
           <ul className="flex flex-col gap-3">
@@ -290,10 +281,6 @@ export function RemoteAccessScreen({
         </section>
       )}
 
-      {/* The empty state already carries this call to action; showing it twice on the
-          same screen is noise. */}
-      {active.length > 0 && <SetUpRemoteAccess onAddComputer={onAddComputer} />}
-
       <ConfirmDialog
         open={pendingRevoke !== null}
         title="Remove this computer?"
@@ -309,7 +296,7 @@ export function RemoteAccessScreen({
               <p className="mb-2 font-mono text-xs break-all">
                 {formatFingerprintGroups(pendingRevoke.identityFingerprint)}
               </p>
-              <p>Pairing again with a new access code is the only way to restore it.</p>
+              <p>This cannot be undone from here.</p>
             </>
           )
         }
@@ -440,32 +427,5 @@ function DeviceRow({
         <IconButton icon={Trash2} label={`Remove ${device.displayName}`} onClick={onRevoke} />
       </div>
     </li>
-  );
-}
-
-/** The footer Chrome Remote Desktop puts under the list: how to add another machine. */
-function SetUpRemoteAccess({
-  onAddComputer,
-}: {
-  readonly onAddComputer: () => void;
-}): React.JSX.Element {
-  return (
-    <Card className="text-center">
-      <h3 className="text-sm font-semibold">Set up remote access</h3>
-      <p className="mx-auto mt-1 max-w-md text-sm text-(--color-text-secondary)">
-        Install the agent on the computer you want to reach, run{' '}
-        <code className="font-mono text-xs">rc-agent pair</code> on it, and enter the access code it
-        prints.
-      </p>
-      <div className="mt-4">
-        <Tooltip label="Opens Remote Support, where you enter the code">
-          <span>
-            <Button icon={Plus} onClick={onAddComputer}>
-              Add a computer
-            </Button>
-          </span>
-        </Tooltip>
-      </div>
-    </Card>
   );
 }

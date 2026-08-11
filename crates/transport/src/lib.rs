@@ -42,12 +42,10 @@ pub mod channel;
 pub mod endpoint;
 pub mod error;
 pub mod handshake;
-pub mod pairing;
 pub mod tls;
 
 pub use channel::{ChannelReader, ChannelWriter, accept_channel, open_channel};
 pub use endpoint::{AgentListener, ClientConnector};
 pub use error::{RejectionCause, Result, TransportError};
-pub use handshake::{AuthenticatedPeer, TrustDirectory, TrustRecord};
-pub use pairing::{PairingRecorder, PairingService, pair_as_client};
+pub use handshake::AuthenticatedPeer;
 pub use tls::{ALPN, ObservedCertificate, ObservedPeer, PinPolicy, peer_certificate_fingerprint};

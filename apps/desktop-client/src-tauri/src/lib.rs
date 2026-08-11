@@ -332,8 +332,6 @@ pub fn run() {
             commands::rename_trusted_device,
             commands::revoke_trusted_device,
             commands::recent_audit_events,
-            commands::check_pairing_code_format,
-            connect_commands::pair_with_server,
             connect_commands::connect_to_server,
             connect_commands::disconnect_from_server,
             connect_commands::reconnect_to_server,

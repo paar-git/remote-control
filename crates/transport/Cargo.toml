@@ -22,7 +22,6 @@ rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 
 # Async.
-async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
@@ -38,4 +37,3 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-async-trait = { workspace = true }

@@ -6,7 +6,6 @@
 use rc_security::clock::{Clock, OsRandom, TestClock};
 use rc_security::error::SecurityError;
 use rc_security::identity::derive_device_id;
-use rc_security::pairing::RequestedPermissions;
 use rc_security::password::HashingPolicy;
 use rc_security::permissions::{Capability, Role};
 use rc_security::{DeviceIdentity, Fingerprint};
@@ -60,7 +59,8 @@ async fn trust_peer(
         &public.identity_public_key,
         public.identity_fingerprint,
         public.certificate_fingerprint,
-        &RequestedPermissions::full(role),
+        role,
+        &role.capabilities(),
         Some("abc123"),
         now_ms,
     )
@@ -286,7 +286,8 @@ async fn the_same_identity_cannot_register_under_two_device_ids() {
             &public.identity_public_key,
             public.identity_fingerprint, // but the same identity
             public.certificate_fingerprint,
-            &RequestedPermissions::full(Role::Owner),
+            Role::Owner,
+            &Role::Owner.capabilities(),
             None,
             clock.now_ms(),
         )

@@ -10,7 +10,6 @@ repository.workspace = true
 
 [dependencies]
 rc-protocol = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

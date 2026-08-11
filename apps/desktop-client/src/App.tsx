@@ -31,7 +31,6 @@ import { AuthScreen } from './AuthScreen';
 import FilesScreen from './FilesScreen';
 import MonitoringScreen from './MonitoringScreen';
 import { RemoteAccessScreen } from './RemoteAccessScreen';
-import { RemoteSupportScreen } from './RemoteSupportScreen';
 import { SessionScreen } from './SessionScreen';
 import { ThisComputerScreen } from './ThisComputerScreen';
 import UpdateScreen from './UpdateScreen';
@@ -61,7 +60,6 @@ export default function App(): React.JSX.Element {
   const [toast, setToast] = useState<Toast | null>(null);
   const [inSession, setInSession] = useState(false);
   const [sessionDevice, setSessionDevice] = useState<string | null>(null);
-  const [deviceEpoch, setDeviceEpoch] = useState(0);
   const [collapsed, setCollapsed] = useState(
     () => globalThis.localStorage?.getItem(COLLAPSED_KEY) === 'true',
   );
@@ -253,7 +251,6 @@ export default function App(): React.JSX.Element {
         <Section
           id={section}
           connection={connection}
-          deviceEpoch={deviceEpoch}
           onNavigate={navigate}
           onToast={setToast}
           onUpdateChange={updates.refresh}
@@ -262,9 +259,6 @@ export default function App(): React.JSX.Element {
             // when the session started is kept rather than blanked.
             if (name !== null) setSessionDevice(name);
             setInSession(true);
-          }}
-          onDevicesChanged={() => {
-            setDeviceEpoch((value) => value + 1);
           }}
         />
       </AppShell>
@@ -393,34 +387,19 @@ function UpdateBanner({
 function Section({
   id,
   connection,
-  deviceEpoch,
   onNavigate,
   onToast,
   onUpdateChange,
   onEnterSession,
-  onDevicesChanged,
 }: {
   readonly id: string;
   readonly connection: Connection;
-  /** Bumped when the device list changes, so Remote Access reloads on return. */
-  readonly deviceEpoch: number;
   readonly onNavigate: (section: string) => void;
   readonly onToast: (toast: Toast) => void;
   readonly onUpdateChange: () => void;
   readonly onEnterSession: (deviceName: string | null) => void;
-  readonly onDevicesChanged: () => void;
 }): React.JSX.Element {
   switch (id) {
-    case 'remote-support':
-      return (
-        <RemoteSupportScreen
-          onToast={onToast}
-          onPaired={() => {
-            onDevicesChanged();
-            onNavigate('remote-access');
-          }}
-        />
-      );
     case 'this-computer':
       return <ThisComputerScreen connection={connection.state} onNavigate={onNavigate} />;
     case 'monitoring':
@@ -432,13 +411,9 @@ function Section({
     default:
       return (
         <RemoteAccessScreen
-          key={deviceEpoch}
           onToast={onToast}
           connection={connection}
           onOpenSession={onEnterSession}
-          onAddComputer={() => {
-            onNavigate('remote-support');
-          }}
         />
       );
   }

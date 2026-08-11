@@ -23,11 +23,8 @@ rc-file-transfer = { workspace = true }
 sysinfo = { workspace = true }
 uuid = { workspace = true }
 quinn = { workspace = true }
-async-trait = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
-subtle = { workspace = true }
-hex = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

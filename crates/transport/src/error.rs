@@ -111,9 +111,14 @@ pub enum TransportError {
     #[error("the session is no longer valid; authenticate again")]
     SessionInvalid,
 
-    /// The agent is not accepting pairing right now.
-    #[error("the agent is not in pairing mode")]
-    PairingClosed,
+    /// This build has no way to decide whether an incoming peer may be admitted.
+    ///
+    /// The pairing protocol has been removed and the accept path that replaces it is
+    /// not present yet, so the agent has nothing to authorise against. It refuses every
+    /// session rather than admitting a peer it cannot authorise: a build with no
+    /// authorisation step must not behave as though every peer passed one.
+    #[error("this build cannot authorise a session; the agent has no way to admit a peer")]
+    AuthorizationUnavailable,
 
     /// Too many connections or attempts from this source.
     #[error("too many attempts; try again in {retry_after_secs} seconds")]
@@ -153,7 +158,7 @@ impl TransportError {
             | Self::IdentityProofRejected
             | Self::IncompatibleVersion
             | Self::SessionInvalid
-            | Self::PairingClosed
+            | Self::AuthorizationUnavailable
             | Self::Throttled { .. }
             | Self::Bind { .. }
             | Self::Configuration { .. }
@@ -175,6 +180,7 @@ impl TransportError {
                 | Self::Revoked
                 | Self::IdentityProofRejected
                 | Self::SessionInvalid
+                | Self::AuthorizationUnavailable
         )
     }
 }

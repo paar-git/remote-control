@@ -63,7 +63,7 @@ macro_rules! uuid_newtype {
 }
 
 uuid_newtype!(
-    /// Stable identity of a paired device. Survives reinstalls of the client UI but is
+    /// Stable identity of a known device. Survives reinstalls of the client UI but is
     /// regenerated if the device's identity key is regenerated.
     DeviceId,
     "dev_"
@@ -85,14 +85,6 @@ uuid_newtype!(
     /// Correlates a request with its response on the control channel.
     RequestId,
     "req_"
-);
-
-uuid_newtype!(
-    /// One first-time pairing exchange. Distinct from [`SessionId`] because a pairing
-    /// session exists *before* trust does, and confusing the two would let an
-    /// unauthenticated peer act where an authenticated one is expected.
-    PairingSessionId,
-    "pair_"
 );
 
 uuid_newtype!(

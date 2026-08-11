@@ -1,4 +1,4 @@
-//! Security services: device identity, keystore, pairing, authentication, permissions.
+//! Security services: device identity, keystore, owner authentication, permissions.
 //!
 //! This crate owns every secret in the system. The rules it is written to:
 //!
@@ -22,7 +22,6 @@ pub mod error;
 pub mod fingerprint;
 pub mod identity;
 pub mod keystore;
-pub mod pairing;
 pub mod password;
 pub mod permissions;
 pub mod throttle;
@@ -32,9 +31,6 @@ pub use error::{Result, SecurityError};
 pub use fingerprint::Fingerprint;
 pub use identity::{DeviceIdentity, DeviceIdentityPublic, derive_device_id};
 pub use keystore::Keystore;
-pub use pairing::{
-    PairingClient, PairingCode, PairingManager, PairingPolicy, PairingState, RequestedPermissions,
-};
 pub use password::{HashingPolicy, OwnerCredential};
 pub use permissions::{AuthorizationContext, Capability, Role};
 pub use throttle::{Throttle, ThrottlePolicy};

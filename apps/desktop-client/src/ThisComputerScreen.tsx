@@ -139,12 +139,7 @@ export function ThisComputerScreen({
         }}
       />
 
-      <ReadinessBanner
-        readiness={readiness}
-        onPair={() => {
-          onNavigate('remote-support');
-        }}
-      />
+      <ReadinessBanner readiness={readiness} />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <RemoteAccessCard
@@ -191,15 +186,13 @@ interface Readiness {
   readonly headline: string;
   readonly summary: string;
   readonly checks: readonly Check[];
-  /** Whether pairing is the obvious next step. */
-  readonly needsPairing: boolean;
 }
 
 /**
  * Turn the raw state into the one sentence the operator needs.
  *
- * The order matters: a broken identity or database outranks "not paired yet", which
- * outranks "paired but idle". Reporting the least severe true statement would bury the
+ * The order matters: a broken identity or database outranks "no computers yet", which
+ * outranks "known but idle". Reporting the least severe true statement would bury the
  * one that needs attention.
  */
 function assessReadiness(
@@ -228,8 +221,8 @@ function assessReadiness(
       label: 'Saved computers',
       detail:
         pairedCount === 0
-          ? 'No computers added yet. Add one to start a session.'
-          : `${String(pairedCount)} server${pairedCount === 1 ? '' : 's'} paired with this computer.`,
+          ? 'No computers saved yet.'
+          : `${String(pairedCount)} server${pairedCount === 1 ? '' : 's'} saved on this computer.`,
       met: pairedCount > 0,
       pending: pairedCount === 0,
     },
@@ -248,10 +241,9 @@ function assessReadiness(
       headline: 'This computer isn’t ready for remote access',
       summary:
         identity === null
-          ? 'The device identity could not be read, so pairing and connecting are not possible.'
-          : 'The local database could not be opened, so paired servers cannot be saved.',
+          ? 'The device identity could not be read, so connecting is not possible.'
+          : 'The local database could not be opened, so saved servers cannot be kept.',
       checks,
-      needsPairing: false,
     };
   }
 
@@ -259,11 +251,9 @@ function assessReadiness(
     return {
       tone: 'warning',
       label: 'Setup incomplete',
-      headline: 'Ready to pair',
-      summary:
-        'This computer’s identity is set up. Pair it with a server to open a remote session.',
+      headline: 'No computers yet',
+      summary: 'This computer’s identity is set up. No servers are saved on it yet.',
       checks,
-      needsPairing: true,
     };
   }
 
@@ -274,7 +264,6 @@ function assessReadiness(
       headline: 'Connected to a server',
       summary: describeConnectionState(connection),
       checks,
-      needsPairing: false,
     };
   }
 
@@ -282,9 +271,8 @@ function assessReadiness(
     tone: 'ready',
     label: 'Ready',
     headline: 'Ready for connections',
-    summary: 'Identity and pairing are set up. Connect to a paired server to start working.',
+    summary: 'Identity is set up. Connect to a saved server to start working.',
     checks,
-    needsPairing: false,
   };
 }
 
@@ -343,13 +331,7 @@ function DeviceHero({
  * Written for the operator: what works, what does not, and what to do next. The
  * checklist repeats the state in a form that can be scanned rather than read.
  */
-function ReadinessBanner({
-  readiness,
-  onPair,
-}: {
-  readonly readiness: Readiness;
-  readonly onPair: () => void;
-}): React.JSX.Element {
+function ReadinessBanner({ readiness }: { readonly readiness: Readiness }): React.JSX.Element {
   const accent =
     readiness.tone === 'danger'
       ? 'border-(--color-danger)/40 bg-(--color-danger-soft)'
@@ -369,11 +351,6 @@ function ReadinessBanner({
             {readiness.summary}
           </p>
         </div>
-        {readiness.needsPairing && (
-          <Button variant="primary" onClick={onPair}>
-            Add a computer
-          </Button>
-        )}
       </div>
 
       <ul className="mt-4 grid gap-x-6 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -627,7 +604,7 @@ function RecentActivityCard({
 
       {activity.length === 0 ? (
         <p className="px-4 pb-4 text-sm text-(--color-text-secondary)">
-          Nothing recorded yet. Pairing, connecting and privileged operations are logged here.
+          Nothing recorded yet. Connecting and privileged operations are logged here.
         </p>
       ) : (
         <ul className="px-4 pb-1">

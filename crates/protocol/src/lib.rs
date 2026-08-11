@@ -26,7 +26,6 @@
 //! | [`ids`] | Typed identifiers |
 //! | [`replay`] | Sliding-window replay detection |
 //! | [`control`] | Handshake, session lifecycle, errors |
-//! | [`pairing`] | First-time trust establishment |
 //! | [`files`] | Browsing and resumable transfer |
 //! | [`system`] | Metrics, processes, services, power |
 //! | [`desktop`] | Video streaming and input injection |
@@ -41,14 +40,13 @@ pub mod files;
 pub mod frame;
 pub mod ids;
 pub mod limits;
-pub mod pairing;
 pub mod replay;
 pub mod system;
 pub mod version;
 
 pub use error::{ProtocolError, Result};
 pub use frame::{Channel, Frame, FrameDecoder};
-pub use ids::{DeviceId, PairingSessionId, RequestId, SessionId, TransferId, UserId};
+pub use ids::{DeviceId, RequestId, SessionId, TransferId, UserId};
 pub use version::{CURRENT_VERSION, ProtocolVersion};
 
 /// Application-Layer Protocol Negotiation identifier offered on every QUIC/TLS

@@ -164,47 +164,6 @@ export function getRecentAuditEvents(limit = 50): Promise<AuditEntry[]> {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Pairing                                                                    */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Check that a typed pairing code *could* be a code.
- *
- * Format only. It gives immediate feedback while the operator types; it proves
- * nothing about whether the code is correct, which only the server can decide.
- */
-export function checkPairingCodeFormat(code: string): Promise<boolean> {
-  return call('check_pairing_code_format', z.boolean(), { code });
-}
-
-/** What a completed pairing produced. */
-export const pairedServerSchema = z.object({
-  deviceId: z.string().min(1),
-  displayName: untrustedText(128),
-  /** Grouped for reading aloud against what the server printed. */
-  identityFingerprint: z.string().min(1),
-  role: roleSchema,
-});
-
-export type PairedServer = z.infer<typeof pairedServerSchema>;
-
-/**
- * Pair with a server and save it.
- *
- * The code is sent to the backend and is never returned, logged or stored. It is used
- * once to derive a proof and then dropped.
- */
-export function pairWithServer(
-  address: string,
-  code: string,
-  displayName: string,
-): Promise<PairedServer> {
-  return call('pair_with_server', pairedServerSchema, {
-    input: { address, code, displayName },
-  });
-}
-
-/* -------------------------------------------------------------------------- */
 /* Connection                                                                 */
 /* -------------------------------------------------------------------------- */
 

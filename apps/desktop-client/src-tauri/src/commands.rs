@@ -47,22 +47,11 @@ impl CommandError {
         Self::new("no_database", "The local database is unavailable.")
     }
 
-    /// This installation has no device identity, so it cannot pair or connect.
+    /// This installation has no device identity, so it cannot connect.
     pub(crate) fn no_identity() -> Self {
         Self::new(
             "no_identity",
             "This device has no identity yet. Restart the application to create one.",
-        )
-    }
-
-    /// Nothing answered at the given address.
-    pub(crate) fn unreachable(address: std::net::SocketAddr) -> Self {
-        Self::new(
-            "unreachable",
-            format!(
-                "Nothing answered at {address}. Check the address, that the agent is \
-                 running, and that the firewall allows it."
-            ),
         )
     }
 
@@ -76,15 +65,13 @@ impl CommandError {
         match err {
             T::FingerprintMismatch => Self::new(
                 "identity_changed",
-                "This server presented a different identity than the one you paired \
-                 with. It has been refused. If you reinstalled the server, remove the \
-                 saved entry and pair again; otherwise investigate before retrying.",
+                "This server presented a different identity than the one saved for it. \
+                 It has been refused. If you reinstalled the server, remove the saved \
+                 entry; otherwise investigate before retrying.",
             ),
-            T::NotTrusted | T::Revoked => Self::new(
-                "not_authorized",
-                "The server did not accept this device. Pair with it again from the \
-                 server console.",
-            ),
+            T::NotTrusted | T::Revoked => {
+                Self::new("not_authorized", "The server did not accept this device.")
+            }
             T::IncompatibleVersion => Self::new(
                 "protocol_mismatch",
                 "This client and that server speak different protocol versions. Update \
@@ -107,27 +94,6 @@ impl CommandError {
                     "The connection failed. Check the application log for details.",
                 )
             }
-        }
-    }
-
-    /// Turn a pairing failure into an operator-facing message.
-    pub(crate) fn pairing_failed(err: &rc_transport::TransportError) -> Self {
-        use rc_transport::TransportError as T;
-
-        match err {
-            T::PairingClosed => Self::new(
-                "not_pairing",
-                "That server is not in pairing mode. Run `rc-agent pair` on the server \
-                 and try again while the code is displayed.",
-            ),
-            // A wrong code and a tampered exchange are reported identically by the
-            // agent, on purpose: telling them apart would make it an oracle.
-            T::Security(_) | T::Closed { .. } => Self::new(
-                "pairing_rejected",
-                "The server did not accept that pairing code. Check the code and that \
-                 it has not expired, then try again.",
-            ),
-            other => Self::from_transport(other),
         }
     }
 
@@ -601,21 +567,6 @@ pub async fn recent_audit_events(
         .collect())
 }
 
-/// Validate a pairing code's format without contacting anything.
-///
-/// This exists so the Devices screen can give immediate feedback while the operator
-/// types. It proves nothing about whether the code is *correct* — only that it could
-/// be a code at all. Completing a pairing needs the transport from Phase 3.
-///
-/// Takes `String` and returns `CommandResult` for the same reasons as [`owner_logout`]:
-/// Tauri deserializes command arguments into owned values, and the envelope is uniform
-/// across the command surface.
-#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
-#[tauri::command]
-pub fn check_pairing_code_format(code: String) -> CommandResult<bool> {
-    Ok(rc_security::PairingCode::parse(&code).is_ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,12 +604,5 @@ mod tests {
             "raw keys must not be exposed"
         );
         assert!(!fields.contains(&"password_hash"));
-    }
-
-    #[test]
-    fn pairing_code_format_check_accepts_and_rejects() {
-        assert!(check_pairing_code_format("ABC-DEF-GHJ".into()).unwrap());
-        assert!(!check_pairing_code_format("OOO-OOO-OOO".into()).unwrap());
-        assert!(!check_pairing_code_format(String::new()).unwrap());
     }
 }
