@@ -392,7 +392,8 @@ mod tests {
 
     #[test]
     fn leading_and_trailing_whitespace_is_significant() {
-        let credential = PasswordCredential::create(" padded password ", POLICY, &OsRandom).unwrap();
+        let credential =
+            PasswordCredential::create(" padded password ", POLICY, &OsRandom).unwrap();
         credential.verify(" padded password ").unwrap();
         assert!(credential.verify("padded password").is_err());
     }
@@ -417,7 +418,8 @@ mod tests {
 
     #[test]
     fn a_hash_made_with_weaker_parameters_is_flagged_for_upgrade() {
-        let weak = PasswordCredential::create(GOOD, HashingPolicy::FAST_FOR_TESTS, &OsRandom).unwrap();
+        let weak =
+            PasswordCredential::create(GOOD, HashingPolicy::FAST_FOR_TESTS, &OsRandom).unwrap();
         assert!(
             weak.needs_rehash(HashingPolicy::PRODUCTION),
             "a test-strength hash must be flagged against production policy"

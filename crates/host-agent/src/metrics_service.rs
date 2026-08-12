@@ -27,13 +27,15 @@
 use std::sync::Arc;
 
 use rc_protocol::system::{MetricsAgentMessage, MetricsStopReason};
-use rc_security::{Permission, PermissionSet};
+use rc_security::Permission;
 use rc_transport::ChannelWriter;
+
+use crate::sessions::Session;
 
 /// Serves the metrics channel for one connection.
 pub struct MetricsService {
     writer: ChannelWriter,
-    authorization: PermissionSet,
+    session: Session,
     /// The agent-wide collector.
     ///
     /// Shared rather than owned: CPU utilisation is measured *across an interval*, so a
@@ -52,14 +54,14 @@ impl MetricsService {
     #[must_use]
     pub const fn new(
         writer: ChannelWriter,
-        authorization: PermissionSet,
+        session: Session,
         collector: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
         clock: Arc<dyn rc_security::Clock>,
         interval: tokio::sync::watch::Receiver<Option<u32>>,
     ) -> Self {
         Self {
             writer,
-            authorization,
+            session,
             collector,
             clock,
             interval,
@@ -125,7 +127,7 @@ impl MetricsService {
                 _ = ticker.tick() => {
                     // Re-checked here, every tick, against the live session rather than
                     // captured when the subscription was created.
-                    if !self.authorization.contains(Permission::ViewMetrics) {
+                    if self.session.require(Permission::ViewMetrics).is_err() {
                         return self.stop(MetricsStopReason::NotAuthorized).await;
                     }
 
@@ -183,6 +185,8 @@ async fn await_subscription(
 
 #[cfg(test)]
 mod tests {
+    use rc_security::PermissionSet;
+
     use super::*;
 
     #[tokio::test]

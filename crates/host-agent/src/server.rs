@@ -34,14 +34,19 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use rc_protocol::control::{
-    ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload, ControlResult,
-    DisconnectReason, Opening,
+    Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
+    ControlResult, DeviceDescriptor, DisconnectReason, Opening, WireRefusal,
 };
 use rc_security::{Clock, DeviceIdentity, Fingerprint, Permission, PermissionSet, SystemClock};
+use rc_storage::{RecentRepository, SettingsRepository};
 use rc_transport::{AgentListener, ChannelReader, ChannelWriter, PinPolicy, TransportError};
 
+use crate::access::{
+    AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization,
+    ConnectionRequest, authorize_connection,
+};
 use crate::config::AgentConfig;
-use crate::sessions::{SessionRegistry, SessionSlot};
+use crate::sessions::{Session, SessionRegistry, SessionSlot};
 
 /// Everything the listener needs, assembled once at startup.
 pub struct AgentServer {
@@ -61,6 +66,16 @@ pub struct AgentServer {
     /// measured across an interval, so several collectors would each pay for their own
     /// process enumeration and none would agree with the others.
     metrics: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
+    /// This machine's own access settings.
+    settings: SettingsRepository,
+    /// Recently seen and pinned peer identities.
+    recent: RecentRepository,
+    /// UI boundary for human accept/deny decisions.
+    prompt: Arc<dyn AcceptPrompt>,
+    /// Rate limiter for unattended-password attempts.
+    throttle: tokio::sync::Mutex<rc_security::Throttle>,
+    /// Serialises interactive accept dialogs.
+    pending_dialog: tokio::sync::Mutex<()>,
     /// Set once the QUIC listener is bound, cleared when it stops.
     ///
     /// Read by the health endpoint, which must be able to distinguish "the process is
@@ -69,10 +84,34 @@ pub struct AgentServer {
     listener_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Fail-closed accept prompt used by the standalone service binary.
+#[derive(Debug, Default)]
+pub struct DismissingPrompt;
+
+#[async_trait::async_trait]
+impl AcceptPrompt for DismissingPrompt {
+    async fn ask(&self, request: AcceptRequest) -> AcceptAnswer {
+        tracing::warn!(
+            address = %request.address,
+            fingerprint = %request.fingerprint,
+            "no interactive accept prompt is attached; dismissing connection request"
+        );
+        AcceptAnswer {
+            request_id: request.request_id,
+            decision: AcceptDecision::Dismiss,
+        }
+    }
+}
+
 impl AgentServer {
     /// Assemble a server. Does not bind anything yet.
     #[must_use]
-    pub fn new(identity: Arc<DeviceIdentity>, config: AgentConfig) -> Self {
+    pub fn new(
+        identity: Arc<DeviceIdentity>,
+        config: AgentConfig,
+        database: &rc_storage::Database,
+        prompt: Arc<dyn AcceptPrompt>,
+    ) -> Self {
         let max_sessions = usize::from(config.network.max_sessions);
         Self {
             identity,
@@ -83,6 +122,11 @@ impl AgentServer {
             metrics: Arc::new(tokio::sync::Mutex::new(
                 rc_monitoring::MetricsCollector::new(),
             )),
+            settings: SettingsRepository::new(database),
+            recent: RecentRepository::new(database),
+            prompt,
+            throttle: tokio::sync::Mutex::new(rc_security::Throttle::with_defaults()),
+            pending_dialog: tokio::sync::Mutex::new(()),
             listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -213,7 +257,51 @@ impl AgentServer {
             .into());
         };
 
-        let peer = match rc_transport::handshake::finish_accept(writer, observed, hello).await {
+        let peer = match rc_transport::handshake::finish_accept(
+            reader,
+            writer,
+            observed,
+            hello,
+            self.descriptor(),
+            self.capabilities(),
+            self.clock.now_ms(),
+            {
+                let server = Arc::clone(self);
+                move |fingerprint, dialed_address, machine_name, unattended_password| async move {
+                    let request = ConnectionRequest {
+                        address: dialed_address,
+                        fingerprint,
+                        machine_name,
+                        unattended_password,
+                    };
+                    let deps = AccessDeps {
+                        settings: &server.settings,
+                        recent: &server.recent,
+                        prompt: server.prompt.as_ref(),
+                        throttle: &server.throttle,
+                        clock: server.clock.as_ref(),
+                        pending_dialog: &server.pending_dialog,
+                    };
+
+                    match authorize_connection(&request, &deps).await {
+                        Ok(Authorization::Granted(permissions)) => {
+                            rc_transport::handshake::HandshakeAuthorization::Granted(permissions)
+                        }
+                        Ok(Authorization::Refused(reason)) => {
+                            rc_transport::handshake::HandshakeAuthorization::Refused(reason.into())
+                        }
+                        Err(err) => {
+                            tracing::error!(%err, "could not decide connection authorization");
+                            rc_transport::handshake::HandshakeAuthorization::Refused(
+                                WireRefusal::Rejected,
+                            )
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        {
             Ok(peer) => peer,
             Err(err) => {
                 tracing::warn!(
@@ -242,7 +330,7 @@ impl AgentServer {
 
         // The permissions this connection was admitted with, re-checked on every
         // request rather than assumed for the life of the session.
-        let authorization = peer.permissions;
+        let session = Session::new(peer.permissions);
 
         // A metrics subscription is asked for on the control channel and delivered on
         // the metrics channel, so the two need a handle in common. Created here, before
@@ -252,17 +340,10 @@ impl AgentServer {
         // Additional channels are served in their own task so a client's requests on
         // one do not block the control channel.
         let channel_server =
-            self.spawn_channel_server(connection, authorization, device_id, session_id, subscribed);
+            self.spawn_channel_server(connection, session, device_id, session_id, subscribed);
 
         let reason = self
-            .run_session(
-                connection,
-                reader,
-                writer,
-                &slot,
-                &authorization,
-                &subscription,
-            )
+            .run_session(connection, reader, writer, &slot, &session, &subscription)
             .await;
 
         channel_server.abort();
@@ -281,7 +362,7 @@ impl AgentServer {
         reader: &mut ChannelReader,
         writer: &mut ChannelWriter,
         slot: &SessionSlot,
-        authorization: &PermissionSet,
+        session: &Session,
         subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> DisconnectReason {
         let idle_timeout = self.config.session.idle_timeout_secs;
@@ -312,9 +393,7 @@ impl AgentServer {
 
             let response = ControlResponse {
                 request_id: request.request_id,
-                result: self
-                    .answer(&request.payload, authorization, subscription)
-                    .await,
+                result: self.answer(&request.payload, session, subscription).await,
             };
 
             if let Err(err) = writer.send(&response).await {
@@ -332,7 +411,7 @@ impl AgentServer {
     async fn answer(
         &self,
         payload: &ControlRequestPayload,
-        authorization: &PermissionSet,
+        session: &Session,
         subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> ControlResult {
         match payload {
@@ -346,7 +425,7 @@ impl AgentServer {
             ControlRequestPayload::SystemSnapshot => {
                 // Checked against this connection's authorization on every request, not
                 // once at connect: a device revoked mid-session must stop being answered.
-                if !authorization.contains(Permission::ViewMetrics) {
+                if session.require(Permission::ViewMetrics).is_err() {
                     return denied("view this server's status");
                 }
 
@@ -359,7 +438,7 @@ impl AgentServer {
             }
 
             ControlRequestPayload::HostInfo => {
-                if !authorization.contains(Permission::ViewMetrics) {
+                if session.require(Permission::ViewMetrics).is_err() {
                     return denied("view this server's status");
                 }
                 ControlResult::Ok(ControlResponsePayload::HostInfo(Box::new(
@@ -368,7 +447,7 @@ impl AgentServer {
             }
 
             ControlRequestPayload::SubscribeMetrics { interval_ms } => {
-                if !authorization.contains(Permission::ViewMetrics) {
+                if session.require(Permission::ViewMetrics).is_err() {
                     return denied("view this server's status");
                 }
                 // Clamped rather than honoured: a client asking for 10 ms would cost a
@@ -425,14 +504,13 @@ impl AgentServer {
     fn spawn_channel_server(
         self: &Arc<Self>,
         connection: &quinn::Connection,
-        authorization: PermissionSet,
+        session: Session,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
         subscribed: tokio::sync::watch::Receiver<Option<u32>>,
     ) -> tokio::task::JoinHandle<()> {
         let server = Arc::clone(self);
         let connection = connection.clone();
-
         tokio::spawn(async move {
             loop {
                 let (writer, mut reader) = match rc_transport::accept_channel(&connection).await {
@@ -450,7 +528,7 @@ impl AgentServer {
                             writer,
                             server.file_policy(),
                             server.config.features.max_transfer_bytes,
-                            authorization,
+                            session,
                             device_id,
                             session_id,
                             server.config.features.file_transfer,
@@ -462,7 +540,7 @@ impl AgentServer {
                     rc_protocol::Channel::Metrics => {
                         let service = crate::metrics_service::MetricsService::new(
                             writer,
-                            authorization,
+                            session,
                             Arc::clone(&server.metrics),
                             Arc::clone(&server.clock),
                             subscribed.clone(),
@@ -481,6 +559,31 @@ impl AgentServer {
                 }
             }
         })
+    }
+
+    fn descriptor(&self) -> DeviceDescriptor {
+        let public = self.identity.public();
+        DeviceDescriptor {
+            device_id: public.device_id,
+            display_name: self.config.device_name.clone(),
+            hostname: self.host.hostname.clone(),
+            os_family: self.host.os_family,
+            os_version: self.host.os_version.clone(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            certificate_fingerprint: public.certificate_fingerprint.to_hex(),
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            remote_desktop: false,
+            file_transfer: self.config.features.file_transfer,
+            monitoring: true,
+            process_management: self.config.features.process_management,
+            clipboard: self.config.features.clipboard_sync,
+            wake_on_lan: false,
+            display_count: 0,
+        }
     }
 
     /// Where connected clients may read and write files.
@@ -679,14 +782,24 @@ mod tests {
         AgentConfig::default()
     }
 
-    fn server() -> Arc<AgentServer> {
+    async fn server() -> Arc<AgentServer> {
         let identity = Arc::new(DeviceIdentity::generate("test-agent", &SystemClock).unwrap());
-        Arc::new(AgentServer::new(identity, config()))
+        let database = rc_storage::Database::open_in_memory().await.unwrap();
+        Arc::new(AgentServer::new(
+            identity,
+            config(),
+            &database,
+            Arc::new(DismissingPrompt),
+        ))
     }
 
     /// Every permission, which is what an ordinary session carries.
-    fn owner() -> PermissionSet {
-        PermissionSet::ALL
+    fn owner() -> Session {
+        Session::new(PermissionSet::ALL)
+    }
+
+    fn no_permissions() -> Session {
+        Session::new(PermissionSet::NONE)
     }
 
     /// A session's metrics-subscription handle.
@@ -704,7 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_ping_is_answered_with_the_token_it_carried() {
-        let server = server();
+        let server = server().await;
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(
@@ -724,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_snapshot_carries_values_the_agent_actually_measured() {
-        let server = server();
+        let server = server().await;
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(
@@ -751,7 +864,7 @@ mod tests {
     async fn host_facts_are_reported_separately_from_live_readings() {
         // Sending the CPU model and kernel version on every tick would make them look
         // like live readings when they are not.
-        let server = server();
+        let server = server().await;
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(&ControlRequestPayload::HostInfo, &owner(), &subscription)
@@ -772,8 +885,8 @@ mod tests {
     async fn a_session_with_only_view_metrics_may_still_read_the_dashboard() {
         // A session holding only ViewMetrics is what a metrics-only grant is for;
         // refusing it would leave that permission with nothing it could do.
-        let server = server();
-        let view_only = PermissionSet::NONE.with(Permission::ViewMetrics);
+        let server = server().await;
+        let view_only = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
 
         let (subscription, _receiver) = subscription();
         let result = server
@@ -793,8 +906,8 @@ mod tests {
     async fn a_session_without_view_metrics_is_refused_even_mid_session() {
         // The check is against the live permission set on every request, so a
         // permission lost mid-session does not wait for the connection to end.
-        let server = server();
-        let revoked = PermissionSet::NONE;
+        let server = server().await;
+        let revoked = Session::new(PermissionSet::NONE);
 
         let (subscription, _receiver) = subscription();
         let result = server
@@ -820,7 +933,7 @@ mod tests {
     async fn a_metrics_interval_is_clamped_rather_than_honoured_as_asked() {
         // A client asking for 10 ms would cost a full process enumeration a hundred
         // times a second on the machine it is supposed to be observing.
-        let server = server();
+        let server = server().await;
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(
@@ -843,7 +956,7 @@ mod tests {
         // The subscription is asked for on the control channel and delivered on the
         // metrics channel. If the answer did not reach the handle, a client would be
         // told it had subscribed and then receive nothing at all.
-        let server = server();
+        let server = server().await;
         let (subscription, receiver) = subscription();
 
         assert_eq!(*receiver.borrow(), None, "nothing is pushed unasked");
@@ -869,7 +982,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsubscribing_disarms_the_handle() {
-        let server = server();
+        let server = server().await;
         let (subscription, receiver) = subscription();
 
         server
@@ -898,7 +1011,7 @@ mod tests {
     async fn unsubscribing_without_a_subscription_is_not_an_error() {
         // A client tidying up on the way out should not have to remember whether it
         // ever started.
-        let server = server();
+        let server = server().await;
         let (subscription, _receiver) = subscription();
 
         let result = server
@@ -919,13 +1032,13 @@ mod tests {
     async fn a_session_without_view_metrics_cannot_subscribe_to_metrics() {
         // Denial must leave the handle untouched: a refused subscription that still
         // armed the pusher would stream readings to a device that was just refused.
-        let server = server();
+        let server = server().await;
         let (subscription, receiver) = subscription();
 
         let result = server
             .answer(
                 &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
-                &PermissionSet::NONE,
+                &no_permissions(),
                 &subscription,
             )
             .await;
@@ -948,7 +1061,7 @@ mod tests {
     async fn a_request_this_build_does_not_implement_is_refused_not_faked() {
         // Returning an empty answer would put figures on the operator's dashboard that
         // the agent never measured.
-        let server = server();
+        let server = server().await;
         let (subscription, _receiver) = subscription();
         let result = server
             .answer(

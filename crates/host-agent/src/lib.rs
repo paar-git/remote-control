@@ -20,5 +20,9 @@ pub mod sessions;
 
 pub use access::{
     AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization,
-    ConnectionRequest, RefusalReason, WireRefusal, authorize_connection,
+    ConnectionRequest, RefusalReason, authorize_connection,
 };
+// `WireRefusal` travels on the wire, so it is defined in `rc-protocol` rather than
+// here; re-exported for convenience since callers of this crate reach for it alongside
+// `RefusalReason`.
+pub use rc_protocol::control::WireRefusal;

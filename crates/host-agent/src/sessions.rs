@@ -24,7 +24,54 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rc_protocol::{DeviceId, SessionId};
-use rc_security::PermissionSet;
+use rc_security::{Permission, PermissionSet};
+
+use crate::error::{AccessError, Result};
+
+/// What a live session may do, as the channels serving it see it.
+///
+/// Carries exactly the [`PermissionSet`] the connection was admitted with — decided
+/// once, by [`crate::access::authorize_connection`], and fixed for the session's whole
+/// lifetime. Widening it requires a new connection, which means a new decision by a
+/// human.
+///
+/// [`Session::require`] is what every channel service calls, on every request rather
+/// than once when the channel opens: a permission decided once at handshake and then
+/// trusted forever is exactly the failure this design exists to prevent, so a session
+/// whose permissions are withdrawn mid-connection stops being answered immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Session {
+    permissions: PermissionSet,
+}
+
+impl Session {
+    /// A session holding exactly `permissions`.
+    #[must_use]
+    pub const fn new(permissions: PermissionSet) -> Self {
+        Self { permissions }
+    }
+
+    /// What this session may do. Fixed for its lifetime.
+    #[must_use]
+    pub const fn permissions(&self) -> PermissionSet {
+        self.permissions
+    }
+
+    /// Refuse unless this session holds `permission`.
+    ///
+    /// # Errors
+    /// [`AccessError::PermissionDenied`] if the session's granted permissions do not
+    /// include `permission`.
+    pub fn require(&self, permission: Permission) -> Result<()> {
+        if self.permissions.contains(permission) {
+            Ok(())
+        } else {
+            Err(AccessError::PermissionDenied {
+                permission: permission.name(),
+            })
+        }
+    }
+}
 
 /// A session as the operator sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +255,37 @@ impl Drop for SessionSlot {
 
 #[cfg(test)]
 mod tests {
+    use rc_security::Permission;
+
     use super::*;
+
+    #[test]
+    fn a_session_may_use_a_permission_it_was_granted() {
+        let session = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        assert!(session.require(Permission::ViewMetrics).is_ok());
+    }
+
+    #[test]
+    fn a_session_is_refused_a_permission_it_was_not_granted() {
+        // The dangerous direction: a session must never be let through for something it
+        // was not explicitly granted.
+        let session = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        let err = session.require(Permission::TransferFiles).unwrap_err();
+        assert!(matches!(
+            err,
+            AccessError::PermissionDenied {
+                permission: "transfer_files"
+            }
+        ));
+    }
+
+    #[test]
+    fn a_session_with_no_permissions_is_refused_everything() {
+        let session = Session::new(PermissionSet::NONE);
+        for permission in Permission::ALL {
+            assert!(session.require(permission).is_err());
+        }
+    }
 
     fn registry(cap: usize) -> Arc<SessionRegistry> {
         Arc::new(SessionRegistry::new(cap))

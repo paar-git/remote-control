@@ -19,6 +19,7 @@
 //! and the service can present it differently without either owning the rule.
 
 use async_trait::async_trait;
+use rc_protocol::control::WireRefusal;
 use rc_security::{Clock, Fingerprint, PermissionSet, Throttle};
 use rc_storage::{RecentRepository, SettingsRepository};
 use rc_transport::PeerAddress;
@@ -104,7 +105,8 @@ pub struct ConnectionRequest {
 
 /// Why a connection was refused.
 ///
-/// Local-only. See [`RefusalReason::wire_code`] for what is safe to tell the peer.
+/// Local-only. See the `impl From<RefusalReason> for WireRefusal` below for what is
+/// safe to tell the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalReason {
     /// A human said no, or said nothing for long enough.
@@ -121,36 +123,26 @@ pub enum RefusalReason {
 
 /// The refusal reason as reported to the peer.
 ///
-/// Deliberately coarser than [`RefusalReason`]. A dismissal, a wrong password and a
-/// lockout must be indistinguishable from outside — a peer that could tell them apart
-/// could use the response itself as an oracle for whether unattended access is
-/// configured, or as a way to count its own attempts against the lockout.
-/// [`RefusalReason`] stays available in full for the local log, where the distinction
-/// is the entire point.
+/// Defined in `rc-protocol` — see [`rc_protocol::control::WireRefusal`] — because it
+/// travels on the wire and the protocol crate must not depend on this one. This impl is
+/// what performs the coarsening: a dismissal, a wrong password and a lockout must be
+/// indistinguishable from outside, or a peer that could tell them apart could use the
+/// response itself as an oracle for whether unattended access is configured, or as a
+/// way to count its own attempts against the lockout. [`RefusalReason`] stays available
+/// in full for the local log, where the distinction is the entire point.
 ///
 /// A separate type rather than a same-valued convention on `RefusalReason` itself, so
 /// the coarsening is enforced by the type checker at the point something is put on the
 /// wire, not by every future call site remembering to collapse the fine-grained reason
 /// correctly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WireRefusal {
-    /// This machine is not accepting connections at all.
-    NotAccepting,
-    /// A pinned peer presented a different certificate.
-    IdentityChanged,
-    /// Every other reason: a human said no, a password was wrong, or the address is
-    /// currently locked out. One value on purpose.
-    Denied,
-}
-
-impl RefusalReason {
-    /// The coarser reason to report to the peer. See [`WireRefusal`].
-    #[must_use]
-    pub const fn wire_code(self) -> WireRefusal {
-        match self {
-            Self::NotAccepting => WireRefusal::NotAccepting,
-            Self::IdentityChanged => WireRefusal::IdentityChanged,
-            Self::Dismissed | Self::WrongPassword | Self::TooManyAttempts => WireRefusal::Denied,
+impl From<RefusalReason> for WireRefusal {
+    fn from(reason: RefusalReason) -> Self {
+        match reason {
+            RefusalReason::NotAccepting => Self::NotAccepting,
+            RefusalReason::IdentityChanged => Self::IdentityChanged,
+            RefusalReason::Dismissed
+            | RefusalReason::WrongPassword
+            | RefusalReason::TooManyAttempts => Self::Rejected,
         }
     }
 }
@@ -909,33 +901,35 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_wrong_password_and_lockout_are_indistinguishable_on_the_wire() {
-        // A peer must not be able to tell a dismissal from a wrong password from a
-        // lockout -- any of the three would let it learn whether unattended access is
-        // configured, or count its own attempts against the lockout.
+    fn a_wire_refusal_does_not_distinguish_a_wrong_password_from_a_dismissal() {
+        // Both must look the same to the peer, or the answer becomes an oracle for
+        // whether unattended access is configured. They are distinguished only in the
+        // receiving machine's own log.
         assert_eq!(
-            RefusalReason::Dismissed.wire_code(),
-            RefusalReason::WrongPassword.wire_code()
+            WireRefusal::from(RefusalReason::Dismissed),
+            WireRefusal::Rejected
         );
         assert_eq!(
-            RefusalReason::WrongPassword.wire_code(),
-            RefusalReason::TooManyAttempts.wire_code()
+            WireRefusal::from(RefusalReason::WrongPassword),
+            WireRefusal::Rejected
+        );
+        assert_eq!(
+            WireRefusal::from(RefusalReason::TooManyAttempts),
+            WireRefusal::Rejected
         );
     }
 
     #[test]
-    fn not_accepting_and_identity_changed_stay_distinguishable() {
-        assert_ne!(
-            RefusalReason::NotAccepting.wire_code(),
-            RefusalReason::Dismissed.wire_code()
+    fn not_accepting_and_identity_changed_are_reported_distinctly() {
+        // These two need different remedies, so telling them apart helps the person
+        // connecting and discloses nothing they could not already observe.
+        assert_eq!(
+            WireRefusal::from(RefusalReason::NotAccepting),
+            WireRefusal::NotAccepting
         );
-        assert_ne!(
-            RefusalReason::IdentityChanged.wire_code(),
-            RefusalReason::Dismissed.wire_code()
-        );
-        assert_ne!(
-            RefusalReason::NotAccepting.wire_code(),
-            RefusalReason::IdentityChanged.wire_code()
+        assert_eq!(
+            WireRefusal::from(RefusalReason::IdentityChanged),
+            WireRefusal::IdentityChanged
         );
     }
 }

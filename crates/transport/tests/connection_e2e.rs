@@ -4,10 +4,11 @@
 //! production connection follows: mutual TLS with pinned certificates, the control
 //! channel, and the application handshake.
 //!
-//! Nothing is stubbed. In this build the handshake has no way to authorise a peer — the
-//! pairing protocol has been deleted and the accept path that replaces it is not here
-//! yet — so what these tests assert is that the agent refuses *everyone*, cleanly and
-//! visibly, rather than admitting whoever completes TLS.
+//! Nothing is stubbed. The admission *rule* lives in `rc-host-agent` and is not this
+//! crate's business, so these tests supply the decision directly and assert that the
+//! handshake carries it faithfully in both directions: a granted peer arrives with
+//! exactly the permissions that were granted, a refused peer learns only the coarse
+//! [`WireRefusal`], and completing TLS by itself decides nothing.
 
 // Integration tests assert against known-good values, so `unwrap` and `panic` are the
 // clearest way to fail. The workspace denies them in library code, where a panic would
@@ -15,14 +16,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 
-use rc_protocol::control::{Capabilities, DeviceDescriptor, OsFamily, PeerRole};
+use rc_protocol::control::{Capabilities, DeviceDescriptor, OsFamily, PeerRole, WireRefusal};
 use rc_protocol::frame::Channel;
-use rc_security::{DeviceIdentity, SystemClock};
+use rc_security::{DeviceIdentity, Permission, PermissionSet, SystemClock};
 
 use rc_transport::endpoint::{AgentListener, ClientConnector};
 use rc_transport::handshake;
-use rc_transport::{PinPolicy, TransportError};
+use rc_transport::{PeerAddress, PinPolicy, TransportError};
 
 fn identity(name: &str) -> DeviceIdentity {
     DeviceIdentity::generate(name, &SystemClock).unwrap()
@@ -64,12 +66,37 @@ impl Harness {
         }
     }
 
-    /// Run a full connection and return what each side concluded.
+    /// Run a full connection, refusing the peer, and return what each side concluded.
     async fn connect(
         &self,
     ) -> (
         rc_transport::Result<handshake::AuthenticatedPeer>,
-        rc_transport::Result<rc_protocol::control::HelloAck>,
+        rc_transport::Result<handshake::AdmittedSession>,
+    ) {
+        let (agent, client, _) = self
+            .connect_deciding(
+                handshake::HandshakeAuthorization::Refused(WireRefusal::Rejected),
+                None,
+            )
+            .await;
+        (agent, client)
+    }
+
+    /// Run a full connection whose admission decision is `decision`, offering
+    /// `unattended_password`.
+    ///
+    /// Also returns what the `authorize` callback was handed, so a test can assert on
+    /// the inputs the decision would have been made from. Those inputs are the part no
+    /// unit test upstream can check: the dialled address in particular is assembled by
+    /// the client and re-parsed by the agent, so only a real exchange proves it survives.
+    async fn connect_deciding(
+        &self,
+        decision: handshake::HandshakeAuthorization,
+        unattended_password: Option<String>,
+    ) -> (
+        rc_transport::Result<handshake::AuthenticatedPeer>,
+        rc_transport::Result<handshake::AdmittedSession>,
+        Option<SeenByAuthorize>,
     ) {
         let (listener, _endpoint_observed) = AgentListener::bind(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -89,7 +116,7 @@ impl Harness {
         let agent_side = async {
             let connection = match listener.accept().await.unwrap() {
                 Ok(connection) => connection,
-                Err(err) => return (Err(err), None),
+                Err(err) => return (Err(err), None, None),
             };
 
             // Read from the connection, not from the endpoint: the endpoint-wide
@@ -97,13 +124,38 @@ impl Harness {
             let observed = rc_transport::peer_certificate_fingerprint(&connection)
                 .expect("TLS must have recorded the client certificate");
 
+            let seen = Arc::new(Mutex::new(None));
+            let recorder = Arc::clone(&seen);
+            // The peer's source port, which is emphatically not the port it dialled.
+            let remote_address = connection.remote_address();
+
             let outcome = async {
                 let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
-                handshake::accept_handshake(&mut reader, &mut writer, observed).await
+                handshake::accept_handshake(
+                    &mut reader,
+                    &mut writer,
+                    observed,
+                    descriptor(&self.agent, "Agent"),
+                    capabilities(),
+                    0,
+                    move |fingerprint, dialed_address, machine_name, password| async move {
+                        *recorder.lock().unwrap() = Some(SeenByAuthorize {
+                            fingerprint,
+                            dialed_address,
+                            machine_name,
+                            unattended_password: password,
+                            listening_on: address,
+                            peer_source: remote_address,
+                        });
+                        decision
+                    },
+                )
+                .await
             }
             .await;
 
-            (outcome, Some(connection))
+            let seen = seen.lock().unwrap().clone();
+            (outcome, seen, Some(connection))
         };
 
         let client_side = async {
@@ -118,6 +170,8 @@ impl Harness {
                 &mut writer,
                 client_descriptor,
                 capabilities(),
+                address.to_string().parse::<PeerAddress>().unwrap(),
+                unattended_password,
                 0,
             )
             .await;
@@ -129,9 +183,23 @@ impl Harness {
 
         // The agent half yields its connection alongside the result purely to keep the
         // link open; it is dropped here, once both halves have finished.
-        let ((agent_outcome, _connection), client_outcome) = tokio::join!(agent_side, client_side);
-        (agent_outcome, client_outcome)
+        let ((agent_outcome, seen, _connection), client_outcome) =
+            tokio::join!(agent_side, client_side);
+        (agent_outcome, client_outcome, seen)
     }
+}
+
+/// What the `authorize` callback was handed for one connection.
+#[derive(Debug, Clone)]
+struct SeenByAuthorize {
+    fingerprint: rc_security::Fingerprint,
+    dialed_address: PeerAddress,
+    machine_name: String,
+    unattended_password: Option<String>,
+    /// Where the agent was listening — the address the client actually dialled.
+    listening_on: SocketAddr,
+    /// The peer's source address on the QUIC connection, whose port is ephemeral.
+    peer_source: SocketAddr,
 }
 
 #[tokio::test]
@@ -144,7 +212,12 @@ async fn a_client_that_completes_tls_is_still_not_admitted() {
     let (agent_result, client_result) = harness.connect().await;
 
     assert!(
-        matches!(agent_result, Err(TransportError::AuthorizationUnavailable)),
+        matches!(
+            agent_result,
+            Err(TransportError::SessionRefused {
+                reason: WireRefusal::Rejected
+            })
+        ),
         "completing TLS must not admit a peer, got {agent_result:?}"
     );
     assert!(
@@ -154,18 +227,128 @@ async fn a_client_that_completes_tls_is_still_not_admitted() {
 }
 
 #[tokio::test]
-async fn a_refused_peer_is_told_it_was_refused_and_nothing_more() {
-    // The refusal reaches the peer as an ordinary rejection. It must not carry the
-    // agent's descriptor, capabilities or a session id, all of which travel on the
-    // acknowledgement a peer only gets after being admitted.
+async fn a_refused_peer_learns_only_the_coarse_reason() {
+    // What a refused peer is told about *why* is exactly one `WireRefusal` value. The
+    // agent's own finer-grained reason — dismissed, wrong password, locked out — never
+    // reaches this side, so the refusal cannot be used as an oracle for whether
+    // unattended access is configured.
     let harness = Harness::new();
 
     let (_, client_result) = harness.connect().await;
 
     let err = client_result.unwrap_err();
     assert!(
-        matches!(err, TransportError::NotTrusted),
-        "a refused client sees a plain refusal, got {err:?}"
+        matches!(
+            err,
+            TransportError::SessionRefused {
+                reason: WireRefusal::Rejected
+            }
+        ),
+        "a refused client sees a coarse refusal, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_granted_peer_is_admitted_with_exactly_the_permissions_that_were_granted() {
+    // The counterpart to every refusal test above, and the reason this task exists: the
+    // accept path now has a success branch. `PermissionSet::ALL` would pass even if the
+    // set were being replaced wholesale somewhere in the exchange, so this grants a
+    // strict subset and asserts it arrives unwidened on *both* sides.
+    let granted = PermissionSet::NONE.with(Permission::ViewMetrics);
+    let harness = Harness::new();
+
+    let (agent_result, client_result, _) = harness
+        .connect_deciding(handshake::HandshakeAuthorization::Granted(granted), None)
+        .await;
+
+    let peer = agent_result.expect("a granted peer must be admitted");
+    assert_eq!(
+        peer.permissions, granted,
+        "the agent must run the session against exactly what it granted"
+    );
+    assert!(
+        !peer.permissions.contains(Permission::TransferFiles),
+        "a metrics-only grant must not carry file access"
+    );
+    assert_eq!(
+        peer.certificate_fingerprint,
+        harness.client.public().certificate_fingerprint,
+        "the admitted identity is the one TLS observed, never the one claimed"
+    );
+    assert_eq!(peer.display_name, "Client");
+
+    let session = client_result.expect("a granted client must be told it was admitted");
+    assert_eq!(
+        session.permissions, granted,
+        "the client must be told the same set the agent is enforcing"
+    );
+    assert_eq!(
+        session.machine_name, "Agent",
+        "the responder's name travels with the grant, for the Recent list"
+    );
+    assert_eq!(session.session_id, peer.session_id);
+}
+
+#[tokio::test]
+async fn the_dialled_address_reaches_the_decision_unchanged() {
+    // The agent keys pinned identities on the address the *user* dialled, not on the
+    // QUIC remote socket address, whose source port is ephemeral. If the two were ever
+    // confused, the pin would miss on every reconnect and a peer presenting a changed
+    // certificate would fall through to the human dialog instead of being refused.
+    // Only a real exchange can catch that: the client assembles this value and the
+    // agent re-parses it.
+    let harness = Harness::new();
+
+    let (_, _, seen) = harness
+        .connect_deciding(
+            handshake::HandshakeAuthorization::Granted(PermissionSet::ALL),
+            None,
+        )
+        .await;
+
+    let seen = seen.expect("the decision must have been asked for");
+    assert_eq!(
+        seen.fingerprint,
+        harness.client.public().certificate_fingerprint,
+        "the decision is made from the observed fingerprint, never a claim"
+    );
+    assert_eq!(
+        seen.dialed_address.to_string(),
+        seen.listening_on.to_string(),
+        "the decision must see the address that was dialled"
+    );
+    assert_ne!(
+        seen.dialed_address.port,
+        seen.peer_source.port(),
+        "the two really are different ports, so this test is not passing by coincidence"
+    );
+    assert_eq!(seen.machine_name, "Client");
+    assert_eq!(
+        seen.unattended_password, None,
+        "no password was offered, so none must be invented"
+    );
+}
+
+#[tokio::test]
+async fn an_offered_password_reaches_the_decision_and_is_not_read_before_the_ack() {
+    // The password rides on `Authenticate`, which is sent only after `HelloAck` — a
+    // peer that has not yet seen who it is talking to must not have sent a secret.
+    // Reaching the callback at all proves it was carried; the ordering is what the
+    // separate frame buys.
+    let harness = Harness::new();
+
+    let (_, _, seen) = harness
+        .connect_deciding(
+            handshake::HandshakeAuthorization::Refused(WireRefusal::Rejected),
+            Some("correct horse battery staple".to_owned()),
+        )
+        .await;
+
+    let seen = seen.expect("the decision must have been asked for");
+    assert_eq!(
+        seen.unattended_password.as_deref(),
+        Some("correct horse battery staple"),
+        "the offered password must reach the decision verbatim"
     );
 }
 
@@ -189,7 +372,18 @@ async fn the_agent_refuses_a_peer_claiming_to_be_an_agent() {
         let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
         let observed = rc_transport::peer_certificate_fingerprint(&connection).unwrap();
 
-        handshake::accept_handshake(&mut reader, &mut writer, observed).await
+        handshake::accept_handshake(
+            &mut reader,
+            &mut writer,
+            observed,
+            descriptor(&harness.agent, "Agent"),
+            capabilities(),
+            0,
+            |_fingerprint, _dialed_address, _machine_name, _password| async {
+                handshake::HandshakeAuthorization::Granted(PermissionSet::ALL)
+            },
+        )
+        .await
     };
 
     let client_side = async {
@@ -247,7 +441,18 @@ async fn a_silent_client_hits_the_handshake_deadline() {
         let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
         let observed = rc_transport::peer_certificate_fingerprint(&connection).unwrap();
 
-        handshake::accept_handshake(&mut reader, &mut writer, observed).await
+        handshake::accept_handshake(
+            &mut reader,
+            &mut writer,
+            observed,
+            descriptor(&harness.agent, "Agent"),
+            capabilities(),
+            0,
+            |_fingerprint, _dialed_address, _machine_name, _password| async {
+                handshake::HandshakeAuthorization::Granted(PermissionSet::ALL)
+            },
+        )
+        .await
     };
 
     let client_side = async {

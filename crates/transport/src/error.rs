@@ -2,14 +2,12 @@
 //!
 //! As with [`rc_security::SecurityError`], every message here is written on the
 //! assumption that it may be shown to an operator and written to a log. None carries a
-//! key, a token, a pairing code or a proof, and none echoes attacker-supplied input.
+//! key, a token, a password or a proof, and none echoes attacker-supplied input.
 //!
 //! Authentication failures are deliberately coarse. A peer that is refused learns that
-//! it was refused, not which check rejected it — the distinction between "unknown
-//! device", "revoked device" and "changed fingerprint" is recorded locally in the audit
-//! trail and never sent across the wire.
-
-use rc_protocol::DeviceId;
+//! it was refused and, at most, the coarse [`rc_protocol::control::WireRefusal`] the
+//! responder chose to disclose — never which check rejected it. The responder's own
+//! finer-grained reason (`rc_host_agent::RefusalReason`) stays in its local log.
 
 /// Result alias for transport operations.
 pub type Result<T> = std::result::Result<T, TransportError>;
@@ -115,14 +113,24 @@ pub enum TransportError {
     #[error("the session is no longer valid; authenticate again")]
     SessionInvalid,
 
-    /// This build has no way to decide whether an incoming peer may be admitted.
+    /// The responder decided not to admit this session.
     ///
-    /// The pairing protocol has been removed and the accept path that replaces it is
-    /// not present yet, so the agent has nothing to authorise against. It refuses every
-    /// session rather than admitting a peer it cannot authorise: a build with no
-    /// authorisation step must not behave as though every peer passed one.
-    #[error("this build cannot authorise a session; the agent has no way to admit a peer")]
-    AuthorizationUnavailable,
+    /// Carries the coarse [`rc_protocol::control::WireRefusal`] the responder chose to
+    /// disclose. The responder's own finer-grained reason never crosses the wire — see
+    /// that type's documentation for why.
+    #[error("the other device refused the connection")]
+    SessionRefused {
+        /// Why, in terms safe to display.
+        reason: rc_protocol::control::WireRefusal,
+    },
+
+    /// A peer sent a permission bit this build does not recognise.
+    ///
+    /// Refused rather than masked to the bits this build does know: silently dropping
+    /// an unknown permission would make the same wire value mean something different on
+    /// either side of the connection.
+    #[error("the other device sent a permission set this build does not understand")]
+    UnknownPermissions,
 
     /// Too many connections or attempts from this source.
     #[error("too many attempts; try again in {retry_after_secs} seconds")]
@@ -194,7 +202,8 @@ impl TransportError {
             | Self::IdentityProofRejected
             | Self::IncompatibleVersion
             | Self::SessionInvalid
-            | Self::AuthorizationUnavailable
+            | Self::SessionRefused { .. }
+            | Self::UnknownPermissions
             | Self::Throttled { .. }
             | Self::Bind { .. }
             | Self::Configuration { .. }
@@ -216,58 +225,8 @@ impl TransportError {
                 | Self::Revoked
                 | Self::IdentityProofRejected
                 | Self::SessionInvalid
-                | Self::AuthorizationUnavailable
+                | Self::SessionRefused { .. }
         )
-    }
-}
-
-/// Why a peer was refused, for the **local** audit trail only.
-///
-/// The wire carries only a coarse rejection. This type exists so the agent can record
-/// precisely what happened without telling the peer, which would otherwise turn the
-/// handshake into an oracle for probing which device ids are known.
-///
-/// **Nothing produces these variants in this build.** The trust lookup that used to was
-/// deleted with the pairing protocol, and the handshake currently refuses every peer
-/// with [`TransportError::AuthorizationUnavailable`] instead. The type is kept, tested
-/// and exported for the accept path, which will produce it again; it is not a live
-/// decision path today.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RejectionCause {
-    /// No trusted-device record matched the presented identity.
-    UnknownDevice,
-    /// A record matched but has been revoked.
-    RevokedDevice(DeviceId),
-    /// A record matched but the certificate fingerprint changed unexpectedly.
-    FingerprintChanged(DeviceId),
-    /// The peer could not prove possession of its identity key.
-    ProofRejected,
-    /// The peer offered an unusable protocol version.
-    VersionMismatch,
-}
-
-impl RejectionCause {
-    /// Stable name for the audit record.
-    #[must_use]
-    pub const fn name(&self) -> &'static str {
-        match self {
-            Self::UnknownDevice => "unknown_device",
-            Self::RevokedDevice(_) => "revoked_device",
-            Self::FingerprintChanged(_) => "fingerprint_changed",
-            Self::ProofRejected => "proof_rejected",
-            Self::VersionMismatch => "version_mismatch",
-        }
-    }
-
-    /// The single coarse error every rejected peer receives.
-    ///
-    /// Deliberately lossy: an unknown device and a revoked device are indistinguishable
-    /// to the peer, so the handshake cannot be used to enumerate which devices the agent
-    /// knows about.
-    #[must_use]
-    pub const fn wire_error(&self) -> TransportError {
-        TransportError::NotTrusted
     }
 }
 
@@ -322,39 +281,6 @@ mod tests {
         let err = TransportError::InvalidAddress("https://192.168.1.77".to_owned());
         assert!(!err.permits_auto_reconnect());
         assert!(!err.is_security_rejection());
-    }
-
-    #[test]
-    fn every_rejection_cause_yields_the_same_wire_error() {
-        // Account-enumeration protection at the transport layer: the peer must not be
-        // able to tell "I was never paired" from "I was revoked".
-        let device = DeviceId::generate();
-        let causes = [
-            RejectionCause::UnknownDevice,
-            RejectionCause::RevokedDevice(device),
-            RejectionCause::FingerprintChanged(device),
-            RejectionCause::ProofRejected,
-        ];
-
-        let rendered: Vec<String> = causes.iter().map(|c| c.wire_error().to_string()).collect();
-        assert!(
-            rendered.windows(2).all(|w| w[0] == w[1]),
-            "rejections must be indistinguishable on the wire, got {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn rejection_causes_have_distinct_audit_names() {
-        let device = DeviceId::generate();
-        let names = [
-            RejectionCause::UnknownDevice.name(),
-            RejectionCause::RevokedDevice(device).name(),
-            RejectionCause::FingerprintChanged(device).name(),
-            RejectionCause::ProofRejected.name(),
-            RejectionCause::VersionMismatch.name(),
-        ];
-        let unique: std::collections::HashSet<_> = names.iter().collect();
-        assert_eq!(unique.len(), names.len(), "audit names must be distinct");
     }
 
     #[test]

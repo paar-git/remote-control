@@ -41,13 +41,15 @@ use std::sync::Arc;
 
 use rc_protocol::control::{
     Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
-    ControlResult, DeviceDescriptor, Disconnect, DisconnectReason,
+    ControlResult, DeviceDescriptor, Disconnect, DisconnectReason, WireRefusal,
 };
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
 use rc_protocol::system::MetricsAgentMessage;
 use rc_protocol::{DeviceId, RequestId, SessionId};
 use rc_security::{DeviceIdentity, Fingerprint};
-use rc_transport::{ChannelReader, ChannelWriter, ClientConnector, PinPolicy, TransportError};
+use rc_transport::{
+    ChannelReader, ChannelWriter, ClientConnector, PeerAddress, PinPolicy, TransportError,
+};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -151,10 +153,11 @@ pub enum ConnectionState {
 
 /// Why an agent refused a connection, as far as the client can tell.
 ///
-/// The agent deliberately reports every authorization refusal identically, so the
-/// client cannot distinguish "never paired" from "revoked" — that is what stops the
-/// port from being usable to enumerate an agent's trusted devices. The variants below
-/// are therefore about what *this client* can determine locally.
+/// The agent collapses a dismissal, a wrong unattended password and a lockout into one
+/// [`WireRefusal::Rejected`] before it answers, so this client genuinely cannot tell
+/// them apart — that is what stops the answer from being an oracle for whether
+/// unattended access is configured. The variants below are the most this side can
+/// determine: the coarse reason it was told, plus what it can see for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -177,8 +180,15 @@ impl RefusalReason {
     #[must_use]
     pub fn classify(error: &TransportError) -> Option<Self> {
         match error {
-            TransportError::FingerprintMismatch => Some(Self::IdentityChanged),
-            TransportError::NotTrusted | TransportError::Revoked => Some(Self::NotAuthorized),
+            TransportError::FingerprintMismatch
+            | TransportError::SessionRefused {
+                reason: WireRefusal::IdentityChanged,
+            } => Some(Self::IdentityChanged),
+            TransportError::SessionRefused {
+                reason: WireRefusal::NotAccepting | WireRefusal::Rejected,
+            }
+            | TransportError::NotTrusted
+            | TransportError::Revoked => Some(Self::NotAuthorized),
             TransportError::IncompatibleVersion => Some(Self::ProtocolMismatch),
             TransportError::Throttled { .. } => Some(Self::Throttled),
             _ => None,
@@ -463,12 +473,15 @@ impl ConnectionManager {
 
         let (mut writer, mut reader) =
             rc_transport::open_channel(&connection, rc_protocol::Channel::Control).await?;
+        let dialed_address = address.to_string().parse::<PeerAddress>()?;
 
         let ack = rc_transport::handshake::begin_handshake(
             &mut reader,
             &mut writer,
             self.descriptor.clone(),
             self.capabilities.clone(),
+            dialed_address,
+            None,
             rc_protocol::now_ms(),
         )
         .await?;

@@ -48,6 +48,6 @@ pub mod tls;
 pub use address::PeerAddress;
 pub use channel::{ChannelReader, ChannelWriter, accept_channel, open_channel};
 pub use endpoint::{AgentListener, ClientConnector};
-pub use error::{RejectionCause, Result, TransportError};
+pub use error::{Result, TransportError};
 pub use handshake::AuthenticatedPeer;
 pub use tls::{ALPN, ObservedCertificate, ObservedPeer, PinPolicy, peer_certificate_fingerprint};

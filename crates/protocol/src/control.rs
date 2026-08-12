@@ -1,5 +1,7 @@
 //! Control-channel messages: handshake, authorization and session lifecycle.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{DeviceId, RequestId, SessionId};
@@ -125,6 +127,86 @@ pub struct HelloAck {
     /// Seconds of inactivity after which the agent will end the session, or `0` when
     /// no idle timeout applies.
     pub idle_timeout_secs: u32,
+}
+
+/// Sent by the initiator immediately after [`HelloAck`].
+///
+/// The password travels inside the already-established mutually-authenticated TLS
+/// connection, so it is never on the wire in the clear, and it is never part of
+/// [`Hello`] — a peer that has not yet seen who it is talking to should not have sent
+/// a secret.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Authenticate {
+    /// The canonical address the user dialled.
+    ///
+    /// The responder uses this as the key for pinned identities. It is carried here so
+    /// the responder never has to guess from the QUIC remote socket address, whose port
+    /// is ephemeral and therefore not the address the user saved.
+    pub dialed_address: String,
+    /// The unattended-access password, when the user supplied one.
+    pub unattended_password: Option<String>,
+}
+
+impl fmt::Debug for Authenticate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Authenticate")
+            .field("dialed_address", &self.dialed_address)
+            .field(
+                "unattended_password",
+                &self.unattended_password.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// The permissions granted to a session, as carried on the wire.
+///
+/// A bitset mirroring `rc_security::PermissionSet`, kept as a separate type here rather
+/// than reused directly: `rc-security` already depends on `rc-protocol` (for
+/// [`DeviceId`] and the shared clock), so this crate depending back on `rc-security`
+/// would be a cycle. Whichever crate depends on both — `rc-transport`, in practice —
+/// converts between the two at the boundary; this type carries only what postcard needs
+/// to (de)serialise the bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WirePermissions(pub u8);
+
+/// What a peer is told about its own connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SessionAuthorization {
+    /// Proceed. These permissions hold for the whole session and cannot be widened.
+    Granted {
+        /// The granted permissions, as wire bits. See [`WirePermissions`].
+        permissions: WirePermissions,
+        /// The responder's machine name, for the initiator's Recent list.
+        machine_name: String,
+    },
+    /// Do not proceed.
+    Refused {
+        /// Why, in terms safe to disclose to the peer.
+        reason: WireRefusal,
+    },
+}
+
+/// Why a peer was refused, as the peer is told it.
+///
+/// Deliberately coarser than the receiving machine's own reason. A dismissal, a wrong
+/// password and a lockout are one value here (`Rejected`): distinguishing them would
+/// tell a caller whether unattended access is configured and whether its guesses are
+/// landing. The finer-grained local reason lives in `rc-host-agent`'s `RefusalReason`
+/// and is never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WireRefusal {
+    /// The machine is not accepting connections at all.
+    NotAccepting,
+    /// A pinned peer presented a different certificate.
+    IdentityChanged,
+    /// Refused. Says nothing about which of the several ways it was refused.
+    Rejected,
 }
 
 /// Why a connection was refused. Kept deliberately vague to avoid acting as an oracle.
@@ -416,6 +498,48 @@ mod tests {
 
         let back: Opening = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(hello, back);
+    }
+
+    #[test]
+    fn session_authorization_round_trips_through_postcard() {
+        let granted = SessionAuthorization::Granted {
+            permissions: WirePermissions(0b0000_0111),
+            machine_name: "WORK-LAPTOP".to_owned(),
+        };
+        let bytes = postcard::to_stdvec(&granted).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<SessionAuthorization>(&bytes).unwrap(),
+            granted
+        );
+    }
+
+    #[test]
+    fn a_refusal_round_trips_through_postcard() {
+        for reason in [
+            WireRefusal::NotAccepting,
+            WireRefusal::IdentityChanged,
+            WireRefusal::Rejected,
+        ] {
+            let refused = SessionAuthorization::Refused { reason };
+            let bytes = postcard::to_stdvec(&refused).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<SessionAuthorization>(&bytes).unwrap(),
+                refused
+            );
+        }
+    }
+
+    #[test]
+    fn an_authenticate_message_carrying_no_password_is_the_common_case() {
+        let message = Authenticate {
+            dialed_address: "192.168.1.77:7443".to_owned(),
+            unattended_password: None,
+        };
+        let bytes = postcard::to_stdvec(&message).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<Authenticate>(&bytes).unwrap(),
+            message
+        );
     }
 
     #[test]

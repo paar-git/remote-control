@@ -11,6 +11,17 @@ pub enum AccessError {
     /// The persistence layer failed.
     #[error(transparent)]
     Storage(#[from] rc_storage::StorageError),
+
+    /// A live session attempted something its granted permissions do not cover.
+    ///
+    /// Raised by [`crate::sessions::Session::require`], which every channel service
+    /// calls on each request rather than once at connect — see that type for why.
+    #[error("this session is not permitted to use {permission}")]
+    PermissionDenied {
+        /// The stable name of the permission that was missing. See
+        /// [`rc_security::Permission::name`].
+        permission: &'static str,
+    },
 }
 
 /// Convenience result alias.

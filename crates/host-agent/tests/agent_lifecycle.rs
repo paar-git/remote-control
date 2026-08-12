@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use rc_protocol::control::{DeviceDescriptor, OsFamily};
 use rc_security::{DeviceIdentity, SystemClock};
-use rc_transport::{ClientConnector, PinPolicy};
+use rc_transport::{ClientConnector, PeerAddress, PinPolicy};
 
 /// A running agent, torn down when the handle is dropped.
 struct RunningAgent {
@@ -245,6 +245,8 @@ async fn a_client_that_completes_tls_is_not_given_a_session() {
         &mut writer,
         descriptor(&identity),
         rc_protocol::control::Capabilities::default(),
+        agent.address().to_string().parse::<PeerAddress>().unwrap(),
+        None,
         rc_protocol::now_ms(),
     )
     .await;

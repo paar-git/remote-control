@@ -202,6 +202,8 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
     let server = std::sync::Arc::new(server::AgentServer::new(
         std::sync::Arc::clone(&device_identity),
         config,
+        &database,
+        std::sync::Arc::new(server::DismissingPrompt),
     ));
 
     // One shutdown signal, observed by both the listener and the local endpoint. A
