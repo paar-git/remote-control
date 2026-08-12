@@ -18,7 +18,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use rc_protocol::control::{Capabilities, DeviceDescriptor, OsFamily, PeerRole, WireRefusal};
+use rc_protocol::control::{
+    Capabilities, DeviceDescriptor, OsFamily, PeerRole, SessionAuthorization, WireRefusal,
+};
 use rc_protocol::frame::Channel;
 use rc_security::{DeviceIdentity, Permission, PermissionSet, SystemClock};
 
@@ -187,6 +189,75 @@ impl Harness {
             tokio::join!(agent_side, client_side);
         (agent_outcome, client_outcome, seen)
     }
+
+    /// Every frame a refused peer receives, undecoded.
+    ///
+    /// Drives the client half by hand rather than through [`handshake::begin_handshake`],
+    /// which decodes and discards. What is asserted is what actually crossed the wire.
+    async fn frames_a_refused_peer_receives(&self) -> Vec<rc_protocol::frame::Frame> {
+        let (listener, _endpoint_observed) = AgentListener::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            &self.agent,
+            PinPolicy::TrustOnFirstUse,
+        )
+        .unwrap();
+        let address = listener.local_address().unwrap();
+
+        let agent_side = async {
+            let connection = listener.accept().await.unwrap().unwrap();
+            let observed = rc_transport::peer_certificate_fingerprint(&connection).unwrap();
+            let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await.unwrap();
+            let _ = handshake::accept_handshake(
+                &mut reader,
+                &mut writer,
+                observed,
+                descriptor(&self.agent, "Agent"),
+                capabilities(),
+                0,
+                |_fingerprint, _dialed_address, _machine_name, _password| async {
+                    handshake::HandshakeAuthorization::Refused(WireRefusal::Rejected)
+                },
+            )
+            .await;
+            connection
+        };
+
+        let raw_client = async {
+            let (connector, _) = ClientConnector::new(&self.client, PinPolicy::TrustOnFirstUse)?;
+            let connection = connector.connect(address).await?;
+            let (mut writer, mut reader) =
+                rc_transport::open_channel(&connection, Channel::Control).await?;
+
+            writer
+                .send(&rc_protocol::control::Opening::Hello(Box::new(
+                    rc_protocol::control::Hello {
+                        version: rc_protocol::CURRENT_VERSION,
+                        role: PeerRole::Client,
+                        descriptor: descriptor(&self.client, "Client"),
+                        capabilities: capabilities(),
+                        sent_at_ms: 0,
+                    },
+                )))
+                .await?;
+
+            let ack = reader.next_frame().await?.unwrap();
+
+            writer
+                .send(&rc_protocol::control::Authenticate {
+                    dialed_address: address.to_string(),
+                    unattended_password: None,
+                })
+                .await?;
+
+            let refusal = reader.next_frame().await?.unwrap();
+
+            std::mem::forget(connector);
+            Ok::<_, TransportError>(vec![ack, refusal])
+        };
+
+        let (_connection, received) = tokio::join!(agent_side, raw_client);
+        received.unwrap()
+    }
 }
 
 /// What the `authorize` callback was handed for one connection.
@@ -249,6 +320,42 @@ async fn a_refused_peer_learns_only_the_coarse_reason() {
 }
 
 #[tokio::test]
+async fn a_refused_peer_never_learns_what_machine_it_reached() {
+    // The acknowledgement is sent before the accept decision, so everything on it is
+    // disclosed to anyone who can reach the port and complete TLS — which, under
+    // trust-on-first-use, is anyone at all. This asserts against the raw bytes both
+    // frames actually put on the wire, rather than against the shape of a struct: a
+    // refused peer must not be able to learn the machine's hostname, display name, OS
+    // version or application version from what it received.
+    let harness = Harness::new();
+    let received = harness.frames_a_refused_peer_receives().await;
+
+    for disclosure in ["test-host", "Agent", "0.1.0", "Windows"] {
+        assert!(
+            !contains(&received, disclosure.as_bytes()),
+            "a refused peer received {disclosure:?}; \
+             nothing identifying the machine may precede the accept decision"
+        );
+    }
+
+    // Not vacuous: the exchange really did happen and really did end in a refusal.
+    let refusal: SessionAuthorization = received.last().unwrap().decode_body().unwrap();
+    assert_eq!(
+        refusal,
+        SessionAuthorization::Refused {
+            reason: WireRefusal::Rejected
+        }
+    );
+}
+
+/// Whether any frame's body contains `needle`.
+fn contains(frames: &[rc_protocol::frame::Frame], needle: &[u8]) -> bool {
+    frames
+        .iter()
+        .any(|frame| frame.body.windows(needle.len()).any(|w| w == needle))
+}
+
+#[tokio::test]
 async fn a_granted_peer_is_admitted_with_exactly_the_permissions_that_were_granted() {
     // The counterpart to every refusal test above, and the reason this task exists: the
     // accept path now has a success branch. `PermissionSet::ALL` would pass even if the
@@ -283,8 +390,12 @@ async fn a_granted_peer_is_admitted_with_exactly_the_permissions_that_were_grant
         "the client must be told the same set the agent is enforcing"
     );
     assert_eq!(
-        session.machine_name, "Agent",
+        session.descriptor.display_name, "Agent",
         "the responder's name travels with the grant, for the Recent list"
+    );
+    assert_eq!(
+        session.descriptor.hostname, "test-host",
+        "and so does the rest of its identity, which a refused peer never sees"
     );
     assert_eq!(session.session_id, peer.session_id);
 }

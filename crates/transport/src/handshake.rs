@@ -26,6 +26,13 @@
 //! rather than inside [`Hello`], which a peer sends before it has seen who it is
 //! talking to.
 //!
+//! Because [`HelloAck`] precedes the decision, it carries the negotiated version and
+//! nothing else. Everything that identifies this machine — its name, hostname, OS and
+//! application versions, device id, capabilities and the session id — rides on
+//! [`SessionAuthorization::Granted`], which only an admitted peer ever sees. Otherwise
+//! anyone able to reach the port could fingerprint the machine and then be dismissed,
+//! having learned everything anyway.
+//!
 //! # The decision is made from the observed fingerprint, never from a claim
 //!
 //! [`Hello`] carries a device id, but that value is *asserted by the peer*. Any
@@ -234,18 +241,12 @@ where
     let negotiated_version = negotiate(rc_protocol::CURRENT_VERSION, hello.version);
     let session_id = SessionId::generate();
 
-    // Sent to every peer that passes the checks above. This is not an admission
-    // decision — see the module documentation — so it discloses nothing that a peer
-    // completing TLS could not already have inferred.
+    // Sent to every peer that passes the checks above, which under trust-on-first-use
+    // is anyone who can reach the port. It therefore carries the negotiated version and
+    // nothing else — see [`HelloAck`]. Everything identifying this machine waits for
+    // the admission decision below.
     writer
-        .send(&HelloAck {
-            negotiated_version,
-            descriptor: agent_descriptor.clone(),
-            capabilities: agent_capabilities,
-            sent_at_ms: now_ms,
-            session_id,
-            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-        })
+        .send(&HelloAck::for_version(negotiated_version))
         .await?;
 
     let authenticate = read_authenticate(reader).await?;
@@ -270,7 +271,11 @@ where
             writer
                 .send(&SessionAuthorization::Granted {
                     permissions: to_wire_permissions(permissions),
-                    machine_name: agent_descriptor.display_name,
+                    descriptor: Box::new(agent_descriptor),
+                    capabilities: agent_capabilities,
+                    sent_at_ms: now_ms,
+                    session_id,
+                    idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
                 })
                 .await?;
 
@@ -329,17 +334,22 @@ async fn read_authenticate(reader: &mut ChannelReader) -> Result<Authenticate> {
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u32 = 1800;
 
 /// What the initiator learns once the responder has decided.
+///
+/// Every field here arrives on [`SessionAuthorization::Granted`], not on the
+/// acknowledgement: a peer that is refused learns none of it. That is why there is no
+/// way to build one of these from a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedSession {
-    /// The responder's descriptor from the acknowledgement.
+    /// The responder's identity. Its `display_name` is the machine name to show in the
+    /// initiator's Recent list.
     pub descriptor: DeviceDescriptor,
-    /// The responder's capabilities from the acknowledgement.
+    /// What the responder can do.
     pub capabilities: Capabilities,
     /// The permissions this session was granted. Fixed for the session's lifetime.
     pub permissions: PermissionSet,
-    /// The responder's machine name, for the initiator's Recent list.
-    pub machine_name: String,
-    /// Identifier assigned to this session, for audit correlation.
+    /// The responder's wall-clock time in milliseconds since the Unix epoch.
+    pub sent_at_ms: i64,
+    /// Identifier assigned to this session, for correlating the two sides' logs.
     pub session_id: SessionId,
     /// Seconds of inactivity after which the responder will end the session, or `0`
     /// when no idle timeout applies.
@@ -385,11 +395,11 @@ pub async fn begin_handshake(
             })
         })?;
 
-    // The agent replies with either an ack or a rejection; both arrive here.
-    let ack = if let Ok(ack) = frame.decode_body::<HelloAck>()
+    // The agent replies with either an ack or a rejection; both arrive here. The ack
+    // says only that the versions are compatible, so nothing is kept from it.
+    if let Ok(ack) = frame.decode_body::<HelloAck>()
         && versions_compatible(rc_protocol::CURRENT_VERSION, ack.negotiated_version)
     {
-        ack
     } else if let Ok(reject) = frame.decode_body::<Reject>() {
         return Err(match reject.reason {
             RejectReason::IncompatibleVersion => TransportError::IncompatibleVersion,
@@ -408,7 +418,7 @@ pub async fn begin_handshake(
         return Err(TransportError::UnexpectedMessage {
             expected: "HelloAck",
         });
-    };
+    }
 
     writer
         .send(&Authenticate {
@@ -429,17 +439,21 @@ pub async fn begin_handshake(
     match authorization {
         SessionAuthorization::Granted {
             permissions,
-            machine_name,
+            descriptor,
+            capabilities,
+            sent_at_ms,
+            session_id,
+            idle_timeout_secs,
         } => {
             let permissions =
                 from_wire_permissions(permissions).ok_or(TransportError::UnknownPermissions)?;
             Ok(AdmittedSession {
-                descriptor: ack.descriptor,
-                capabilities: ack.capabilities,
+                descriptor: *descriptor,
+                capabilities,
                 permissions,
-                machine_name,
-                session_id: ack.session_id,
-                idle_timeout_secs: ack.idle_timeout_secs,
+                sent_at_ms,
+                session_id,
+                idle_timeout_secs,
             })
         }
         SessionAuthorization::Refused { reason } => Err(TransportError::SessionRefused { reason }),

@@ -106,27 +106,32 @@ pub enum Opening {
     Hello(Box<Hello>),
 }
 
-/// Response to [`Hello`].
+/// Response to [`Hello`]: the versions are compatible, keep going.
+///
+/// # It carries nothing but the version, deliberately
+///
+/// This is sent *before* the responder has decided whether to admit the peer, and the
+/// listener is trust-on-first-use, so anything here is disclosed to whoever can reach
+/// the port and complete TLS — including a peer the user then dismisses. The
+/// responder's identity, capabilities, clock and session id therefore travel on
+/// [`SessionAuthorization::Granted`] instead, which is sent only to a peer that has
+/// actually been admitted. A refused peer learns that it was refused and nothing about
+/// the machine it reached.
+///
+/// Adding a field here is not a small change: it moves that field from
+/// "disclosed to admitted peers" to "disclosed to anyone who can reach the port".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloAck {
     /// Version both peers agreed on.
     pub negotiated_version: ProtocolVersion,
-    /// Responder's identity.
-    pub descriptor: DeviceDescriptor,
-    /// Responder's capabilities.
-    pub capabilities: Capabilities,
-    /// Responder's wall-clock time in milliseconds since the Unix epoch.
-    pub sent_at_ms: i64,
-    /// Identifier the agent assigned to this session.
-    ///
-    /// Not a credential. Authentication is the mutually-authenticated TLS connection
-    /// itself, which cannot be transplanted onto another connection; this value exists
-    /// so both sides, the audit trail and the operator's "active sessions" list all
-    /// name the same session. Nothing is authorized by presenting it.
-    pub session_id: SessionId,
-    /// Seconds of inactivity after which the agent will end the session, or `0` when
-    /// no idle timeout applies.
-    pub idle_timeout_secs: u32,
+}
+
+impl HelloAck {
+    /// Acknowledge a peer on `negotiated_version`.
+    #[must_use]
+    pub const fn for_version(negotiated_version: ProtocolVersion) -> Self {
+        Self { negotiated_version }
+    }
 }
 
 /// Sent by the initiator immediately after [`HelloAck`].
@@ -173,6 +178,10 @@ impl fmt::Debug for Authenticate {
 pub struct WirePermissions(pub u8);
 
 /// What a peer is told about its own connection.
+///
+/// This is the first message that says anything about the responder itself, and it is
+/// sent only after the admission decision — see [`HelloAck`] for why everything
+/// identifying now rides here rather than on the acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum SessionAuthorization {
@@ -180,8 +189,24 @@ pub enum SessionAuthorization {
     Granted {
         /// The granted permissions, as wire bits. See [`WirePermissions`].
         permissions: WirePermissions,
-        /// The responder's machine name, for the initiator's Recent list.
-        machine_name: String,
+        /// The responder's identity, including the machine name the initiator shows in
+        /// its Recent list.
+        descriptor: Box<DeviceDescriptor>,
+        /// What the responder can do.
+        capabilities: Capabilities,
+        /// The responder's wall-clock time in milliseconds since the Unix epoch.
+        sent_at_ms: i64,
+        /// Identifier the responder assigned to this session.
+        ///
+        /// Not a credential. Authentication is the mutually-authenticated TLS
+        /// connection itself, which cannot be transplanted onto another connection;
+        /// this value exists so both sides, the local log and the operator's "active
+        /// sessions" list all name the same session. Nothing is authorized by
+        /// presenting it.
+        session_id: SessionId,
+        /// Seconds of inactivity after which the responder will end the session, or `0`
+        /// when no idle timeout applies.
+        idle_timeout_secs: u32,
     },
     /// Do not proceed.
     Refused {
@@ -504,7 +529,11 @@ mod tests {
     fn session_authorization_round_trips_through_postcard() {
         let granted = SessionAuthorization::Granted {
             permissions: WirePermissions(0b0000_0111),
-            machine_name: "WORK-LAPTOP".to_owned(),
+            descriptor: Box::new(crate::test_support::sample_descriptor()),
+            capabilities: Capabilities::default(),
+            sent_at_ms: 1_700_000_000_000,
+            session_id: SessionId::generate(),
+            idle_timeout_secs: 1800,
         };
         let bytes = postcard::to_stdvec(&granted).unwrap();
         assert_eq!(
