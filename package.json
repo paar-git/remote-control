@@ -3,7 +3,7 @@
   "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "Private remote-access platform: host agent, desktop client and optional coordination service.",
+  "description": "Private remote-access platform: host agent and desktop client.",
   "packageManager": "pnpm@11.1.1",
   "engines": {
     "node": ">=20.19.0"

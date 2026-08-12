@@ -14,7 +14,8 @@
 //! # What is recorded
 //!
 //! Only what the operator needs in order to recognise a session and end it: which
-//! device, which role, where from, when it started and when it was last active. No
+//! device, what it was permitted to do, where from, when it started and when it was
+//! last active. No
 //! message content, and no credential — there is no session credential to record,
 //! because a session is authenticated by its TLS connection rather than by a bearer
 //! value.
