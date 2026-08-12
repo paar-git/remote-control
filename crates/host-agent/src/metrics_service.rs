@@ -226,17 +226,18 @@ mod tests {
     }
 
     #[test]
-    fn a_session_with_view_metrics_may_watch_but_one_without_it_may_not() {
-        // The permission the service re-checks on every tick, decided by the granted
-        // set rather than by a role check written here.
+    fn the_gate_this_service_applies_is_the_session_s_own() {
+        // What the per-tick check calls, asserted through the same door the service
+        // uses rather than by restating `PermissionSet`'s semantics. The tick loop
+        // itself needs a live `ChannelWriter`, which needs a real QUIC connection, so
+        // the loop is covered end-to-end and not here; `sessions::Session::require`
+        // carries the refusal semantics under its own tests.
+        let watcher = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        assert!(watcher.require(Permission::ViewMetrics).is_ok());
+
+        let revoked = Session::new(PermissionSet::NONE);
         assert!(
-            PermissionSet::NONE
-                .with(Permission::ViewMetrics)
-                .contains(Permission::ViewMetrics),
-            "granting ViewMetrics is what lets a session watch"
-        );
-        assert!(
-            !PermissionSet::NONE.contains(Permission::ViewMetrics),
+            revoked.require(Permission::ViewMetrics).is_err(),
             "a session stripped of the permission must stop a stream mid-flight, not at \
              the next connection"
         );
