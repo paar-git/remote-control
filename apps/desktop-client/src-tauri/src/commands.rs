@@ -90,19 +90,32 @@ impl CommandError {
         }
     }
 
-    /// The application is locked and no session is active.
-    pub(crate) fn locked() -> Self {
-        Self::new("locked", "Sign in to continue.")
-    }
-
-    /// The session exists but lacks the required permission.
+    /// The session does not hold the permission this operation needs.
+    ///
+    /// Covers "not connected" as well as "connected without it": a client with no
+    /// session holds no permissions, and there is no separate locked state to report
+    /// since the application has no login. The wording says what the *session* may do,
+    /// not what an account may do, because that is what the remote machine granted.
     pub(crate) fn permission_denied(permission: Permission) -> Self {
         Self::new(
             "permission_denied",
             format!(
-                "This account is not permitted to {}.",
+                "This session is not permitted to {}. Connect again and grant it when asked.",
                 permission.name().replace('_', " ")
             ),
+        )
+    }
+
+    /// Something was asked of the host side that it cannot do right now.
+    pub(crate) fn host(message: impl Into<String>) -> Self {
+        Self::new("host_unavailable", message)
+    }
+
+    /// The local database is not open, so nothing can be read or saved.
+    pub(crate) fn no_database() -> Self {
+        Self::new(
+            "no_database",
+            "This installation's database could not be opened, so settings and recent              connections are unavailable. Check the application log.",
         )
     }
 }

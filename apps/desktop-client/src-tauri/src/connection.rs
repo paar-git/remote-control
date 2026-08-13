@@ -46,7 +46,7 @@ use rc_protocol::control::{
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
 use rc_protocol::system::MetricsAgentMessage;
 use rc_protocol::{DeviceId, RequestId, SessionId};
-use rc_security::{DeviceIdentity, Fingerprint};
+use rc_security::{DeviceIdentity, Fingerprint, PermissionSet};
 use rc_transport::{
     ChannelReader, ChannelWriter, ClientConnector, PeerAddress, PinPolicy, TransportError,
 };
@@ -341,6 +341,18 @@ pub struct ConnectionManager {
     /// nothing until a subscription exists, so an open channel with nobody watching
     /// costs a parked task and no load on the server.
     metrics: Mutex<Option<ChannelWriter>>,
+    /// What the agent granted this session, and therefore what this client may ask of
+    /// it.
+    ///
+    /// Not a cache of a decision made here: the agent decided it, sent it on
+    /// `SessionAuthorization::Granted`, and enforces it on every request of its own.
+    /// This copy exists so the client refuses locally too, and shows the operator
+    /// controls that can actually work rather than buttons that will be denied.
+    ///
+    /// Cleared by [`ConnectionManager::set_state`] on any state that is not
+    /// `Connected`, so a permission cannot outlive the session that carried it. That is
+    /// why it lives beside `state` and is written only there.
+    granted: std::sync::Mutex<PermissionSet>,
     /// Set by [`ConnectionManager::disconnect`] and cleared by an explicit connect.
     ///
     /// The single flag that separates "the link dropped" from "the operator ended it".
@@ -361,6 +373,7 @@ impl ConnectionManager {
             descriptor,
             capabilities,
             state: std::sync::Mutex::new(ConnectionState::Offline),
+            granted: std::sync::Mutex::new(PermissionSet::NONE),
             active: Mutex::new(None),
             files: Mutex::new(None),
             metrics: Mutex::new(None),
@@ -384,7 +397,33 @@ impl ConnectionManager {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// What the connected agent granted this session.
+    ///
+    /// [`PermissionSet::NONE`] whenever nothing is connected, which is what makes every
+    /// gated command fail closed between sessions rather than carrying the last one's
+    /// grant forward.
+    #[must_use]
+    pub fn granted(&self) -> PermissionSet {
+        self.granted
+            .lock()
+            .map_or(PermissionSet::NONE, |guard| *guard)
+    }
+
+    /// Record what the agent granted, for the life of this connection.
+    fn set_granted(&self, permissions: PermissionSet) {
+        if let Ok(mut guard) = self.granted.lock() {
+            *guard = permissions;
+        }
+    }
+
     fn set_state(&self, state: ConnectionState) {
+        // Any state but `Connected` means there is no session, so there is nothing
+        // granted. Clearing here rather than at each call site is what stops a grant
+        // outliving its session: every path out of `Connected` goes through this
+        // function, including the ones that end a connection by failing.
+        if !matches!(state, ConnectionState::Connected { .. }) {
+            self.set_granted(PermissionSet::NONE);
+        }
         if let Ok(mut guard) = self.state.lock() {
             tracing::debug!(?state, "connection state changed");
             *guard = state;
@@ -494,10 +533,16 @@ impl ConnectionManager {
         }
 
         let session_id = ack.session_id;
+        // Set after `set_state`, which clears it for every state but `Connected`.
         self.set_state(ConnectionState::Connected {
             session_id: session_id.to_canonical_string(),
             address: address.to_string(),
         });
+        self.set_granted(ack.permissions);
+        tracing::info!(
+            granted = ?ack.permissions,
+            "the agent granted this session its permissions"
+        );
 
         // The connector is held by the active connection: dropping it would close the
         // endpoint underneath the connection that was just established.

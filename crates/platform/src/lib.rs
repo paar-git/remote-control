@@ -18,7 +18,7 @@ pub mod host;
 pub mod paths;
 
 pub use error::{PlatformError, Result};
-pub use host::HostInfo;
+pub use host::{HostInfo, reachable_addresses};
 pub use paths::AppPaths;
 
 /// Whether the current process is running with Administrator / root privileges.

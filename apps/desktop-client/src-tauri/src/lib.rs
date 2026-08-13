@@ -14,29 +14,17 @@ mod commands;
 mod connect_commands;
 mod connection;
 mod file_commands;
+mod host;
+mod host_commands;
+mod host_events;
 mod session_commands;
 mod update_commands;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rc_platform::{AppPaths, HostInfo};
 use rc_security::{Clock, DeviceIdentity, Permission, PermissionSet, SystemClock};
 use serde::Serialize;
-
-/// An authenticated owner session, held in memory only.
-///
-/// Deliberately not persisted: unlocking the application is a per-run action, so
-/// closing the app relocks it.
-#[derive(Debug, Clone)]
-pub struct OwnerSession {
-    /// Account identifier.
-    pub account_id: String,
-    /// Login name.
-    pub username: String,
-    /// Permissions held. Always [`PermissionSet::ALL`] in v1: there is exactly one
-    /// owner account and it holds everything.
-    pub permissions: PermissionSet,
-}
 
 /// Shared backend state, created once during setup.
 pub struct AppState {
@@ -56,8 +44,11 @@ pub struct AppState {
     /// since duplicating a private key is not something that should be easy to do by
     /// accident.
     pub identity: Option<Arc<DeviceIdentity>>,
-    /// The authenticated session, if the application is unlocked.
-    pub session: Mutex<Option<OwnerSession>>,
+    /// The host side: the listener, and the prompt that raises the Accept dialog.
+    ///
+    /// Distinct from [`AppState::host`], which is facts about this machine. This is the
+    /// half of the application that answers the door.
+    pub host_runtime: Arc<host::HostRuntime>,
     /// The connection to a saved server, when this client has an identity to use.
     ///
     /// `None` only when the keystore could not be loaded, in which case the window
@@ -70,39 +61,32 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The permissions held by the current session.
+    /// The permissions the connected agent granted this client's outbound session.
     ///
-    /// Returns `None` when the application is locked. Note that this is *application*
-    /// authorization only: it never implies operating-system privilege, which stays
-    /// behind the agent's allowlist.
+    /// Empty whenever nothing is connected. Note what this is *not*: it is not a local
+    /// account's authority, and there is no longer any such thing — the application has
+    /// no login and nothing to unlock. It is the remote machine's answer to "what may
+    /// this session do", which the remote machine also enforces itself on every
+    /// request. Checking it here as well means the client refuses locally rather than
+    /// sending a request it already knows will be denied.
     #[must_use]
-    pub fn authorization(&self) -> Option<PermissionSet> {
-        let session = self.session.lock().ok()?;
-        session.as_ref().map(|s| s.permissions)
+    pub fn authorization(&self) -> PermissionSet {
+        self.connection
+            .as_ref()
+            .map_or(PermissionSet::NONE, |manager| manager.granted())
     }
 
-    /// Enforce that the current session holds `permission`.
+    /// Enforce that the session holds `permission`.
     ///
-    /// Every permission check goes through here rather than through scattered
-    /// `is_owner` tests, so widening what a session may do means changing one place.
+    /// Every check goes through here rather than through scattered tests, so widening
+    /// what a session may do means changing one place. A client with no connection
+    /// holds nothing, so this fails closed before a session exists rather than needing
+    /// a separate "are we connected" question at each call site.
     fn require_permission(&self, permission: Permission) -> Result<(), commands::CommandError> {
-        match self.authorization() {
-            None => Err(commands::CommandError::locked()),
-            Some(granted) if granted.contains(permission) => Ok(()),
-            Some(_) => Err(commands::CommandError::permission_denied(permission)),
-        }
-    }
-
-    /// Enforce that the application is unlocked.
-    ///
-    /// Used for actions that belong to the operator using this application locally —
-    /// trusted-device management, update handling — which are not gated by any of the
-    /// three permissions a remote peer can hold: there is exactly one local owner
-    /// account, and it always holds everything.
-    fn require_unlocked(&self) -> Result<(), commands::CommandError> {
-        match self.authorization() {
-            Some(_) => Ok(()),
-            None => Err(commands::CommandError::locked()),
+        if self.authorization().contains(permission) {
+            Ok(())
+        } else {
+            Err(commands::CommandError::permission_denied(permission))
         }
     }
 }
@@ -188,7 +172,7 @@ async fn initialise() -> Arc<AppState> {
         paths: paths.clone(),
         database: None,
         identity: None,
-        session: Mutex::new(None),
+        host_runtime: Arc::new(host::HostRuntime::new(host::TauriPrompt::new())),
         connection: None,
         clock: Arc::clone(&clock),
         updater: update_commands::UpdateRuntime::new(paths.data_dir()),
@@ -258,7 +242,7 @@ async fn initialise() -> Arc<AppState> {
         paths: paths.clone(),
         database,
         identity,
-        session: Mutex::new(None),
+        host_runtime: Arc::new(host::HostRuntime::new(host::TauriPrompt::new())),
         connection,
         clock,
         updater: update_commands::UpdateRuntime::new(paths.data_dir()),
@@ -297,10 +281,37 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup({
+            // Captured rather than looked up through the app: `Manager::state` would
+            // need the trait in scope here, and every Tauri type this file names is one
+            // more thing the linker has to be able to drop from the test binary.
+            let state = Arc::clone(&state);
+            move |app| {
+                // The prompt is built with the rest of the state, before there is a
+                // window to raise a dialog in. This is the first moment there is one.
+                state
+                    .host_runtime
+                    .prompt()
+                    .attach(Arc::new(host_events::WindowChannel::new(
+                        app.handle().clone(),
+                    )));
+                Ok(())
+            }
+        })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             client_info,
             commands::local_identity,
+            host_commands::host_status,
+            host_commands::set_accepting,
+            host_commands::pending_accept_request,
+            host_commands::answer_accept_request,
+            host_commands::dismiss_accept_request,
+            host_commands::list_recent,
+            host_commands::set_always_allow,
+            host_commands::remove_recent,
+            host_commands::host_settings,
+            host_commands::set_unattended_password,
             connect_commands::disconnect_from_server,
             connect_commands::connection_state,
             connect_commands::ping_server,

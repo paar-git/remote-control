@@ -610,3 +610,163 @@ export function cancelUpdateDownload(deletePartial: boolean): Promise<UpdateStat
 export function installUpdate(): Promise<InstallResult> {
   return call('install_update', installResultSchema);
 }
+
+/* -------------------------------------------------------------------------- */
+/* The host side: accepting connections on this machine                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A permission a session can hold. These exact strings are `Permission::name()` in
+ * `rc-security`; the enum is closed on purpose, so a build that learns a new permission
+ * without the interface learning it fails validation rather than rendering a name
+ * nobody has written a control for.
+ */
+export const permissionSchema = z.enum(['control_input', 'transfer_files', 'view_metrics']);
+export type Permission = z.infer<typeof permissionSchema>;
+
+/**
+ * A machine name chosen by whoever owns that machine.
+ *
+ * Stripped first and measured second: a name made entirely of control characters or
+ * bidi overrides renders as nothing at all, and a length check applied before the strip
+ * would let it through.
+ */
+const machineName = untrustedText(64).refine(
+  (value) => value.length > 0,
+  'a machine name is required',
+);
+
+/** Whether this machine is accepting connections, and where it can be reached. */
+export const hostStatusSchema = z.object({
+  accepting: z.boolean(),
+  /** Every address a peer could dial to reach this machine, `host:port`. */
+  addresses: z.array(z.string().min(1)),
+  machineName,
+  listenPort: z.number().int().min(1).max(65535),
+});
+
+export type HostStatus = z.infer<typeof hostStatusSchema>;
+
+/**
+ * An incoming connection waiting for a human to decide.
+ *
+ * `machineName` is chosen by the peer, so it goes through `untrustedText` — the same
+ * treatment remote file names get, and for the same reason. The fingerprint does not:
+ * it is generated locally from the observed certificate and must reach the interface
+ * byte-for-byte, since comparing it is the whole point of showing it.
+ */
+export const acceptRequestSchema = z.object({
+  requestId: z.string().min(1),
+  address: z.string().min(1),
+  fingerprint: fingerprintSchema,
+  machineName: untrustedText(64),
+});
+
+export type AcceptRequest = z.infer<typeof acceptRequestSchema>;
+
+/** A machine this installation has connected to before. */
+export const recentSchema = z.object({
+  address: z.string().min(1),
+  machineName: untrustedText(64),
+  lastConnectedMs: z.number().int(),
+  /** Whether a pinned identity lets this machine in without asking. */
+  alwaysAllow: z.boolean(),
+  /** What an always-allow connection receives. Empty unless `alwaysAllow`. */
+  pinnedPermissions: z.array(permissionSchema),
+});
+
+export type Recent = z.infer<typeof recentSchema>;
+
+/**
+ * This machine's own settings.
+ *
+ * Note what is absent. There is no field for the unattended password or its hash, and
+ * the schema strips unknown keys rather than passing them through, so a backend that
+ * started sending one would not deliver it to the webview.
+ */
+export const settingsSchema = z.object({
+  accepting: z.boolean(),
+  listenPort: z.number().int().min(1).max(65535),
+  machineName,
+  /** Whether a password is set. Never the password, and never its hash. */
+  unattendedConfigured: z.boolean(),
+  /** What an unattended-password connection receives. Empty unless configured. */
+  unattendedPermissions: z.array(permissionSchema),
+});
+
+export type Settings = z.infer<typeof settingsSchema>;
+
+/** Whether this machine is accepting, and where it can be reached. */
+export function getHostStatus(): Promise<HostStatus> {
+  return call('host_status', hostStatusSchema);
+}
+
+/** Start or stop accepting incoming connections. */
+export function setAccepting(accepting: boolean): Promise<HostStatus> {
+  return call('set_accepting', hostStatusSchema, { accepting });
+}
+
+/** The connection waiting on a decision, if one is waiting. */
+export function getPendingAcceptRequest(): Promise<AcceptRequest | null> {
+  return call('pending_accept_request', acceptRequestSchema.nullable());
+}
+
+/**
+ * Answer a pending request.
+ *
+ * An empty `granted` is a refusal, not an empty session — the backend treats it as one,
+ * in one place, rather than the interface deciding separately.
+ */
+export function answerAcceptRequest(requestId: string, granted: Permission[]): Promise<null> {
+  return call('answer_accept_request', z.null(), { requestId, granted });
+}
+
+/**
+ * Refuse a pending request.
+ *
+ * A separate call from answering with nothing, so "No" is an explicit act rather than
+ * an accept that happens to carry no permissions.
+ */
+export function dismissAcceptRequest(requestId: string): Promise<null> {
+  return call('dismiss_accept_request', z.null(), { requestId });
+}
+
+/** Machines connected to before, most recent first. */
+export function listRecent(): Promise<Recent[]> {
+  return call('list_recent', z.array(recentSchema));
+}
+
+/**
+ * Pin or unpin a machine's identity.
+ *
+ * Pinning requires an identity to pin, which only a connection can supply, so turning
+ * this on for an address this installation has not seen connect is an error rather than
+ * a pin of nothing.
+ */
+export function setAlwaysAllow(address: string, always: boolean): Promise<null> {
+  return call('set_always_allow', z.null(), { address, always });
+}
+
+/** Forget a machine, pin included. */
+export function removeRecent(address: string): Promise<null> {
+  return call('remove_recent', z.null(), { address });
+}
+
+/** This machine's settings. */
+export function getHostSettings(): Promise<Settings> {
+  return call('host_settings', settingsSchema);
+}
+
+/**
+ * Set or clear the unattended-access password.
+ *
+ * Passing `null` clears it, and clearing it also clears what it granted — the backend
+ * writes both together so a password can never be removed while leaving permissions
+ * behind for the next one.
+ */
+export function setUnattendedPassword(
+  password: string | null,
+  permissions: Permission[],
+): Promise<null> {
+  return call('set_unattended_password', z.null(), { password, permissions });
+}
