@@ -31,7 +31,6 @@ rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }
 rc-file-transfer = { path = "crates/file-transfer" }
 rc-updater = { path = "crates/updater" }
-rc-remote-desktop = { path = "crates/remote-desktop" }
 rc-host-agent = { path = "crates/host-agent" }
 
 # --- async runtime ---

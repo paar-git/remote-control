@@ -11,23 +11,45 @@ Pressing Disconnect sets a flag that every retry path checks. Without it, Discon
 would be a button that disconnects for half a second, which is worse than no button at
 all.
 
-Two further cases must not retry, for a different reason. A refused connection —
-unknown device, revoked device, changed identity — and an incompatible peer both fail
-for reasons that retrying cannot fix. Retrying them would turn a loud, visible failure
-into a quiet loop that nobody sees, which is precisely the failure mode a fingerprint
-mismatch exists to make noisy.
+Two further cases must not retry, for a different reason. A **refusal** and an
+incompatible peer both fail for reasons that retrying cannot fix. Retrying them would
+turn a loud, visible failure into a quiet loop that nobody sees, which is precisely the
+failure mode a fingerprint mismatch exists to make noisy.
+
+A refusal now arrives as `TransportError::SessionRefused`, carrying a `WireRefusal`.
+**No value of it is ever retried**, and that is deliberate for each one:
+
+- `Rejected` means a person said no, a password was wrong, or the address is locked out.
+  Retrying a refusal by a human is pestering them; retrying a wrong password walks into
+  the lockout; and the three are indistinguishable here by design, so the safe reading
+  of an ambiguous value is the one that does not retry.
+- `NotAccepting` means the other machine has incoming connections switched off. Nothing
+  changes until someone turns them on.
+- `IdentityChanged` is the loudest failure this application has. Retrying it would
+  reduce an active-attacker signal to a background hum.
 
 `TransportError::permits_auto_reconnect` is the single place that distinction is
 decided.
 
 | Situation | Retried automatically? |
 |---|---|
-| Network dropped, agent restarted, handshake timed out | yes |
+| Network dropped, the other machine restarted, handshake timed out | yes |
+| The address did not resolve | yes |
 | The operator pressed Disconnect | **no** |
-| The agent refused this device | **no** |
-| The agent presented a different certificate | **no** |
+| The connection was refused, for any reason | **no** |
+| The other machine presented a different certificate | **no** |
 | Protocol or version mismatch | **no** |
-| The agent is rate-limiting this client | **no** |
+| The other machine is rate-limiting this one | **no** |
+| The address is malformed | **no** |
+| The other machine sent a permission this build does not know | **no** |
+
+A name that does not resolve **is** retried, which looks like an exception and is not.
+Resolution runs fresh on every attempt, so a machine that went to sleep and a resolver
+that blipped both produce exactly the same error as a permanently bad name — and both
+heal without anyone touching anything. Filing it as permanent would mean a saved machine
+that went to sleep stopped being reachable until the operator intervened, with nothing
+mistyped and nothing wrong. A *malformed* address is permanent, because that text does
+not change between attempts.
 
 ## Connection states
 
@@ -36,16 +58,16 @@ attempt 3" and "the server refused this device" call for completely different re
 from the operator.
 
 ```
-  Offline ──connect──► Discovering ──► Connecting ──► Authenticating ──► Connected
-     ▲                      │              │                │               │
-     │                      └──────────────┴────────────────┘               │
-     │                                   failure                            │
-     │                                      │                               │
-     │                          ┌───────────┴────────────┐                  │
-     │                          │                        │                  │
-     └────── refused ───────────┘              WaitingToRetry ◄─────lost ────┘
-        (identity changed,                        │
-         revoked, not paired)                     └──► Reconnecting ──► …
+  Offline ──connect──► Connecting ──► Authenticating ──► Connected
+     ▲                      │                │               │
+     │                      └────────────────┘               │
+     │                            failure                    │
+     │                               │                       │
+     │                   ┌───────────┴────────────┐          │
+     │                   │                        │          │
+     └────── refused ────┘              WaitingToRetry ◄──lost┘
+        (identity changed,                  │
+         not accepting, rejected)           └──► Reconnecting ──► …
 ```
 
 ## Backoff
@@ -70,25 +92,30 @@ was doing.
 - **Destructive and privileged commands are never repeated automatically.** A power
   action, a service stop or a process kill that was in flight when the link dropped is
   not retried; the operator issues it again if they still want it.
-- **Terminal input is never resent.** A half-delivered command line reaching a shell
-  twice is its own kind of disaster.
 - **Interrupted file transfers may resume**, because a transfer is idempotent by
   construction: it has a checksum, an offset, and a defined result.
+- **The permission grant is not carried over.** A reconnection is a new admission
+  decision, so the new session holds what that decision granted and not what the
+  previous one held. The grant is cleared the moment the connection leaves the connected
+  state.
 
-## Identity is verified again, every time
+## The decision is made again, every time
 
-A reconnect is a new connection and goes through the whole handshake: the certificate
-is pinned again, and the agent performs a fresh trust lookup against its database.
+A reconnect is a new connection and goes through the whole handshake, including the
+admission decision. The certificate is observed again and checked against the pin again.
 
-This is what makes revocation immediate. A device revoked while it was connected is
-refused on its very next attempt, without waiting for a cache to expire or for either
-side to restart.
+This is what makes withdrawing access immediate. A machine whose pin is removed while it
+is connected is asked about again on its very next attempt, and one whose certificate
+changed is refused outright rather than being handed to the dialog.
 
-## Where the client reconnects *to*
+It also means the permissions can differ between one session and the next, because a
+different human may answer differently. Nothing caches the previous answer.
 
-The same order as a first connection: the last address that worked, then discovery,
-then the configured endpoint. A server that changed address after a power cut is found
-by discovery on the second candidate.
+## Where it reconnects *to*
+
+The same address that was dialled. There is no discovery and no configured endpoint to
+fall back to: a machine is reached by the address its user read off their screen, and if
+that address changed, its user has to say so.
 
 ## Known limitation
 
