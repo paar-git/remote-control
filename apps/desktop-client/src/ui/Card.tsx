@@ -8,7 +8,6 @@
 
 import type { LucideIcon } from 'lucide-react';
 
-
 export function Card({
   children,
   className = '',
@@ -58,6 +57,3 @@ export function CardHeader({
     </div>
   );
 }
-
-
-
