@@ -500,6 +500,15 @@ async fn send_reject(writer: &mut ChannelWriter, reason: RejectReason) {
 async fn send_session_refusal(writer: &mut ChannelWriter, reason: WireRefusal) {
     if let Err(err) = writer.send(&SessionAuthorization::Refused { reason }).await {
         tracing::debug!(%err, "could not deliver a session refusal");
+        return;
+    }
+    // Finished, not merely written. The caller tears the connection down as soon as this
+    // returns, and unfinished stream data goes with it — the peer would then see a lost
+    // connection rather than a refusal. That matters beyond tidiness: a lost connection
+    // is retryable and a refusal is not, so the peer would reconnect in a loop against a
+    // machine that had already said no.
+    if let Err(err) = writer.finish() {
+        tracing::debug!(%err, "could not finish the stream carrying a session refusal");
     }
 }
 

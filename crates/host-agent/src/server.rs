@@ -312,6 +312,17 @@ impl AgentServer {
                     %err,
                     "refusing a connection"
                 );
+                // The refusal has been written and its stream finished. Wait for the
+                // peer to acknowledge by closing, rather than dropping the connection
+                // out from under the frame: a peer that never receives its refusal sees
+                // a lost connection instead, which is retryable, and would reconnect in
+                // a loop against a machine that had already refused it.
+                //
+                // Bounded, because a peer that does not close is not something to wait
+                // on. Two seconds is far longer than a loopback or LAN round trip.
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), connection.closed())
+                        .await;
                 return Err(err.into());
             }
         };

@@ -41,8 +41,9 @@ picture that had not loaded yet. `control_input` exists as a permission and is g
 and enforced, but nothing consumes it yet.
 
 **Cross-machine use has not been confirmed by hand.** Everything below is verified by
-automated tests, including two real QUIC endpoints over loopback. A run between two
-physical machines on a real network has not been recorded.
+automated tests, including nine cases driven against the real `rc-agent` binary in its
+own process. A run between two *physical* machines on a real network has not been
+recorded.
 
 ## Deleted, and why the test count fell
 
@@ -59,7 +60,7 @@ history and it is the reason the Rust suite is smaller than it was:
 | Privileged helper | Service and power control went with it. |
 | Remote terminal | Out of scope for this product. |
 
-**Rust tests: 814 → 573.** Every one of the 241 removed tests belonged to deleted code,
+**Rust tests: 814 → 582.** Every one of the removed tests belonged to deleted code,
 and each drop was reconciled against what was deleted at the time it happened. The
 largest single fall was 156 tests when the pairing protocol went, which had been the
 most heavily tested subsystem in the tree.
@@ -76,7 +77,7 @@ Run against the current tree. Reproduce with `pnpm verify`.
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace` | **573 passed**, 0 failed |
+| `cargo test --workspace -- --test-threads=1` | **582 passed**, 0 failed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean, exit 0 |
 | `cargo fmt --all --check` | clean |
 | `cargo doc --workspace --no-deps` | clean |
@@ -110,6 +111,12 @@ Not a list of everything, but the ones that pin a property rather than a behavio
 - **The two address parsers agree.** `address.ts` re-implements `PeerAddress::from_str`
   so a typo is reported under the field instead of arriving as a timeout;
   `crates/transport/tests/address_cross_check.rs` is the table both must satisfy.
+- **The access model, against the real binary.** Nine cases in
+  `crates/host-agent/tests/access_e2e.rs` spawn `rc-agent` as its own process with a
+  seeded database and drive a real client at it over QUIC: dismissal, not-accepting,
+  wrong password, a pinned peer whose certificate changed, a correct password, a pinned
+  peer admitted without a prompt, a withheld permission refused per request, and a pin
+  surviving a restart.
 
 ## Known loose ends
 
@@ -117,9 +124,6 @@ Not a list of everything, but the ones that pin a property rather than a behavio
   rework went through a separate review pass; these two were implemented and verified by
   the same process that wrote them. Task 11 is the most security-sensitive commit in the
   project.
-- **Two-process integration tests are not written.** The transport is covered end to end
-  over loopback, but the admission model has not been driven through two separate
-  processes.
 - **`set_always_allow` grants everything when pinning.** It matches the Accept dialog's
   default; narrowing it belongs in the settings dialog and is not there yet.
 - **The unattended verification uses a hard-coded production hashing policy** for the
