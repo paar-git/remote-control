@@ -34,25 +34,3 @@ export function PageHeader({
   );
 }
 
-/** A heading for a group of cards inside a screen. */
-export function SectionHeading({
-  title,
-  description,
-  actions,
-}: {
-  readonly title: string;
-  readonly description?: string | undefined;
-  readonly actions?: React.ReactNode | undefined;
-}): React.JSX.Element {
-  return (
-    <div className="mb-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
-      <div className="min-w-0">
-        <h3 className="text-sm font-semibold">{title}</h3>
-        {description !== undefined && (
-          <p className="mt-0.5 max-w-2xl text-xs text-(--color-text-secondary)">{description}</p>
-        )}
-      </div>
-      {actions}
-    </div>
-  );
-}

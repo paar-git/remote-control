@@ -1,0 +1,168 @@
+import { act, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { SessionToolbar, TOOLBAR_HIDE_MS, TOOLBAR_REVEAL_PX } from './SessionToolbar';
+
+const ALL = ['control_input', 'transfer_files', 'view_metrics'] as const;
+
+function renderToolbar(permissions: readonly string[] = ALL) {
+  const onDisconnect = vi.fn();
+  const onOpenFiles = vi.fn();
+  const onOpenMonitoring = vi.fn();
+  render(
+    <SessionToolbar
+      permissions={permissions}
+      machineName="WORK-LAPTOP"
+      onDisconnect={onDisconnect}
+      onOpenFiles={onOpenFiles}
+      onOpenMonitoring={onOpenMonitoring}
+    />,
+  );
+  return { onDisconnect, onOpenFiles, onOpenMonitoring };
+}
+
+/** Move the pointer to `clientY`, as the window listener sees it. */
+function movePointerTo(clientY: number) {
+  act(() => {
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY }));
+  });
+}
+
+describe('SessionToolbar', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('offers every tool when the session holds every permission', () => {
+    renderToolbar(ALL);
+
+    for (const name of [/files/i, /monitoring/i, /fit to window/i, /keyboard/i, /full screen/i]) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
+  });
+
+  it('omits Files entirely when the session may not transfer files', () => {
+    // Absent, not disabled. A disabled button says "you could do this" and invites the
+    // user to go looking for the setting that would enable it; there is no such
+    // setting, because the other machine decided.
+    renderToolbar(['control_input', 'view_metrics']);
+
+    expect(screen.queryByRole('button', { name: /files/i })).not.toBeInTheDocument();
+  });
+
+  it('omits Monitoring entirely when the session may not view metrics', () => {
+    renderToolbar(['control_input', 'transfer_files']);
+
+    expect(screen.queryByRole('button', { name: /monitoring/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps Disconnect regardless of permissions, because leaving is not one', () => {
+    renderToolbar([]);
+
+    expect(screen.getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /files/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /monitoring/i })).not.toBeInTheDocument();
+  });
+
+  it('is visible on mount, so the way out is never hidden to begin with', () => {
+    renderToolbar();
+
+    expect(screen.getByRole('toolbar')).toBeVisible();
+  });
+
+  it('hides itself after a spell of no pointer movement', () => {
+    renderToolbar();
+
+    act(() => {
+      vi.advanceTimersByTime(TOOLBAR_HIDE_MS + 100);
+    });
+
+    expect(screen.getByRole('toolbar')).toHaveAttribute('data-hidden', 'true');
+  });
+
+  it('stays in the accessibility tree while hidden', () => {
+    // Hiding is visual only. Someone driving this with a keyboard generates no pointer
+    // movement, so `aria-hidden` would take Disconnect away from them for the rest of
+    // the session with no way to get it back.
+    renderToolbar();
+    act(() => {
+      vi.advanceTimersByTime(TOOLBAR_HIDE_MS + 100);
+    });
+
+    const toolbar = screen.getByRole('toolbar');
+    expect(toolbar).not.toHaveAttribute('aria-hidden');
+    expect(screen.getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
+  });
+
+  it('comes back when focus reaches it, not only when a pointer does', async () => {
+    const user = userEvent.setup();
+    renderToolbar();
+    act(() => {
+      vi.advanceTimersByTime(TOOLBAR_HIDE_MS + 100);
+    });
+    expect(screen.getByRole('toolbar')).toHaveAttribute('data-hidden', 'true');
+
+    await user.tab();
+
+    expect(screen.getByRole('toolbar')).not.toHaveAttribute('data-hidden');
+  });
+
+  it('comes back when the pointer nears the top edge', () => {
+    renderToolbar();
+    act(() => {
+      vi.advanceTimersByTime(TOOLBAR_HIDE_MS + 100);
+    });
+    expect(screen.getByRole('toolbar')).toHaveAttribute('data-hidden', 'true');
+
+    movePointerTo(TOOLBAR_REVEAL_PX - 10);
+
+    expect(screen.getByRole('toolbar')).not.toHaveAttribute('data-hidden');
+  });
+
+  it('stays hidden when the pointer moves far from the top edge', () => {
+    // Otherwise any movement anywhere would bring it back, and it would never be out of
+    // the way of the thing it is floating over.
+    renderToolbar();
+    act(() => {
+      vi.advanceTimersByTime(TOOLBAR_HIDE_MS + 100);
+    });
+
+    movePointerTo(TOOLBAR_REVEAL_PX + 200);
+
+    expect(screen.getByRole('toolbar')).toHaveAttribute('data-hidden', 'true');
+  });
+
+  it('calls back the tool that was pressed', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, onOpenFiles, onOpenMonitoring } = renderToolbar();
+
+    await user.click(screen.getByRole('button', { name: /files/i }));
+    await user.click(screen.getByRole('button', { name: /monitoring/i }));
+    await user.click(screen.getByRole('button', { name: /disconnect/i }));
+
+    expect(onOpenFiles).toHaveBeenCalledOnce();
+    expect(onOpenMonitoring).toHaveBeenCalledOnce();
+    expect(onDisconnect).toHaveBeenCalledOnce();
+  });
+
+  it('renders an untrusted machine name as inert text', () => {
+    render(
+      <SessionToolbar
+        permissions={ALL}
+        machineName="<img src=x onerror=alert(1)>"
+        onDisconnect={vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenMonitoring={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('toolbar').querySelector('img')).toBeNull();
+    expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument();
+  });
+});

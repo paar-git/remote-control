@@ -15,10 +15,8 @@ import {
 } from './api.js';
 import {
   Button,
-  Card,
   ConfirmDialog,
   ErrorState,
-  PageHeader,
   SkeletonRows,
   StatusBadge,
   type StatusTone,
@@ -69,7 +67,7 @@ interface SpeedSample {
   readonly firstAt: number;
 }
 
-export default function UpdateScreen({
+export default function UpdatesPane({
   onToast,
   onStatusChange,
 }: {
@@ -194,8 +192,7 @@ export default function UpdateScreen({
 
   if (loadError !== null && status === null) {
     return (
-      <section className="max-w-4xl">
-        <PageHeader title="Updates" />
+      <section>
         <ErrorState
           summary="The update manager couldn’t be reached."
           detail={loadError}
@@ -207,11 +204,8 @@ export default function UpdateScreen({
 
   if (status === null) {
     return (
-      <section className="max-w-4xl">
-        <PageHeader title="Updates" description="Loading update manager…" />
-        <Card>
-          <SkeletonRows rows={3} />
-        </Card>
+      <section>
+        <SkeletonRows rows={3} />
       </section>
     );
   }
@@ -246,14 +240,14 @@ export default function UpdateScreen({
   };
 
   return (
-    <section className="animate-fade-in max-w-4xl">
-      <PageHeader
-        title="Updates"
-        description="Updates are verified against a signed release manifest and a SHA-256 checksum before anything is installed, and nothing installs without your confirmation."
-        meta={<StatusBadge tone={stateTone(status.state)}>{humanise(status.state)}</StatusBadge>}
-      />
+    <section>
+      <p className="mb-3 flex items-center gap-2 text-xs text-(--color-text-secondary)">
+        <StatusBadge tone={stateTone(status.state)}>{humanise(status.state)}</StatusBadge>
+        Verified against a signed manifest and a SHA-256 checksum. Nothing installs without your
+        confirmation.
+      </p>
 
-      <Card className="p-5!">
+      <div className="rounded-lg border border-(--color-border) p-4">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <p className="text-sm font-semibold">{versionHeadline(status)}</p>
@@ -318,7 +312,7 @@ export default function UpdateScreen({
             )}
           </div>
         )}
-      </Card>
+      </div>
 
       {status.lastError !== null && status.state === 'failed' && (
         <div className="mt-4">

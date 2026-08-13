@@ -4,12 +4,20 @@
  * Screens import from here rather than from the individual modules, so the set of
  * primitives the app is built from is visible in one place and a screen that reaches for
  * something outside it is obvious in review.
+ *
+ * Everything exported here has a caller outside the kit. A primitive nobody uses is not
+ * a library, it is a maintenance cost that looks like one — so when a screen goes,
+ * whatever it was the only user of goes with it.
+ *
+ * `Tooltip` and `StatusDot` are deliberately absent: both are still used, but only from
+ * inside this directory (by `Button` and `StatusBadge`). Exporting a component with no
+ * caller outside the kit invites one.
  */
 
 export { Button, IconButton, type ButtonSize, type ButtonVariant } from './Button';
-export { Card, CardHeader, InfoCard, InfoRow, InlineCopy } from './Card';
+export { Card, CardHeader } from './Card';
 export { CopyButton } from './CopyButton';
-export { SelectField, TextField } from './Field';
+export { TextField } from './Field';
 export {
   ConfirmDialog,
   EmptyState,
@@ -19,8 +27,5 @@ export {
   ToastBar,
   type Toast,
 } from './Feedback';
-export { Kbd } from './Kbd';
-export { PageHeader, SectionHeading } from './PageHeader';
-export { QuickAction } from './QuickAction';
-export { Badge, StatusBadge, StatusDot, type StatusTone } from './Status';
-export { Tooltip } from './Tooltip';
+export { PageHeader } from './PageHeader';
+export { Badge, StatusBadge, type StatusTone } from './Status';

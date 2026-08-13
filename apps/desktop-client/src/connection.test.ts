@@ -22,7 +22,7 @@ const everyState: ConnectionState[] = [
   { state: 'offline' },
   { state: 'connecting', address: '192.168.1.20:47811' },
   { state: 'authenticating' },
-  { state: 'connected', sessionId: 'ses_abc', address: '192.168.1.20:47811' },
+  { state: 'connected', sessionId: 'ses_abc', address: '192.168.1.20:47811', permissions: [] },
   { state: 'disconnecting' },
   { state: 'reconnecting', attempt: 3 },
   { state: 'waiting_to_retry', attempt: 4, retryInMs: 2500 },
@@ -82,7 +82,9 @@ describe('connection state', () => {
     expect(isBusy({ state: 'waiting_to_retry', attempt: 1, retryInMs: 10 })).toBe(true);
 
     expect(isBusy({ state: 'offline' })).toBe(false);
-    expect(isBusy({ state: 'connected', sessionId: 's', address: 'x' })).toBe(false);
+    expect(isBusy({ state: 'connected', sessionId: 's', address: 'x', permissions: [] })).toBe(
+      false,
+    );
     expect(isBusy({ state: 'failed', message: 'no' })).toBe(false);
     expect(isBusy({ state: 'refused', reason: 'not_authorized', message: 'no' })).toBe(false);
   });
@@ -106,6 +108,7 @@ describe('connection state', () => {
         state: 'connected',
         sessionId: 'ses_x',
         address: '10.0.0.4:47811',
+        permissions: [],
       }),
     ).toContain('10.0.0.4:47811');
   });
@@ -127,6 +130,7 @@ describe('connection state', () => {
       state: 'connected',
       sessionId: 'ses_secret-looking-value',
       address: '10.0.0.4:47811',
+      permissions: [],
     });
     expect(described).not.toContain('ses_secret-looking-value');
   });

@@ -56,6 +56,15 @@ export function getLocalIdentity(): Promise<LocalIdentity> {
   return call('local_identity', localIdentitySchema);
 }
 
+/**
+ * A permission a session can hold. These exact strings are `Permission::name()` in
+ * `rc-security`; the enum is closed on purpose, so a build that learns a new permission
+ * without the interface learning it fails validation rather than rendering a name
+ * nobody has written a control for.
+ */
+export const permissionSchema = z.enum(['control_input', 'transfer_files', 'view_metrics']);
+export type Permission = z.infer<typeof permissionSchema>;
+
 /* -------------------------------------------------------------------------- */
 /* Connection                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -84,6 +93,13 @@ export const connectionStateSchema = z.discriminatedUnion('state', [
     state: z.literal('connected'),
     sessionId: z.string(),
     address: z.string(),
+    /**
+     * What the other machine granted this session.
+     *
+     * Rides on the state so it arrives with the session and vanishes with it: there is
+     * no separate call that could report a grant for a connection that has ended.
+     */
+    permissions: z.array(permissionSchema),
   }),
   z.object({ state: z.literal('disconnecting') }),
   z.object({ state: z.literal('reconnecting'), attempt: z.number().int() }),
@@ -616,15 +632,6 @@ export function installUpdate(): Promise<InstallResult> {
 /* -------------------------------------------------------------------------- */
 
 /**
- * A permission a session can hold. These exact strings are `Permission::name()` in
- * `rc-security`; the enum is closed on purpose, so a build that learns a new permission
- * without the interface learning it fails validation rather than rendering a name
- * nobody has written a control for.
- */
-export const permissionSchema = z.enum(['control_input', 'transfer_files', 'view_metrics']);
-export type Permission = z.infer<typeof permissionSchema>;
-
-/**
  * A machine name chosen by whoever owns that machine.
  *
  * Stripped first and measured second: a name made entirely of control characters or
@@ -722,6 +729,36 @@ export function answerAcceptRequest(requestId: string, granted: Permission[]): P
 }
 
 /**
+ * Subscribe to accept requests raised by the backend.
+ *
+ * Two callbacks rather than one: a request appearing and a request being withdrawn are
+ * different events, and a dialog that only learned about the first would sit on screen
+ * after its request had already timed out, inviting a click that lands on nothing.
+ *
+ * A payload that does not parse is dropped rather than shown. The machine name in it is
+ * chosen by whoever is knocking, and a malformed request is not one to render.
+ */
+export async function listenAcceptRequests(
+  onRaised: (request: AcceptRequest) => void,
+  onWithdrawn: () => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  const stopRaised = await listen('rc://accept-request', (event) => {
+    const parsed = acceptRequestSchema.safeParse(event.payload);
+    if (parsed.success) onRaised(parsed.data);
+  });
+  const stopWithdrawn = await listen('rc://accept-resolved', () => {
+    onWithdrawn();
+  });
+
+  return () => {
+    stopRaised();
+    stopWithdrawn();
+  };
+}
+
+/**
  * Refuse a pending request.
  *
  * A separate call from answering with nothing, so "No" is an explicit act rather than
@@ -729,6 +766,20 @@ export function answerAcceptRequest(requestId: string, granted: Permission[]): P
  */
 export function dismissAcceptRequest(requestId: string): Promise<null> {
   return call('dismiss_accept_request', z.null(), { requestId });
+}
+
+/**
+ * Connect to a machine by address.
+ *
+ * `address` must be the canonical form from `parseAddress`: it is the key the other
+ * machine pins on, so a different spelling of the same address is a different machine
+ * as far as its "always allow" list is concerned.
+ */
+export function connectToAddress(
+  address: string,
+  unattendedPassword: string | null,
+): Promise<ConnectionState> {
+  return call('connect_to_address', connectionStateSchema, { address, unattendedPassword });
 }
 
 /** Machines connected to before, most recent first. */

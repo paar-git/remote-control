@@ -54,6 +54,7 @@ export function Button({
   type = 'button',
   icon: Icon,
   className = '',
+  ref,
 }: {
   readonly children?: React.ReactNode | undefined;
   readonly onClick?: (() => void) | undefined;
@@ -64,9 +65,16 @@ export function Button({
   readonly type?: 'button' | 'submit' | undefined;
   readonly icon?: LucideIcon | undefined;
   readonly className?: string | undefined;
+  /**
+   * For the rare control that must take focus deliberately rather than by DOM order —
+   * the accept dialog's Dismiss button, where which control is focused is the safety
+   * property.
+   */
+  readonly ref?: React.Ref<HTMLButtonElement> | undefined;
 }): React.JSX.Element {
   return (
     <button
+      ref={ref}
       type={type}
       onClick={onClick}
       disabled={disabled}

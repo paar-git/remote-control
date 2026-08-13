@@ -1,59 +1,53 @@
 /**
- * Application shell.
+ * Application root.
  *
- * There is no account and no login: the app opens straight to the shell once the
- * backend answers. The one gate that remains is whether the backend can be reached at
- * all, which is a real condition — the webview can load without its Tauri host ever
- * responding — not a placeholder for the deleted owner account.
+ * There is no account and no login. The one gate that remains is whether the backend
+ * can be reached at all, which is a real condition — the webview can load without its
+ * Tauri host ever responding — not a placeholder for a deleted owner account.
  *
- * # Two modes
+ * # Two states, and only two
  *
- * Out of session the window is a normal application: sidebar, toolbar, content. Inside a
- * session it becomes the remote computer — {@link SessionScreen} replaces the entire
- * frame, chrome and all. That is the whole point of the design: once you are connected,
- * the interface gets out of the way. `inSession` is what switches between the two, and it
- * is never set unless the backend reports a live connection.
+ * Out of session the window is {@link MainWindow}: two cards and a recent list. Inside
+ * a session it becomes the remote machine — {@link SessionScreen} replaces the entire
+ * frame. That is the design: once you are connected, the interface gets out of the way.
  *
- * Two pieces of state live here rather than in the screens, because more than one screen
- * needs them and they must agree: the live connection, polled once and shared, and the
- * pending update, which drives the sidebar badge, the toolbar bell and the banner.
+ * `inSession` switches between them and is never set unless the backend reports a live
+ * connection. A session that ends, deliberately or not, drops the window back to the
+ * main one, because the backend's state is the authority and not this flag.
+ *
+ * # What lives here
+ *
+ * Only what more than one state needs and what must agree across them: the live
+ * connection, the pending update, the toast bar, and the accept dialog. The accept
+ * dialog in particular belongs here rather than in `MainWindow` — a connection request
+ * arrives whether or not you are looking at the main window, and it must be answerable
+ * from inside a session too.
  */
 
 import { AlertTriangle, MonitorCog } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
+import { AcceptDialog } from './AcceptDialog';
 import { getClientInfo, isConnected } from './api.js';
-import FilesScreen from './FilesScreen';
-import MonitoringScreen from './MonitoringScreen';
-import { SessionScreen } from './SessionScreen';
-import { ThisComputerScreen } from './ThisComputerScreen';
-import UpdateScreen from './UpdateScreen';
 import { isTauriAvailable } from './ipc.js';
-import { AppShell } from './shell/AppShell';
-import { DEFAULT_SECTION, isSectionAvailable, sectionForShortcut } from './shell/navigation';
-import { Sidebar, type ServiceStatus } from './shell/Sidebar';
-import { TopBar } from './shell/TopBar';
-import { type Connection, useConnectionState } from './useConnection.js';
+import { MainWindow } from './MainWindow';
+import { SessionScreen } from './SessionScreen';
+import { SettingsDialog } from './SettingsDialog';
+import { useConnectionState } from './useConnection.js';
 import { isReadyToInstall, pendingUpdateVersion } from './updates.js';
 import { useUpdateWatcher } from './useUpdateWatcher.js';
-import { Button, ToastBar, type Toast } from './ui';
+import { ToastBar, type Toast } from './ui';
 
 type Gate =
   | { readonly status: 'loading' }
   | { readonly status: 'unavailable'; readonly message: string }
   | { readonly status: 'ready' };
 
-/** Remembered so the window opens the way it was left. */
-const COLLAPSED_KEY = 'rc.sidebar.collapsed';
-
 export default function App(): React.JSX.Element {
   const [gate, setGate] = useState<Gate>({ status: 'loading' });
-  const [section, setSection] = useState(DEFAULT_SECTION);
   const [toast, setToast] = useState<Toast | null>(null);
   const [inSession, setInSession] = useState(false);
-  const [collapsed, setCollapsed] = useState(
-    () => globalThis.localStorage?.getItem(COLLAPSED_KEY) === 'true',
-  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const ready = gate.status === 'ready';
 
@@ -62,7 +56,6 @@ export default function App(): React.JSX.Element {
   const updates = useUpdateWatcher(ready);
   const pendingVersion = pendingUpdateVersion(updates.status);
   const connection = useConnectionState(ready);
-  const service = useServiceStatus(gate.status);
   const live = isConnected(connection.state);
 
   useEffect(() => {
@@ -97,168 +90,67 @@ export default function App(): React.JSX.Element {
   }, []);
 
   // A session that ends — deliberately or not — must not leave the window pretending to
-  // be a remote computer. The backend's state is the authority.
+  // be a remote machine. The backend's state is the authority.
   useEffect(() => {
     if (!live) setInSession(false);
   }, [live]);
 
-  const navigate = useCallback((id: string) => {
-    // Guarded rather than trusted: a shortcut or a panel button must not be able to
-    // route to a section the sidebar itself refuses to open.
-    if (!isSectionAvailable(id)) return;
-    setInSession(false);
-    setSection(id);
-  }, []);
-
-  // Shortcuts are only advertised on items that are bound, and only bound once the
-  // backend is reachable — nothing behind the gate should be reachable by keyboard.
-  useEffect(() => {
-    if (!ready) return;
-
-    const onKey = (event: KeyboardEvent): void => {
-      const target = sectionForShortcut(event);
-      if (target === undefined) return;
-      event.preventDefault();
-      navigate(target);
-    };
-
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [ready, navigate]);
-
-  const toggleCollapsed = useCallback(() => {
-    setCollapsed((current) => {
-      const next = !current;
-      globalThis.localStorage?.setItem(COLLAPSED_KEY, String(next));
-      return next;
-    });
-  }, []);
-
   const dismissToast = useCallback(() => {
     setToast(null);
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
   }, []);
 
   if (gate.status === 'loading') return <Splash />;
 
   if (gate.status === 'unavailable') return <BackendUnavailable message={gate.message} />;
 
-  // The session owns the whole window, with no sidebar and no toolbar over it.
-  if (inSession && live) {
-    return (
-      <>
+  return (
+    <>
+      {inSession && live ? (
+        // The session owns the whole window: no title bar, no cards over it.
         <SessionScreen
           connection={connection.state}
           deviceName={null}
+          permissions={connection.state.state === 'connected' ? connection.state.permissions : []}
           onToast={setToast}
           onLeave={() => {
             setInSession(false);
           }}
-          onOpenTool={navigate}
         />
-        <ToastBar toast={toast} onDismiss={dismissToast} />
-      </>
-    );
-  }
-
-  return (
-    <>
-      <AppShell
-        sidebar={
-          <Sidebar
-            section={section}
-            onSelect={navigate}
-            collapsed={collapsed}
-            onToggleCollapsed={toggleCollapsed}
-            updateBadge={pendingVersion}
-            service={service}
-            sessionActive={live}
-          />
-        }
-        toolbar={
-          <TopBar
-            section={section}
-            connection={connection.state}
-            pendingVersion={pendingVersion}
-            onOpenUpdates={() => {
-              navigate('updates');
-            }}
-            onResumeSession={
-              live
-                ? () => {
-                    setInSession(true);
-                  }
-                : undefined
-            }
-          />
-        }
-        banner={
-          pendingVersion !== null && section !== 'updates' ? (
-            <UpdateBanner
-              version={pendingVersion}
-              ready={isReadyToInstall(updates.status)}
-              onOpen={() => {
-                navigate('updates');
+      ) : (
+        <div className="flex h-full flex-col">
+          {pendingVersion !== null && (
+            <UpdateBanner version={pendingVersion} ready={isReadyToInstall(updates.status)} />
+          )}
+          <div className="min-h-0 flex-1">
+            <MainWindow
+              onConnected={() => {
+                setInSession(true);
+              }}
+              onToast={setToast}
+              onOpenSettings={() => {
+                setSettingsOpen(true);
               }}
             />
-          ) : undefined
-        }
-      >
-        <Section
-          id={section}
-          connection={connection}
-          onNavigate={navigate}
-          onToast={setToast}
-          onUpdateChange={updates.refresh}
-        />
-      </AppShell>
+          </div>
+        </div>
+      )}
+
+      {/*
+       * Outside the two states on purpose. A connection request arrives whether or not
+       * anyone is looking at the main window, and it has to be answerable from inside a
+       * session as well.
+       */}
+      <AcceptDialog onToast={setToast} />
+
+      {settingsOpen && <SettingsDialog onClose={closeSettings} onToast={setToast} />}
 
       <ToastBar toast={toast} onDismiss={dismissToast} />
     </>
   );
-}
-
-/**
- * Whether this installation is working, summarised for the sidebar.
- *
- * Derived from what the client can actually verify about itself — the backend answered,
- * and its local database opened — rather than from a service it does not run. The client
- * is not the agent; claiming "service online" here would be describing another program.
- */
-function useServiceStatus(gate: Gate['status']): ServiceStatus {
-  const [databaseReady, setDatabaseReady] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (gate !== 'ready') return;
-    let cancelled = false;
-    getClientInfo()
-      .then((info) => {
-        if (!cancelled) setDatabaseReady(info.databaseReady);
-      })
-      .catch(() => {
-        if (!cancelled) setDatabaseReady(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [gate]);
-
-  if (databaseReady === null) {
-    return { tone: 'busy', label: 'Starting', detail: 'Reading this computer’s state.' };
-  }
-  if (!databaseReady) {
-    return {
-      tone: 'danger',
-      label: 'Storage error',
-      detail: 'The local database could not be opened, so nothing can be saved.',
-    };
-  }
-  return {
-    tone: 'ready',
-    label: 'Client ready',
-    detail: 'The client backend is running and its local database is open.',
-  };
 }
 
 /** The first frame, before the backend has answered. */
@@ -275,7 +167,7 @@ function Splash(): React.JSX.Element {
   );
 }
 
-/** The one failure the shell itself has to render: no backend at all. */
+/** The one failure the root itself has to render: no backend at all. */
 function BackendUnavailable({ message }: { readonly message: string }): React.JSX.Element {
   return (
     <div className="flex h-full items-center justify-center bg-(--color-page) p-6">
@@ -296,66 +188,30 @@ function BackendUnavailable({ message }: { readonly message: string }): React.JS
 }
 
 /**
- * Quiet, dismissible-by-acting call to action shown above any section while a
- * newer release is waiting. It is hidden on the Updates section itself, where
- * the same information is already the main content.
+ * A quiet strip under the title bar while a newer release is waiting.
+ *
+ * Installing is a settings action, so this says what is true and points there rather
+ * than offering a second place to do it.
  */
 function UpdateBanner({
   version,
   ready,
-  onOpen,
 }: {
   readonly version: string;
   readonly ready: boolean;
-  readonly onOpen: () => void;
 }): React.JSX.Element {
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-3 border-b border-(--color-border) bg-(--color-accent-soft) px-5 py-2.5"
+      className="flex flex-wrap items-center gap-3 border-b border-(--color-border) bg-(--color-accent-soft) px-4 py-2"
     >
       <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-(--color-accent)" />
       <p className="min-w-0 flex-1 text-sm">
         <span className="font-medium">Version {version} is available.</span>{' '}
         <span className="text-(--color-text-secondary)">
-          {ready ? 'It is verified and ready to install.' : 'Review the changes and update.'}
+          {ready ? 'It is verified and ready to install.' : 'Open settings to review it.'}
         </span>
       </p>
-      <Button variant="primary" size="sm" onClick={onOpen}>
-        {ready ? 'Install now' : 'View update'}
-      </Button>
     </div>
   );
-}
-
-/**
- * The screen for the selected sidebar section.
- *
- * Sections that are not yet built are unreachable — the sidebar disables them, the
- * shortcuts skip them and `navigate` refuses them — so this falls back to This computer
- * rather than rendering a placeholder that would look like a broken page.
- */
-function Section({
-  id,
-  connection,
-  onNavigate,
-  onToast,
-  onUpdateChange,
-}: {
-  readonly id: string;
-  readonly connection: Connection;
-  readonly onNavigate: (section: string) => void;
-  readonly onToast: (toast: Toast) => void;
-  readonly onUpdateChange: () => void;
-}): React.JSX.Element {
-  switch (id) {
-    case 'monitoring':
-      return <MonitoringScreen />;
-    case 'updates':
-      return <UpdateScreen onToast={onToast} onStatusChange={onUpdateChange} />;
-    case 'files':
-      return <FilesScreen onToast={onToast} />;
-    default:
-      return <ThisComputerScreen connection={connection.state} onNavigate={onNavigate} />;
-  }
 }

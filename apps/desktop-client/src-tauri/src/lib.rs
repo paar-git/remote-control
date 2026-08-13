@@ -312,6 +312,7 @@ pub fn run() {
             host_commands::remove_recent,
             host_commands::host_settings,
             host_commands::set_unattended_password,
+            connect_commands::connect_to_address,
             connect_commands::disconnect_from_server,
             connect_commands::connection_state,
             connect_commands::ping_server,

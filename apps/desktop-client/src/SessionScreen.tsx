@@ -1,66 +1,62 @@
 /**
  * The session.
  *
- * Once you are connected, the interface gets out of the way: the window is the remote
- * computer, and the only permanent chrome is a small handle on the right edge. Opening it
- * slides out a narrow options panel; closing it leaves the viewport completely
- * uncovered. This is the part of Chrome Remote Desktop worth copying most exactly.
+ * Once you are connected, the interface gets out of the way: the window *is* the remote
+ * machine, and the only chrome is a floating bar that hides itself. This is the part of
+ * Chrome Remote Desktop worth copying most exactly.
  *
- * # What is real here
+ * # The display area says what is true
  *
- * Disconnect, the round-trip measurement and the session tools are real operations
- * against the connected computer. The display, clipboard and input controls belong to a
- * remote-desktop pipeline this build does not have — there is no screen capture and no
- * input injection — so they are rendered in their unavailable state with the reason
- * attached rather than as switches that would flip and do nothing.
+ * There is no screen capture and no input injection in this build. The area where the
+ * remote screen will go therefore says so, in a sentence, and names what does work.
+ *
+ * It is deliberately *not* a dark rectangle with a spinner. That would be
+ * indistinguishable from a session whose video had not arrived yet, and someone would
+ * sit waiting for a picture that is not coming. An empty frame is a lie told by
+ * omission; a sentence is not.
+ *
+ * # The tools are the session's permissions
+ *
+ * What the toolbar offers is decided by what the *other* machine granted, which arrives
+ * on the connection state. A tool that was not granted is absent — see
+ * {@link SessionToolbar} for why absent rather than disabled.
  */
 
-import {
-  ChevronRight,
-  Clipboard,
-  Folder,
-  Keyboard,
-  Maximize,
-  Minimize,
-  Monitor,
-  MonitorOff,
-  Activity as PulseIcon,
-  Unplug,
-  X,
-} from 'lucide-react';
+import { MonitorOff, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import { type ConnectionState, disconnectFromServer, isConnected, pingServer } from './api.js';
-import { connectionLabel, connectionTone } from './useConnection.js';
-import { Button, StatusDot, Tooltip, type Toast } from './ui';
+import { disconnectFromServer, isConnected, pingServer, type ConnectionState } from './api.js';
+import FilesScreen from './FilesScreen';
+import { MonitoringStrip } from './MonitoringScreen';
+import { SessionToolbar } from './SessionToolbar';
+import { Button, type Toast } from './ui';
 
-/** How often the round trip to the computer is measured, in milliseconds. */
+/** How often the round trip to the machine is measured, in milliseconds. */
 const PING_MS = 5000;
-
-/** Why the display, clipboard and input controls cannot do anything yet. */
-const NO_PIPELINE = 'Arrives with remote desktop';
 
 export function SessionScreen({
   connection,
   deviceName,
+  permissions,
   onToast,
   onLeave,
-  onOpenTool,
 }: {
   readonly connection: ConnectionState;
+  /** The other machine's name, or `null` before it is known. */
   readonly deviceName: string | null;
+  /** What the other machine granted this session. */
+  readonly permissions: readonly string[];
   readonly onToast: (toast: Toast) => void;
-  /** Return to the device list without ending the session. */
+  /** Return to the main window without ending the session. */
   readonly onLeave: () => void;
-  readonly onOpenTool: (section: string) => void;
 }): React.JSX.Element {
-  const [panelOpen, setPanelOpen] = useState(true);
-  const [fullscreen, setFullscreen] = useState(false);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [monitoringOpen, setMonitoringOpen] = useState(false);
   const live = isConnected(connection);
 
-  // Measured rather than assumed: this is the one number that tells the operator
-  // whether the link is healthy, and it is cheap to obtain.
+  // Measured rather than assumed: this is the one number that says whether the link is
+  // healthy, and it is cheap to obtain.
   useEffect(() => {
     if (!live) {
       setLatencyMs(null);
@@ -74,327 +70,93 @@ export function SessionScreen({
           if (!cancelled) setLatencyMs(ms);
         })
         .catch(() => {
+          // A failed ping is not worth a toast: the connection state is what tells the
+          // user the link is gone, and it says so more accurately.
           if (!cancelled) setLatencyMs(null);
         });
     };
 
     measure();
-    const timer = window.setInterval(measure, PING_MS);
+    const timer = setInterval(measure, PING_MS);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      clearInterval(timer);
     };
   }, [live]);
-
-  // The browser owns fullscreen state — it can also be left with F11 or Escape — so the
-  // toggle reflects what actually happened rather than what it asked for.
-  useEffect(() => {
-    const sync = (): void => {
-      setFullscreen(document.fullscreenElement !== null);
-    };
-    document.addEventListener('fullscreenchange', sync);
-    return () => {
-      document.removeEventListener('fullscreenchange', sync);
-    };
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    const request =
-      document.fullscreenElement === null
-        ? document.documentElement.requestFullscreen()
-        : document.exitFullscreen();
-
-    request.catch(() => {
-      onToast({ kind: 'error', message: 'This window would not go full screen.' });
-    });
-  }, [onToast]);
 
   const disconnect = useCallback(() => {
     disconnectFromServer()
       .then(() => {
-        onToast({ kind: 'success', message: 'Disconnected. It will not reconnect on its own.' });
         onLeave();
       })
       .catch((error: unknown) => {
         onToast({
           kind: 'error',
-          message: error instanceof Error ? error.message : 'Could not disconnect.',
+          message:
+            error instanceof Error ? error.message : 'The session could not be ended cleanly.',
         });
+        // Left anyway: the user asked to go, and staying on a screen for a session
+        // that may already be gone is worse than leaving one that may still be up.
+        onLeave();
       });
   }, [onLeave, onToast]);
 
-  // Escape closes the panel rather than the session: an accidental Escape must never
-  // drop a connection.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && panelOpen) setPanelOpen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [panelOpen]);
-
   return (
-    <div className="relative flex h-full overflow-hidden bg-black">
-      <Viewport deviceName={deviceName} onOpenTool={onOpenTool} onLeave={onLeave} />
+    <div className="relative flex h-full flex-col bg-(--color-page)">
+      <SessionToolbar
+        permissions={permissions}
+        machineName={deviceName ?? 'Connected machine'}
+        onDisconnect={disconnect}
+        onOpenFiles={() => {
+          setFilesOpen(true);
+        }}
+        onOpenMonitoring={() => {
+          setMonitoringOpen((current) => !current);
+        }}
+      />
 
-      {/* The handle. The only thing that permanently covers the remote computer, and it
-          is 20 pixels wide. */}
-      {!panelOpen && (
-        <Tooltip label="Session options" side="top">
-          <button
-            type="button"
-            onClick={() => {
-              setPanelOpen(true);
-            }}
-            aria-label="Open session options"
-            aria-expanded={false}
-            className="absolute top-1/2 right-0 z-20 flex h-16 w-5 -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-(--color-border) bg-(--color-card)/90 text-(--color-text-secondary) backdrop-blur transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-          >
-            <ChevronRight aria-hidden="true" className="size-3.5 rotate-180" />
-          </button>
-        </Tooltip>
-      )}
-
-      <aside
-        aria-label="Session options"
-        aria-hidden={!panelOpen}
-        className={`absolute inset-y-0 right-0 z-20 flex w-72 flex-col border-l border-(--color-border) bg-(--color-page) transition-transform duration-200 ease-(--ease-ui) ${
-          panelOpen ? 'translate-x-0' : 'pointer-events-none translate-x-full'
-        }`}
-      >
-        <header className="flex items-start gap-2 border-b border-(--color-border) px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold">{deviceName ?? 'Remote computer'}</p>
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-(--color-text-secondary)">
-              <StatusDot tone={connectionTone(connection)} />
-              {connectionLabel(connection)}
-              {latencyMs !== null && (
-                <span className="text-(--color-text-secondary)">· {latencyMs} ms</span>
-              )}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setPanelOpen(false);
-            }}
-            aria-label="Close session options"
-            className="flex size-7 shrink-0 items-center justify-center rounded-lg text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-          >
-            <X aria-hidden="true" className="size-4" />
-          </button>
-        </header>
-
-        <div className="flex-1 overflow-y-auto px-3 py-3">
-          <Button variant="danger" icon={Unplug} onClick={disconnect} className="h-9 w-full">
-            Disconnect
-          </Button>
-
-          <PanelGroup label="Display">
-            <PanelToggle
-              icon={fullscreen ? Minimize : Maximize}
-              label="Full screen"
-              checked={fullscreen}
-              onToggle={toggleFullscreen}
-            />
-            <PanelToggle icon={Monitor} label="Scale to fit" unavailable={NO_PIPELINE} />
-            <PanelToggle icon={Monitor} label="Resize to window" unavailable={NO_PIPELINE} />
-            <PanelToggle icon={Monitor} label="Smooth scaling" unavailable={NO_PIPELINE} />
-          </PanelGroup>
-
-          <PanelGroup label="Clipboard">
-            <PanelToggle icon={Clipboard} label="Sync clipboard" unavailable={NO_PIPELINE} />
-          </PanelGroup>
-
-          <PanelGroup label="Input">
-            <PanelAction icon={Keyboard} label="Ctrl+Alt+Del" unavailable={NO_PIPELINE} />
-            <PanelAction icon={Keyboard} label="Print Screen" unavailable={NO_PIPELINE} />
-          </PanelGroup>
-
-          <PanelGroup label="Tools">
-            <PanelAction
-              icon={Folder}
-              label="Files"
-              onSelect={() => {
-                onOpenTool('files');
-              }}
-            />
-            <PanelAction
-              icon={PulseIcon}
-              label="Monitoring"
-              onSelect={() => {
-                onOpenTool('monitoring');
-              }}
-            />
-          </PanelGroup>
-        </div>
-
-        <footer className="border-t border-(--color-border) px-3 py-2">
-          <button
-            type="button"
-            onClick={onLeave}
-            className="h-8 w-full rounded-lg text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-          >
-            Back to my computers
-          </button>
-        </footer>
-      </aside>
-    </div>
-  );
-}
-
-/**
- * The remote computer's screen.
- *
- * There is no capture pipeline in this build, so rather than a black rectangle that
- * looks like a hung session, the viewport says what is happening and offers the parts of
- * the session that do work.
- */
-function Viewport({
-  deviceName,
-  onOpenTool,
-  onLeave,
-}: {
-  readonly deviceName: string | null;
-  readonly onOpenTool: (section: string) => void;
-  readonly onLeave: () => void;
-}): React.JSX.Element {
-  return (
-    <div className="flex min-w-0 flex-1 items-center justify-center p-8">
-      <div className="max-w-md text-center">
-        <span className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl border border-(--color-border) bg-(--color-card) text-(--color-text-secondary)">
-          <MonitorOff aria-hidden="true" className="size-6" />
-        </span>
-        <h2 className="text-base font-semibold text-(--color-text)">
-          The screen of {deviceName ?? 'this computer'} isn’t available yet
-        </h2>
-        <p className="mt-1.5 text-sm text-(--color-text-secondary)">
-          You are connected and authenticated, but this version cannot show or control the remote
-          screen. Everything else in the session works.
-        </p>
-        <div className="mt-5 flex flex-wrap justify-center gap-2">
-          <Button
-            variant="primary"
-            icon={Folder}
-            onClick={() => {
-              onOpenTool('files');
-            }}
-          >
-            Browse files
-          </Button>
-          <Button variant="ghost" onClick={onLeave}>
-            Back to my computers
-          </Button>
+      <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+        <div className="max-w-md text-center">
+          <span className="mx-auto mb-3 flex size-11 items-center justify-center rounded-2xl bg-(--color-card) text-(--color-text-secondary)">
+            <MonitorOff aria-hidden="true" className="size-5" />
+          </span>
+          <p className="mb-1 text-sm font-medium">The remote display is not in this version.</p>
+          <p className="text-sm text-(--color-text-secondary)">
+            The session is live — files, system information and disconnect all work from the bar
+            above.
+          </p>
+          {latencyMs !== null && (
+            <p className="mt-3 text-xs text-(--color-text-secondary)">Round trip {latencyMs} ms</p>
+          )}
         </div>
       </div>
+
+      {monitoringOpen && (
+        <div className="border-t border-(--color-border) bg-(--color-card) px-4 py-3">
+          <MonitoringStrip />
+        </div>
+      )}
+
+      {filesOpen && (
+        <div className="fixed inset-0 z-30 flex flex-col bg-(--color-page)">
+          <header className="flex items-center gap-3 border-b border-(--color-border) px-4 py-2.5">
+            <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">Files</h2>
+            <Button
+              icon={X}
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setFilesOpen(false);
+              }}
+            >
+              Close
+            </Button>
+          </header>
+          <div className="min-h-0 flex-1 overflow-auto">
+            <FilesScreen onToast={onToast} />
+          </div>
+        </div>
+      )}
     </div>
-  );
-}
-
-/** A labelled group of controls in the options panel. */
-function PanelGroup({
-  label,
-  children,
-}: {
-  readonly label: string;
-  readonly children: React.ReactNode;
-}): React.JSX.Element {
-  return (
-    <section className="mt-5">
-      <h3 className="mb-1 px-1 text-[10px] font-semibold tracking-[0.08em] text-(--color-text-secondary) uppercase">
-        {label}
-      </h3>
-      <div className="flex flex-col">{children}</div>
-    </section>
-  );
-}
-
-/** A checkbox row. Unavailable rows keep their label and say why they are inert. */
-function PanelToggle({
-  icon: Icon,
-  label,
-  checked = false,
-  onToggle,
-  unavailable,
-}: {
-  readonly icon: typeof Monitor;
-  readonly label: string;
-  readonly checked?: boolean | undefined;
-  readonly onToggle?: (() => void) | undefined;
-  readonly unavailable?: string | undefined;
-}): React.JSX.Element {
-  if (unavailable !== undefined) {
-    return (
-      <Tooltip label={unavailable} side="top">
-        <span className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary)">
-          <Icon aria-hidden="true" className="size-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-          <span className="shrink-0 text-[10px]">Soon</span>
-        </span>
-      </Tooltip>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={onToggle}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-    >
-      <Icon aria-hidden="true" className="size-4 shrink-0" />
-      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-      <span
-        aria-hidden="true"
-        className={`flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors duration-150 ease-(--ease-ui) ${
-          checked ? 'bg-(--color-accent)' : 'bg-(--color-card)'
-        }`}
-      >
-        <span
-          className={`size-3 rounded-full bg-white transition-transform duration-150 ease-(--ease-ui) ${
-            checked ? 'translate-x-3' : ''
-          }`}
-        />
-      </span>
-    </button>
-  );
-}
-
-/** A command row. */
-function PanelAction({
-  icon: Icon,
-  label,
-  onSelect,
-  unavailable,
-}: {
-  readonly icon: typeof Monitor;
-  readonly label: string;
-  readonly onSelect?: (() => void) | undefined;
-  readonly unavailable?: string | undefined;
-}): React.JSX.Element {
-  if (unavailable !== undefined) {
-    return (
-      <Tooltip label={unavailable} side="top">
-        <span className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary)">
-          <Icon aria-hidden="true" className="size-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-          <span className="shrink-0 text-[10px]">Soon</span>
-        </span>
-      </Tooltip>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-(--color-text-secondary) transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover) hover:text-(--color-text)"
-    >
-      <Icon aria-hidden="true" className="size-4 shrink-0" />
-      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-    </button>
   );
 }

@@ -45,8 +45,8 @@ use rc_protocol::control::{
 };
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
 use rc_protocol::system::MetricsAgentMessage;
-use rc_protocol::{DeviceId, RequestId, SessionId};
-use rc_security::{DeviceIdentity, Fingerprint, PermissionSet};
+use rc_protocol::{RequestId, SessionId};
+use rc_security::{DeviceIdentity, PermissionSet};
 use rc_transport::{
     ChannelReader, ChannelWriter, ClientConnector, PeerAddress, PinPolicy, TransportError,
 };
@@ -121,6 +121,13 @@ pub enum ConnectionState {
         session_id: String,
         /// Where the connection actually landed.
         address: String,
+        /// What the other machine granted this session, by stable permission name.
+        ///
+        /// Carried on the state rather than fetched separately, so it arrives with the
+        /// session and disappears with it. The interface uses it to decide which tools
+        /// to offer; the authority is still the other machine, which re-checks on every
+        /// request.
+        permissions: Vec<String>,
     },
     /// A disconnect is in progress.
     Disconnecting,
@@ -248,71 +255,32 @@ impl BackoffPolicy {
     }
 }
 
-/// A saved server, as the connection manager needs to see it.
+/// Where a connection is aimed, and what it offers on arrival.
+///
+/// There is no saved-device record to pin against any more: the user types an address
+/// and the machine on the other end decides. So a target is the address as typed, plus
+/// the unattended password if one was given.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedServer {
-    /// Which device.
-    pub device_id: DeviceId,
-    /// Name to show.
-    pub display_name: String,
-    /// The certificate fingerprint to pin.
-    pub certificate_fingerprint: Fingerprint,
-    /// The identity fingerprint, which survives certificate renewal.
-    pub identity_fingerprint: Fingerprint,
-    /// The address the last successful connection used.
-    pub last_known_address: Option<SocketAddr>,
-    /// An operator-configured host and port.
-    pub configured_endpoint: Option<String>,
+pub struct Target {
+    /// The address the user typed, canonicalised. This exact string is what the
+    /// responder keys its pin on, so it travels on `Authenticate` unchanged.
+    pub address: PeerAddress,
+    /// The unattended-access password, when the user supplied one.
+    ///
+    /// Not logged and not stored. It is sent inside the already-authenticated TLS
+    /// exchange and dropped when the attempt ends.
+    pub unattended_password: Option<String>,
 }
 
-/// The addresses to try, in order.
-///
-/// Separated from the connecting itself so the ordering rule can be tested without a
-/// network: the last address that worked comes first, because on a home LAN it is
-/// almost always still right.
-#[must_use]
-pub fn candidate_addresses(server: &SavedServer) -> Vec<SocketAddr> {
-    let mut candidates = Vec::new();
-    let mut push = |address: SocketAddr| {
-        if !candidates.contains(&address) {
-            candidates.push(address);
+impl Target {
+    /// A target with no password offered, which is the common case.
+    #[must_use]
+    pub const fn new(address: PeerAddress) -> Self {
+        Self {
+            address,
+            unattended_password: None,
         }
-    };
-
-    if let Some(address) = server.last_known_address {
-        push(address);
     }
-    if let Some(endpoint) = &server.configured_endpoint
-        && let Some(address) = parse_endpoint(endpoint)
-    {
-        push(address);
-    }
-
-    candidates
-}
-
-/// Parse an operator-typed endpoint into a socket address.
-///
-/// Accepts `host:port` and a bare address, defaulting the port. Returns `None` rather
-/// than guessing at anything else: a value that cannot be parsed is a configuration
-/// error the operator should see, not one to work around.
-#[must_use]
-pub fn parse_endpoint(endpoint: &str) -> Option<SocketAddr> {
-    let trimmed = endpoint.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Ok(address) = trimmed.parse::<SocketAddr>() {
-        return Some(address);
-    }
-    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
-        return Some(SocketAddr::new(ip, rc_protocol::DEFAULT_AGENT_PORT));
-    }
-
-    // A hostname needs resolving, which is I/O; the caller does that. Reporting `None`
-    // here keeps this function pure and testable.
-    None
 }
 
 /// A live, authenticated connection.
@@ -341,6 +309,13 @@ pub struct ConnectionManager {
     /// nothing until a subscription exists, so an open channel with nobody watching
     /// costs a parked task and no load on the server.
     metrics: Mutex<Option<ChannelWriter>>,
+    /// Who answered, once a connection is established.
+    ///
+    /// Arrives on `SessionAuthorization::Granted`, so it exists only for an admitted
+    /// session — a refused peer is told nothing about the machine it reached, and this
+    /// side has nothing to record. Used for the name shown in the session and written
+    /// to the recent list.
+    peer: Mutex<Option<DeviceDescriptor>>,
     /// What the agent granted this session, and therefore what this client may ask of
     /// it.
     ///
@@ -373,6 +348,7 @@ impl ConnectionManager {
             descriptor,
             capabilities,
             state: std::sync::Mutex::new(ConnectionState::Offline),
+            peer: Mutex::new(None),
             granted: std::sync::Mutex::new(PermissionSet::NONE),
             active: Mutex::new(None),
             files: Mutex::new(None),
@@ -395,6 +371,11 @@ impl ConnectionManager {
     pub fn was_intentional(&self) -> bool {
         self.intentional_disconnect
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Who answered on the live connection, if one is up.
+    pub async fn peer(&self) -> Option<DeviceDescriptor> {
+        self.peer.lock().await.clone()
     }
 
     /// What the connected agent granted this session.
@@ -430,39 +411,42 @@ impl ConnectionManager {
         }
     }
 
-    /// Connect to `server`, trying each candidate address in turn.
+    /// Connect to `target`, trying each address it resolves to in turn.
+    ///
+    /// A hostname can resolve to several addresses; all are tried in the order the
+    /// resolver gave them, because the first is not reliably the reachable one.
     ///
     /// # Errors
-    /// The failure of the last address tried. A refusal is reported as-is and is not
-    /// retried; see the module documentation.
-    pub async fn connect(&self, server: &SavedServer) -> Result<SessionId, TransportError> {
+    /// The failure of the last address tried. A refusal is reported as-is and is never
+    /// retried against another address: it is a decision by the machine on the other
+    /// end, and the same machine answers on every address it has.
+    pub async fn connect(&self, target: &Target) -> Result<SessionId, TransportError> {
         // An explicit connect clears the flag: the operator has asked for a connection,
         // so a later accidental drop is eligible for automatic reconnect again.
         self.intentional_disconnect
             .store(false, std::sync::atomic::Ordering::Release);
 
-        let candidates = candidate_addresses(server);
-        if candidates.is_empty() {
-            let message = "No address is known for this server. Connect it to the network, or set \
-                 its address in the device settings."
-                .to_owned();
-            self.set_state(ConnectionState::Failed {
-                message: message.clone(),
-            });
-            return Err(TransportError::Connect { reason: message });
-        }
+        let candidates = match target.address.to_socket_addrs() {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                self.set_state(ConnectionState::Failed {
+                    message: err.to_string(),
+                });
+                return Err(err);
+            }
+        };
 
         let mut last_error = None;
         for address in candidates {
             self.set_state(ConnectionState::Connecting {
-                address: address.to_string(),
+                address: target.address.to_string(),
             });
 
-            match self.attempt(server, address).await {
+            match self.attempt(target, address).await {
                 Ok(session_id) => return Ok(session_id),
                 Err(err) => {
                     // A refusal is a decision, not a transport hiccup: trying the next
-                    // address would only produce the same refusal from the same agent.
+                    // address would only produce the same refusal from the same machine.
                     if let Some(reason) = RefusalReason::classify(&err) {
                         self.set_state(ConnectionState::Refused {
                             reason,
@@ -485,19 +469,23 @@ impl ConnectionManager {
         Err(err)
     }
 
-    /// One connection attempt against one address.
+    /// One connection attempt against one resolved address.
+    ///
+    /// The *dialled* address travels on `Authenticate`, never `address` — the responder
+    /// keys its pin on what the user typed, and a resolved socket address would key a
+    /// different entry every time a hostname resolved differently.
     async fn attempt(
         &self,
-        server: &SavedServer,
+        target: &Target,
         address: SocketAddr,
     ) -> Result<SessionId, TransportError> {
-        // Pinned to the certificate recorded for this server. An agent that renewed its
-        // certificate without the client recording the rotation fails here — loudly,
-        // which is the intent.
-        let (connector, _observed) = ClientConnector::new(
-            &self.identity,
-            PinPolicy::Pinned(server.certificate_fingerprint),
-        )?;
+        // Trust-on-first-use, because there is nothing to pin against: this build has
+        // no saved-device record, and the machine being dialled has not been seen
+        // before. Admission is decided by the machine on the other end, after TLS, by
+        // its user — which is the whole design. TLS here establishes *which key* is
+        // there, not that it may have a session.
+        let (connector, _observed) =
+            ClientConnector::new(&self.identity, PinPolicy::TrustOnFirstUse)?;
 
         let connection = tokio::time::timeout(
             std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
@@ -512,36 +500,35 @@ impl ConnectionManager {
 
         let (mut writer, mut reader) =
             rc_transport::open_channel(&connection, rc_protocol::Channel::Control).await?;
-        let dialed_address = address.to_string().parse::<PeerAddress>()?;
 
         let ack = rc_transport::handshake::begin_handshake(
             &mut reader,
             &mut writer,
             self.descriptor.clone(),
             self.capabilities.clone(),
-            dialed_address,
-            None,
+            target.address.clone(),
+            target.unattended_password.clone(),
             rc_protocol::now_ms(),
         )
         .await?;
-
-        // The agent's identity is verified by TLS against the pin; this is a second,
-        // cheaper check that the peer is the device the client meant to reach, and it
-        // catches a saved record that has drifted from the pin it was stored with.
-        if ack.descriptor.device_id != server.device_id {
-            return Err(TransportError::FingerprintMismatch);
-        }
 
         let session_id = ack.session_id;
         // Set after `set_state`, which clears it for every state but `Connected`.
         self.set_state(ConnectionState::Connected {
             session_id: session_id.to_canonical_string(),
-            address: address.to_string(),
+            address: target.address.to_string(),
+            permissions: ack
+                .permissions
+                .iter()
+                .map(|p| p.name().to_owned())
+                .collect(),
         });
         self.set_granted(ack.permissions);
+        *self.peer.lock().await = Some(ack.descriptor.clone());
         tracing::info!(
             granted = ?ack.permissions,
-            "the agent granted this session its permissions"
+            machine = %ack.descriptor.display_name,
+            "the other machine admitted this session"
         );
 
         // The connector is held by the active connection: dropping it would close the
@@ -850,7 +837,7 @@ impl ConnectionManager {
     ///
     /// # Errors
     /// The last failure, after the retry budget is spent.
-    pub async fn reconnect(&self, server: &SavedServer) -> Result<SessionId, TransportError> {
+    pub async fn reconnect(&self, target: &Target) -> Result<SessionId, TransportError> {
         let mut attempt = 1;
 
         loop {
@@ -890,7 +877,7 @@ impl ConnectionManager {
 
             self.set_state(ConnectionState::Reconnecting { attempt });
 
-            match self.connect(server).await {
+            match self.connect(target).await {
                 Ok(session_id) => {
                     tracing::info!(attempt, "reconnected");
                     return Ok(session_id);
@@ -964,28 +951,11 @@ pub const fn client_capabilities() -> Capabilities {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
-
     use rc_protocol::control::OsFamily;
 
     use rc_security::SystemClock;
 
     use super::*;
-
-    fn address(last_octet: u8, port: u16) -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, last_octet)), port)
-    }
-
-    fn server() -> SavedServer {
-        SavedServer {
-            device_id: DeviceId::generate(),
-            display_name: "home-server".to_owned(),
-            certificate_fingerprint: Fingerprint::of_certificate_der(b"cert"),
-            identity_fingerprint: Fingerprint::of_public_key(&[1u8; 32]),
-            last_known_address: None,
-            configured_endpoint: None,
-        }
-    }
 
     fn manager() -> ConnectionManager {
         let identity = Arc::new(DeviceIdentity::generate("client", &SystemClock).unwrap());
@@ -994,62 +964,24 @@ mod tests {
         ConnectionManager::new(identity, descriptor, client_capabilities())
     }
 
-    // -- address selection ---------------------------------------------------
+    // -- targets -------------------------------------------------------------
 
     #[test]
-    fn the_last_working_address_is_tried_first() {
-        // On a home LAN it is nearly always still right.
-        let mut saved = server();
-        saved.last_known_address = Some(address(50, 47811));
-        saved.configured_endpoint = Some("192.168.1.60:47811".to_owned());
-
-        let candidates = candidate_addresses(&saved);
-        assert_eq!(candidates[0], address(50, 47811));
-        assert_eq!(candidates[1], address(60, 47811));
+    fn a_target_offers_no_password_unless_one_was_given() {
+        // The common case. A password is something the user types for a machine that
+        // asked for one, not a field that quietly carries an empty string.
+        let target = Target::new("192.168.1.77".parse().unwrap());
+        assert_eq!(target.unattended_password, None);
+        assert_eq!(target.address.to_string(), "192.168.1.77:7443");
     }
 
     #[test]
-    fn a_configured_endpoint_is_used_when_nothing_is_saved() {
-        let mut saved = server();
-        saved.configured_endpoint = Some("192.168.1.60:47811".to_owned());
-
-        let candidates = candidate_addresses(&saved);
-        assert_eq!(candidates, vec![address(60, 47811)]);
-    }
-
-    #[test]
-    fn a_duplicated_address_is_tried_once() {
-        let mut saved = server();
-        saved.last_known_address = Some(address(50, 47811));
-        saved.configured_endpoint = Some("192.168.1.50:47811".to_owned());
-
-        assert_eq!(candidate_addresses(&saved), vec![address(50, 47811)]);
-    }
-
-    #[test]
-    fn a_server_with_nowhere_to_dial_yields_no_candidates() {
-        assert!(candidate_addresses(&server()).is_empty());
-    }
-
-    #[test]
-    fn an_endpoint_without_a_port_gets_the_default() {
-        assert_eq!(
-            parse_endpoint("10.0.0.4"),
-            Some(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
-                rc_protocol::DEFAULT_AGENT_PORT
-            ))
-        );
-    }
-
-    #[test]
-    fn an_unparseable_endpoint_is_reported_rather_than_guessed_at() {
-        // A hostname needs resolving, which is the caller's job; anything else is a
-        // configuration error the operator should see.
-        assert_eq!(parse_endpoint(""), None);
-        assert_eq!(parse_endpoint("   "), None);
-        assert_eq!(parse_endpoint("not an address"), None);
-        assert_eq!(parse_endpoint("server.local"), None);
+    fn a_target_keeps_the_address_as_typed_rather_than_resolving_it() {
+        // The dialled address is what the responder keys its pin on. Resolving it here
+        // would key a different entry every time a hostname resolved differently.
+        let target = Target::new("work-laptop.local:9000".parse().unwrap());
+        assert_eq!(target.address.host, "work-laptop.local");
+        assert_eq!(target.address.port, 9000);
     }
 
     // -- reconnect policy ----------------------------------------------------
@@ -1088,7 +1020,9 @@ mod tests {
 
         // The connect fails — there is nothing to connect to — but the flag it clears
         // is what is being asserted.
-        let _ = manager.connect(&server()).await;
+        let _ = manager
+            .connect(&Target::new("192.0.2.1".parse().unwrap()))
+            .await;
         assert!(!manager.was_intentional());
     }
 
@@ -1228,17 +1162,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connecting_with_no_address_reports_what_the_operator_should_do() {
-        // "Something went wrong" is not an acceptable answer here.
+    async fn connecting_to_a_name_that_does_not_resolve_says_so() {
+        // "Something went wrong" is not an acceptable answer here. `.invalid` is
+        // reserved by RFC 2606 precisely so it never resolves.
         let manager = manager();
-        let result = manager.connect(&server()).await;
+        let result = manager
+            .connect(&Target::new("nothing.invalid".parse().unwrap()))
+            .await;
 
         assert!(result.is_err());
         match manager.state() {
             ConnectionState::Failed { message } => {
                 assert!(
-                    message.contains("address"),
-                    "the message must say what is missing: {message}"
+                    message.contains("nothing.invalid"),
+                    "the message must name the address: {message}"
                 );
             }
             other => panic!("expected a failed state, got {other:?}"),
@@ -1256,6 +1193,7 @@ mod tests {
             ConnectionState::Connected {
                 session_id: "ses_x".to_owned(),
                 address: "10.0.0.1:1".to_owned(),
+                permissions: Vec::new(),
             },
             ConnectionState::Disconnecting,
             ConnectionState::Reconnecting { attempt: 1 },
@@ -1292,6 +1230,7 @@ mod tests {
         let state = ConnectionState::Connected {
             session_id: SessionId::generate().to_canonical_string(),
             address: "10.0.0.1:47811".to_owned(),
+            permissions: Vec::new(),
         };
         let rendered = serde_json::to_string(&state).unwrap();
 
