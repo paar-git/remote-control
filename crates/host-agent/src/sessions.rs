@@ -43,13 +43,27 @@ use crate::error::{AccessError, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Session {
     permissions: PermissionSet,
+    identity: rc_security::Fingerprint,
 }
 
 impl Session {
-    /// A session holding exactly `permissions`.
+    /// A session held by the device that proved `identity`, granted `permissions`.
     #[must_use]
-    pub const fn new(permissions: PermissionSet) -> Self {
-        Self { permissions }
+    pub const fn new(permissions: PermissionSet, identity: rc_security::Fingerprint) -> Self {
+        Self {
+            permissions,
+            identity,
+        }
+    }
+
+    /// The identity this session was admitted under.
+    ///
+    /// Taken from the connection at admission, never from a request body. It is what
+    /// lets a service refuse an action aimed at the caller's own trust row -- see
+    /// [`crate::trust_service`].
+    #[must_use]
+    pub const fn identity(&self) -> rc_security::Fingerprint {
+        self.identity
     }
 
     /// What this session may do. Fixed for its lifetime.
@@ -262,7 +276,10 @@ mod tests {
 
     #[test]
     fn a_session_may_use_a_permission_it_was_granted() {
-        let session = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        let session = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
         assert!(session.require(Permission::ViewMetrics).is_ok());
     }
 
@@ -270,7 +287,10 @@ mod tests {
     fn a_session_is_refused_a_permission_it_was_not_granted() {
         // The dangerous direction: a session must never be let through for something it
         // was not explicitly granted.
-        let session = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        let session = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
         let err = session.require(Permission::TransferFiles).unwrap_err();
         assert!(matches!(
             err,
@@ -282,7 +302,10 @@ mod tests {
 
     #[test]
     fn a_session_with_no_permissions_is_refused_everything() {
-        let session = Session::new(PermissionSet::NONE);
+        let session = Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
         for permission in Permission::ALL {
             assert!(session.require(permission).is_err());
         }

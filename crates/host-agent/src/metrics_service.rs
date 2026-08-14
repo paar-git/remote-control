@@ -232,10 +232,16 @@ mod tests {
         // itself needs a live `ChannelWriter`, which needs a real QUIC connection, so
         // the loop is covered end-to-end and not here; `sessions::Session::require`
         // carries the refusal semantics under its own tests.
-        let watcher = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        let watcher = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
         assert!(watcher.require(Permission::ViewMetrics).is_ok());
 
-        let revoked = Session::new(PermissionSet::NONE);
+        let revoked = Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
         assert!(
             revoked.require(Permission::ViewMetrics).is_err(),
             "a session stripped of the permission must stop a stream mid-flight, not at \

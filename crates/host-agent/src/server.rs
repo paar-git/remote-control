@@ -71,6 +71,7 @@ pub struct AgentServer {
     settings: SettingsRepository,
     /// Recently seen and pinned peer identities.
     trust: TrustRepository,
+    trust_service: crate::TrustService,
     history: SessionHistoryRepository,
     /// UI boundary for human accept/deny decisions.
     prompt: Arc<dyn AcceptPrompt>,
@@ -127,6 +128,7 @@ impl AgentServer {
             )),
             settings: SettingsRepository::new(database),
             trust: TrustRepository::new(database),
+            trust_service: crate::TrustService::new(TrustRepository::new(database)),
             history: SessionHistoryRepository::new(database),
             prompt,
             throttle: tokio::sync::Mutex::new(rc_security::Throttle::with_defaults()),
@@ -338,7 +340,7 @@ impl AgentServer {
 
         // The permissions this connection was admitted with, re-checked on every
         // request rather than assumed for the life of the session.
-        let session = Session::new(peer.permissions);
+        let session = Session::new(peer.permissions, peer.identity_fingerprint);
 
         // A metrics subscription is asked for on the control channel and delivered on
         // the metrics channel, so the two need a handle in common. Created here, before
@@ -605,11 +607,17 @@ impl AgentServer {
                 message: "the request was routed incorrectly".to_owned(),
             },
 
-            // `ControlRequestPayload` is `#[non_exhaustive]`: a request from a newer
-            // client is refused rather than approximated.
-            _ => ControlResult::Err {
-                code: rc_protocol::control::ErrorCode::Unsupported,
-                message: "this agent does not support that request".to_owned(),
+            // Trust management, behind `Administer`. Delegated rather than inlined so
+            // the no-self-modification rule lives in one place with its own tests.
+            payload => match self.trust_service.handle(session, payload).await {
+                Ok(Some(response)) => ControlResult::Ok(response),
+                // `ControlRequestPayload` is `#[non_exhaustive]`: a request from a newer
+                // client is refused rather than approximated.
+                Ok(None) => ControlResult::Err {
+                    code: rc_protocol::control::ErrorCode::Unsupported,
+                    message: "this agent does not support that request".to_owned(),
+                },
+                Err(err) => access_error_result(&err),
             },
         }
     }
@@ -831,6 +839,29 @@ const fn os_family_name(family: rc_protocol::control::OsFamily) -> &'static str 
     }
 }
 
+/// A typed access error as a control-channel result.
+///
+/// The message is a fixed string per variant, never the error's own display text: a
+/// storage failure's message can name a file path, and a caller that was refused is not
+/// entitled to learn one.
+fn access_error_result(err: &crate::error::AccessError) -> ControlResult {
+    use crate::error::AccessError;
+    match err {
+        AccessError::PermissionDenied { permission } => denied(permission),
+        AccessError::InvalidArgument { field } => ControlResult::Err {
+            code: rc_protocol::control::ErrorCode::InvalidArgument,
+            message: format!("the {field} in this request is not valid"),
+        },
+        AccessError::Storage(storage) => {
+            tracing::warn!(%storage, "a trust-management request could not be served");
+            ControlResult::Err {
+                code: rc_protocol::control::ErrorCode::Internal,
+                message: "the request could not be completed".to_owned(),
+            }
+        }
+    }
+}
+
 /// How a session that ended for `reason` is recorded.
 ///
 /// Only a transport failure or a protocol error is a failure; everything else, including
@@ -941,11 +972,17 @@ mod tests {
 
     /// Every permission, which is what an ordinary session carries.
     fn owner() -> Session {
-        Session::new(PermissionSet::ALL)
+        Session::new(
+            PermissionSet::ALL,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        )
     }
 
     fn no_permissions() -> Session {
-        Session::new(PermissionSet::NONE)
+        Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        )
     }
 
     /// A session's metrics-subscription handle.
@@ -959,6 +996,102 @@ mod tests {
         tokio::sync::watch::Receiver<Option<u32>>,
     ) {
         tokio::sync::watch::channel(None)
+    }
+
+    #[tokio::test]
+    async fn a_session_without_administer_cannot_read_the_trusted_devices() {
+        // The dispatch is what is under test here; the rule itself has its own tests in
+        // `trust_service`. What this pins is that the request actually reaches that rule
+        // rather than falling through to the `Unsupported` arm, which would look like a
+        // refusal while meaning something entirely different.
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::ListTrustedDevices,
+                &no_permissions(),
+                &subscription,
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                ControlResult::Err {
+                    code: rc_protocol::control::ErrorCode::PermissionDenied,
+                    ..
+                }
+            ),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_administrator_session_can_read_the_trusted_devices() {
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::ListTrustedDevices,
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                ControlResult::Ok(ControlResponsePayload::TrustedDevices(_))
+            ),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_administrator_cannot_revoke_itself_over_the_control_channel() {
+        // The end-to-end shape of the no-self-modification rule: it must survive the
+        // trip through dispatch, not only hold inside the service.
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
+        let caller = owner();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::RevokeDevice {
+                    identity: caller.identity().to_hex(),
+                },
+                &caller,
+                &subscription,
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                ControlResult::Err {
+                    code: rc_protocol::control::ErrorCode::PermissionDenied,
+                    ..
+                }
+            ),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_does_not_disclose_what_went_wrong() {
+        // An error message is shown to a remote peer. A storage error's own text can
+        // name a file path, so the wire message is a fixed string per variant.
+        let result = access_error_result(&crate::error::AccessError::Storage(
+            rc_storage::StorageError::NotFound,
+        ));
+
+        let ControlResult::Err { code, message } = result else {
+            panic!("expected an error")
+        };
+        assert_eq!(code, rc_protocol::control::ErrorCode::Internal);
+        assert_eq!(message, "the request could not be completed");
     }
 
     #[tokio::test]
@@ -1032,7 +1165,10 @@ mod tests {
         // A session holding only ViewMetrics is what a metrics-only grant is for;
         // refusing it would leave that permission with nothing it could do.
         let server = server().await;
-        let view_only = Session::new(PermissionSet::NONE.with(Permission::ViewMetrics));
+        let view_only = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
 
         let (subscription, _receiver) = subscription();
         let result = server
@@ -1053,7 +1189,10 @@ mod tests {
         // The check is against the live permission set on every request, so a
         // permission lost mid-session does not wait for the connection to end.
         let server = server().await;
-        let revoked = Session::new(PermissionSet::NONE);
+        let revoked = Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
 
         let (subscription, _receiver) = subscription();
         let result = server

@@ -17,11 +17,13 @@ pub mod logging;
 pub mod metrics_service;
 pub mod server;
 pub mod sessions;
+pub mod trust_service;
 
 pub use access::{
     AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization,
-    ConnectionRequest, RefusalReason, authorize_connection,
+    ConnectionRequest, RefusalReason, TrustChoice, authorize_connection,
 };
+pub use trust_service::TrustService;
 // `WireRefusal` travels on the wire, so it is defined in `rc-protocol` rather than
 // here; re-exported for convenience since callers of this crate reach for it alongside
 // `RefusalReason`.

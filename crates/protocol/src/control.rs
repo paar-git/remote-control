@@ -347,8 +347,65 @@ pub enum ControlRequestPayload {
     },
     /// Stop periodic metrics.
     UnsubscribeMetrics,
+    /// Read the responder's trusted devices.
+    ///
+    /// This and the three below require `Administer`, which is granted only from a
+    /// device's own settings on the machine being controlled — never from the Accept
+    /// dialog. See `rc_host_agent::trust_service`.
+    ListTrustedDevices,
+    /// Change what a trusted device may do.
+    SetDevicePermissions {
+        /// Lowercase hex identity fingerprint of the device to change.
+        identity: String,
+        /// The permissions it should hold from now on.
+        permissions: WirePermissions,
+    },
+    /// Turn a trusted device's unattended reconnection on or off.
+    SetUnattendedAccess {
+        /// Lowercase hex identity fingerprint of the device to change.
+        identity: String,
+        /// Whether it may reconnect without anyone approving.
+        enabled: bool,
+    },
+    /// Remove a trust relationship entirely.
+    RevokeDevice {
+        /// Lowercase hex identity fingerprint of the device to forget.
+        identity: String,
+    },
     /// End the session.
     Disconnect(Disconnect),
+}
+
+/// A trusted device, as an administrator session is told about it.
+///
+/// # It carries no credential, because there is none
+///
+/// A device is authenticated by holding its identity private key, not by presenting a
+/// stored token, so there is nothing secret attached to a trust relationship that could
+/// be disclosed here. A field added to this type that *did* carry one would be sending a
+/// secret to a remote peer, which is why the absence is stated rather than left implied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedDeviceSummary {
+    /// Lowercase hex fingerprint of the device's identity key. Public, not secret.
+    pub identity_fingerprint: String,
+    /// The device id it reported. Display only.
+    pub device_id: String,
+    /// The name it reported. Untrusted text.
+    pub display_name: String,
+    /// The operating-system family it reported. Untrusted text.
+    pub os_family: OsFamily,
+    /// Where it last connected from, if it has. Untrusted text.
+    pub last_address: Option<String>,
+    /// When a human first trusted it.
+    pub added_ms: i64,
+    /// When it was last admitted.
+    pub last_connected_ms: Option<i64>,
+    /// Whether it may reconnect without anyone approving.
+    pub unattended: bool,
+    /// Whether it is temporarily refused.
+    pub suspended: bool,
+    /// What an admitted session from it receives.
+    pub permissions: WirePermissions,
 }
 
 /// Control-channel response envelope.
@@ -409,6 +466,12 @@ pub enum ControlResponsePayload {
     Snapshot(Box<crate::system::SystemSnapshot>),
     /// Static facts about the host that do not change between snapshots.
     HostInfo(Box<HostSummary>),
+    /// The responder's trusted devices.
+    ///
+    /// Boxed for the same reason [`ControlResponsePayload::Snapshot`] is: an un-boxed
+    /// variant would set the size of every control response, including the `Pong` sent
+    /// several times a minute.
+    TrustedDevices(Box<Vec<TrustedDeviceSummary>>),
 }
 
 /// Facts about a host that change rarely enough to fetch once per session.

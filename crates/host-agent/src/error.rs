@@ -22,6 +22,17 @@ pub enum AccessError {
         /// [`rc_security::Permission::name`].
         permission: &'static str,
     },
+
+    /// A request carried a value this build cannot interpret.
+    ///
+    /// Refused rather than coerced: a target identity that did not parse, or a
+    /// permission set carrying an unknown bit, means something different from whatever
+    /// the nearest valid value would be.
+    #[error("the {field} in this request is not valid")]
+    InvalidArgument {
+        /// Which field was rejected. A fixed name, never caller-supplied text.
+        field: &'static str,
+    },
 }
 
 /// Convenience result alias.
