@@ -16,6 +16,10 @@ rc-platform = { workspace = true }
 ed25519-dalek = { workspace = true }
 rcgen = { workspace = true }
 pkcs8 = { version = "0.11", features = ["alloc"] }
+# Reads the subject public key out of a peer's certificate. A real DER parse rather
+# than a byte scan: the extracted key becomes a trust key, and a scan could be made to
+# match a planted SPKI-shaped sequence somewhere else in the certificate.
+x509-parser = { version = "0.18", default-features = false }
 
 # Hashing, key derivation and password hashing.
 sha2 = { workspace = true }

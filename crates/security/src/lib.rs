@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod certificate;
 pub mod clock;
 pub mod error;
 pub mod fingerprint;
@@ -26,6 +27,7 @@ pub mod password;
 pub mod permissions;
 pub mod throttle;
 
+pub use certificate::{identity_fingerprint_of_certificate, identity_key_of_certificate};
 pub use clock::{Clock, OsRandom, RandomSource, RandomSourceExt, SystemClock};
 pub use error::{Result, SecurityError};
 pub use fingerprint::Fingerprint;
