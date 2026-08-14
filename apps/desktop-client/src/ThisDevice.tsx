@@ -1,17 +1,17 @@
 /**
- * This machine: the address the other side dials, the identity to verify, and the
- * incoming-connection switch.
+ * This machine: name, readiness, the permanent device ID, and the incoming switch.
  *
  * IPv4, IPv6 and hostname sit behind a disclosure. Nobody should need to understand
  * IPv6 to use this.
  */
 
+import { Share2 } from 'lucide-react';
 import { useState } from 'react';
 
 import type { HostStatus, LocalIdentity } from './api.js';
 import { DeviceAvatar } from './DeviceAvatar';
 import { formatDeviceId } from './format.js';
-import { CopyButton, StatusBadge, Toggle } from './ui';
+import { Button, CopyButton, StatusBadge, Toggle } from './ui';
 
 export function ThisDevice({
   status,
@@ -29,9 +29,24 @@ export function ThisDevice({
   readonly toggling?: boolean | undefined;
 }): React.JSX.Element {
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [shared, setShared] = useState(false);
   const primary = primaryAddress(status.addresses);
   const ipv6 = status.addresses.filter(isIpv6);
-  const deviceId = identity === null ? '—' : formatDeviceId(identity.deviceId);
+  const deviceId = identity === null ? '—' : formatDeviceId(identity.identityFingerprint);
+
+  const share = (): void => {
+    const lines = [
+      status.machineName,
+      `Device ID: ${deviceId}`,
+      ...(primary === null ? [] : [`Address: ${primary}`]),
+    ];
+    void navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      setShared(true);
+      window.setTimeout(() => {
+        setShared(false);
+      }, 2000);
+    });
+  };
 
   return (
     <section className="rounded-[var(--radius-card)] border border-(--color-border) bg-(--color-card) p-6 shadow-(--shadow-card)">
@@ -53,6 +68,22 @@ export function ThisDevice({
         </div>
 
         <div>
+          <p className="mb-1 text-sm text-(--color-text-secondary)">Device ID</p>
+          <p aria-label="Device ID" className="font-mono text-2xl tracking-wide">
+            {deviceId}
+          </p>
+          <p className="mt-1 text-xs text-(--color-text-secondary)">
+            Identity — verify this on the other machine
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <CopyButton value={deviceId} label="device ID" size="sm" />
+            <Button variant="default" size="sm" icon={Share2} onClick={share}>
+              {shared ? 'Copied' : 'Share'}
+            </Button>
+          </div>
+        </div>
+
+        <div>
           <p className="mb-1 text-sm text-(--color-text-secondary)">Connect using</p>
           <div className="flex flex-wrap items-center gap-2">
             <p aria-label="Connect using" className="font-mono text-base tracking-tight">
@@ -60,16 +91,6 @@ export function ThisDevice({
             </p>
             {primary !== null && <CopyButton value={primary} label="address" size="sm" />}
           </div>
-        </div>
-
-        <div>
-          <p className="mb-1 text-sm text-(--color-text-secondary)">Device ID</p>
-          <p aria-label="Device ID" className="font-mono text-lg tracking-wide">
-            {deviceId}
-          </p>
-          <p className="mt-1 text-xs text-(--color-text-secondary)">
-            Identity — verify this on the other machine
-          </p>
         </div>
 
         <div className="flex items-center justify-between gap-3">
@@ -106,7 +127,16 @@ export function ThisDevice({
               ))}
               <InfoRow label="Hostname" value={hostname ?? '—'} />
               <InfoRow label="Listen port" value={String(status.listenPort)} />
-              <InfoRow label="Connection method" value="QUIC / TLS 1.3" />
+              <InfoRow label="Connection method" value="Direct QUIC / TLS 1.3" />
+              <InfoRow
+                label="Local network"
+                value={
+                  status.accepting
+                    ? `Listening on ${String(status.listenPort)}`
+                    : 'Not accepting connections'
+                }
+              />
+              <InfoRow label="Relay" value="Not used — this build connects directly" />
             </dl>
           )}
         </div>

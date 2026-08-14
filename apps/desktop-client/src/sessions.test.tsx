@@ -101,6 +101,7 @@ describe('SessionsPage', () => {
     render(<SessionsPage onToast={vi.fn()} />);
 
     expect(await screen.findByText('Refused')).toBeInTheDocument();
+    expect(screen.getByText('Incoming')).toBeInTheDocument();
   });
 
   it('uses a compact empty state rather than a large empty container', async () => {

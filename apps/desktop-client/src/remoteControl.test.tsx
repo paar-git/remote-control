@@ -15,6 +15,7 @@ vi.mock('./api.js', async (importOriginal) => {
     getLocalIdentity: vi.fn(),
     getClientInfo: vi.fn(),
     listRecent: vi.fn(),
+    probeDevice: vi.fn(() => Promise.resolve('offline')),
     setAccepting: vi.fn(),
   };
 });
@@ -62,6 +63,7 @@ describe('RemoteControlPage', () => {
       databaseReady: true,
     });
     vi.mocked(api.listRecent).mockResolvedValue([]);
+    vi.mocked(api.probeDevice).mockResolvedValue('offline');
     vi.mocked(api.connectToAddress).mockReset();
     vi.mocked(api.connectToAddress).mockResolvedValue({ state: 'connecting', address: 'x' });
   });
@@ -89,7 +91,9 @@ describe('RemoteControlPage', () => {
   it('shows progress while the connection is being made rather than appearing inert', () => {
     renderPage({ connection: { state: 'connecting', address: '192.168.1.77:7443' } });
 
-    expect(screen.getByRole('status')).toHaveTextContent('Connecting to 192.168.1.77:7443…');
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Finding the device at 192.168.1.77:7443…',
+    );
     expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled();
   });
 
@@ -118,6 +122,21 @@ describe('RemoteControlPage', () => {
 
     expect(await screen.findAllByTestId('recent-device')).toHaveLength(5);
     expect(screen.getByRole('button', { name: 'View all devices' })).toBeInTheDocument();
+  });
+
+  it('shows a recent device as offline rather than inventing a green dot', async () => {
+    vi.mocked(api.listRecent).mockResolvedValue([
+      {
+        address: '10.0.0.1:7443',
+        machineName: 'Office PC',
+        lastConnectedMs: 1_700_000_000_000,
+        knownIdentity: null,
+      },
+    ]);
+    vi.mocked(api.probeDevice).mockResolvedValue('offline');
+    renderPage();
+
+    expect(await screen.findByText('Offline')).toBeInTheDocument();
   });
 
   it('offers a compact empty state rather than a large empty container', async () => {

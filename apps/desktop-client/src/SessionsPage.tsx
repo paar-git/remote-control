@@ -95,6 +95,8 @@ export function SessionsPage({
                     <div className="min-w-0">
                       <p className="font-medium">{session.deviceName}</p>
                       <p className="flex flex-wrap items-center gap-x-2 text-xs text-(--color-text-secondary)">
+                        <span>Incoming</span>
+                        <span>Direct QUIC</span>
                         <span>
                           {formatDuration(Math.max(0, (Date.now() - session.startedMs) / 1000))}
                         </span>
@@ -128,9 +130,25 @@ export function SessionsPage({
                     <div className="min-w-0">
                       <p className="font-medium">{record.deviceName}</p>
                       <p className="text-xs text-(--color-text-secondary)">
+                        <span>{humanise(record.direction)}</span>
+                        {' · '}
                         <span>{humanise(record.outcome)}</span>
+                        {record.endedMs !== null && (
+                          <>
+                            {' · '}
+                            {formatDuration(
+                              Math.max(0, (record.endedMs - record.startedMs) / 1000),
+                            )}
+                          </>
+                        )}
                         {' · '}
                         {formatRelative(record.startedMs)}
+                        {record.endReason !== null && record.endReason !== '' && (
+                          <>
+                            {' · '}
+                            {humanise(record.endReason)}
+                          </>
+                        )}
                       </p>
                     </div>
                   </li>

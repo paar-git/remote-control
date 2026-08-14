@@ -210,7 +210,7 @@ describe('AcceptDialog', () => {
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent('Koren Laptop');
     expect(dialog).toHaveTextContent('Windows');
-    expect(dialog).toHaveTextContent('dev-1');
+    expect(dialog.textContent ?? '').toMatch(/\d{3} \d{3} \d{3}/);
   });
 
   it('says whether this device is already trusted', async () => {

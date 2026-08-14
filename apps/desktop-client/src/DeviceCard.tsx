@@ -3,12 +3,13 @@
  */
 
 import { MoreHorizontal } from 'lucide-react';
+import { useState } from 'react';
 
 import type { Presence, TrustedDevice } from './api.js';
 import { DeviceAvatar } from './DeviceAvatar';
-import { formatRelative } from './format.js';
+import { formatDeviceId, formatRelative } from './format.js';
 import { osLabel } from './labels.js';
-import { Button, StatusBadge } from './ui';
+import { Button, IconButton, StatusBadge } from './ui';
 
 export function DeviceCard({
   device,
@@ -23,6 +24,7 @@ export function DeviceCard({
   readonly onOpen: () => void;
   readonly busy?: boolean | undefined;
 }): React.JSX.Element {
+  const [adminOpen, setAdminOpen] = useState(false);
   const os = osFamilyOf(device.osFamily);
   const canDial = device.lastAddress !== null && !device.suspended;
 
@@ -38,6 +40,9 @@ export function DeviceCard({
             <PresenceLabel presence={presence} />
           </div>
           <p className="mt-0.5 text-sm text-(--color-text-secondary)">{osLabel(device.osFamily)}</p>
+          <p className="mt-0.5 font-mono text-xs text-(--color-text-secondary)">
+            {formatDeviceId(device.identityFingerprint)}
+          </p>
         </div>
       </div>
 
@@ -46,9 +51,15 @@ export function DeviceCard({
           {device.unattended ? 'Unattended access' : 'Trusted access'}
         </StatusBadge>
         {device.permissions.includes('administer') && (
-          <span className="rounded-full bg-(--color-hover) px-2 py-0.5 text-[11px] font-medium text-(--color-text-secondary)">
+          <button
+            type="button"
+            className="rounded-full bg-(--color-hover) px-2 py-0.5 text-[11px] font-medium text-(--color-text-secondary)"
+            onClick={() => {
+              setAdminOpen((open) => !open);
+            }}
+          >
             Admin access
-          </span>
+          </button>
         )}
         {device.suspended && (
           <StatusBadge tone="warning" icon={false}>
@@ -56,6 +67,12 @@ export function DeviceCard({
           </StatusBadge>
         )}
       </div>
+      {adminOpen && (
+        <p className="text-xs text-(--color-text-secondary)">
+          Can manage this machine’s trusted devices: list them, change what they may do, and revoke
+          them.
+        </p>
+      )}
 
       <p className="text-xs text-(--color-text-secondary)">
         Last connected {formatRelative(device.lastConnectedMs)}
@@ -65,9 +82,7 @@ export function DeviceCard({
         <Button variant="primary" disabled={busy || !canDial} onClick={onConnect}>
           Connect
         </Button>
-        <Button variant="ghost" icon={MoreHorizontal} onClick={onOpen} title="Device details">
-          Details
-        </Button>
+        <IconButton icon={MoreHorizontal} label="Device details" onClick={onOpen} />
       </div>
     </article>
   );

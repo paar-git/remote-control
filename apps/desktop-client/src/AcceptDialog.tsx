@@ -143,7 +143,7 @@ export function AcceptDialog({ onToast }: { readonly onToast: (toast: Toast) => 
 
         <dl className="mb-4 flex flex-col gap-2 text-sm">
           <Row label="Machine" value={request.machineName} />
-          <Row label="Device ID" value={request.deviceId} />
+          <Row label="Device ID" value={formatDeviceId(request.identityFingerprint)} />
           <Row label="System" value={osLabel(request.osFamily)} />
           <Row label="Address" value={request.address} mono />
           <div className="flex gap-2">
@@ -160,10 +160,6 @@ export function AcceptDialog({ onToast }: { readonly onToast: (toast: Toast) => 
         {request.trusted && (
           <p className="mb-3 text-sm font-medium text-(--color-text-secondary)">Trusted device</p>
         )}
-
-        <p className="mb-3 font-mono text-xs text-(--color-text-secondary)">
-          Display ID {formatDeviceId(request.deviceId)}
-        </p>
 
         <fieldset className="mb-4">
           <legend className="mb-2 text-xs font-medium text-(--color-text-secondary)">
@@ -222,6 +218,10 @@ export function AcceptDialog({ onToast }: { readonly onToast: (toast: Toast) => 
           </div>
         ) : null}
 
+        <p className="mb-3 text-xs text-(--color-text-secondary)">
+          Accept Once lasts for this session only. Accept &amp; Trust remembers the device and still
+          asks next time. Unattended access is a second step after that.
+        </p>
         <div className="flex flex-wrap justify-end gap-2">
           <Button ref={rejectRef} variant="default" disabled={answering} onClick={refuse}>
             Reject

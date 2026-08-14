@@ -129,9 +129,9 @@ export function describeConnectionState(state: ConnectionState): string {
     case 'offline':
       return 'Not connected';
     case 'connecting':
-      return `Connecting to ${state.address}…`;
+      return `Finding the device at ${state.address}…`;
     case 'authenticating':
-      return 'Verifying the server’s identity…';
+      return 'Establishing a secure connection…';
     case 'connected':
       return `Connected — ${state.address}`;
     case 'disconnecting':

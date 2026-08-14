@@ -16,7 +16,12 @@ import {
   type Presence,
   type TrustedDevice,
 } from './api.js';
-import { formatFingerprintGroups, formatRelative, formatTimestamp } from './format.js';
+import {
+  formatDeviceId,
+  formatFingerprintGroups,
+  formatRelative,
+  formatTimestamp,
+} from './format.js';
 import { GrantAdminDialog } from './GrantAdminDialog';
 import { GRANTABLE_PERMISSIONS, osLabel } from './labels.js';
 import { Button, ConfirmDialog, Toggle, type Toast } from './ui';
@@ -123,6 +128,9 @@ export function DeviceDetail({
               {osLabel(device.osFamily)}
               {presence === 'online' ? ' · Online' : presence === 'offline' ? ' · Offline' : ''}
             </p>
+            <p className="mt-1 font-mono text-xs text-(--color-text-secondary)">
+              {formatDeviceId(device.identityFingerprint)}
+            </p>
           </div>
           <Button variant="ghost" size="sm" onClick={onClose}>
             Close
@@ -131,6 +139,15 @@ export function DeviceDetail({
 
         <section className="mb-5">
           <h3 className="mb-3 text-sm font-semibold">Access</h3>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium">Trusted device</p>
+              <p className="text-xs text-(--color-text-secondary)">
+                Remembered. Revoking is how this is turned off.
+              </p>
+            </div>
+            <p className="text-sm font-medium text-(--color-text-secondary)">Enabled</p>
+          </div>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Connect without approval</p>
@@ -201,12 +218,15 @@ export function DeviceDetail({
               onChange={toggleSuspended}
             />
           </div>
-          <p className="mt-4 font-mono text-xs break-all text-(--color-text-secondary)">
+          <p className="mt-4 text-sm">Device identity verified</p>
+          <p className="font-mono text-xs break-all text-(--color-text-secondary)">
             {formatFingerprintGroups(device.identityFingerprint)}
           </p>
-          <p className="mt-1 text-xs text-(--color-text-secondary)">
-            Added {formatTimestamp(device.addedMs)} · Last connected{' '}
-            {formatRelative(device.lastConnectedMs)}
+          <p className="mt-2 text-xs text-(--color-text-secondary)">
+            Added {formatTimestamp(device.addedMs)}
+          </p>
+          <p className="text-xs text-(--color-text-secondary)">
+            Last connection {formatRelative(device.lastConnectedMs)}
           </p>
           <div className="mt-4">
             <Button

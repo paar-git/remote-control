@@ -4,6 +4,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
+import { LoaderCircle } from 'lucide-react';
+
 import { parseAddress } from './address.js';
 import {
   connectToAddress,
@@ -14,16 +16,18 @@ import {
   isBusy,
   isConnected,
   listRecent,
+  probeDevice,
   setAccepting,
   type ClientInfo,
   type ConnectionState,
   type HostStatus,
   type LocalIdentity,
+  type Presence,
   type Recent,
 } from './api.js';
 import { formatRelative } from './format.js';
 import { ThisDevice } from './ThisDevice';
-import { Button, Card, EmptyState, TextField, type Toast } from './ui';
+import { Button, Card, EmptyState, StatusBadge, TextField, type Toast } from './ui';
 
 export function RemoteControlPage({
   connection,
@@ -43,6 +47,7 @@ export function RemoteControlPage({
   const [os, setOs] = useState<ClientInfo['osFamily'] | undefined>(undefined);
   const [hostname, setHostname] = useState<string | undefined>(undefined);
   const [recent, setRecent] = useState<readonly Recent[]>([]);
+  const [presence, setPresence] = useState<Readonly<Record<string, Presence>>>({});
   const [toggling, setToggling] = useState(false);
 
   const refresh = useCallback(() => {
@@ -69,7 +74,19 @@ export function RemoteControlPage({
         setHostname(undefined);
       });
     listRecent()
-      .then(setRecent)
+      .then((entries) => {
+        setRecent(entries);
+        for (const entry of entries.slice(0, 5)) {
+          setPresence((current) => ({ ...current, [entry.address]: 'checking' }));
+          probeDevice(entry.address)
+            .then((result) => {
+              setPresence((current) => ({ ...current, [entry.address]: result }));
+            })
+            .catch(() => {
+              setPresence((current) => ({ ...current, [entry.address]: 'offline' }));
+            });
+        }
+      })
       .catch(() => {
         setRecent([]);
       });
@@ -147,6 +164,7 @@ export function RemoteControlPage({
             error={parseError}
             trailing={
               <Button type="submit" variant="primary" size="lg" disabled={busy}>
+                {busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : null}
                 Connect
               </Button>
             }
@@ -199,6 +217,7 @@ export function RemoteControlPage({
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  <RecentPresence presence={presence[entry.address] ?? 'checking'} />
                   <span className="text-xs text-(--color-text-secondary)">
                     {formatRelative(entry.lastConnectedMs)}
                   </span>
@@ -227,4 +246,14 @@ export function RemoteControlPage({
       </section>
     </div>
   );
+}
+
+function RecentPresence({ presence }: { readonly presence: Presence }): React.JSX.Element {
+  if (presence === 'checking') {
+    return <StatusBadge tone="busy">Checking…</StatusBadge>;
+  }
+  if (presence === 'online') {
+    return <StatusBadge tone="ready">Online</StatusBadge>;
+  }
+  return <StatusBadge tone="idle">Offline</StatusBadge>;
 }

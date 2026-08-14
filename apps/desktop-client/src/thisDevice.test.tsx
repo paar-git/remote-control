@@ -40,16 +40,19 @@ function renderThisDevice(
 }
 
 describe('ThisDevice', () => {
-  it('leads with the address, because that is what the other machine dials', () => {
-    renderThisDevice();
-    expect(screen.getByLabelText('Connect using')).toHaveTextContent('192.168.1.77:7443');
-  });
-
-  it('shows the device id as an identity to verify, not as something to dial', () => {
+  it('shows a grouped device id with copy and share', () => {
     renderThisDevice();
     const id = screen.getByLabelText('Device ID');
-    expect(id).toBeInTheDocument();
+    expect(id.textContent).toMatch(/^\d{3} \d{3} \d{3}$/);
+    expect(screen.getAllByRole('button', { name: 'Copy' }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTitle('Copy device ID')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
     expect(screen.getByText(/verify this on the other machine/i)).toBeInTheDocument();
+  });
+
+  it('still shows the address, because that is what the other machine dials', () => {
+    renderThisDevice();
+    expect(screen.getByLabelText('Connect using')).toHaveTextContent('192.168.1.77:7443');
   });
 
   it('keeps IPv6 and hostname out of the way until they are asked for', async () => {
@@ -59,6 +62,8 @@ describe('ThisDevice', () => {
     await userEvent.click(screen.getByRole('button', { name: /advanced network information/i }));
 
     expect(screen.getByText('fe80::1')).toBeInTheDocument();
+    expect(screen.getByText('Direct QUIC / TLS 1.3')).toBeInTheDocument();
+    expect(screen.getByText('Not used — this build connects directly')).toBeInTheDocument();
   });
 
   it('turns incoming connections on and off for real', async () => {
