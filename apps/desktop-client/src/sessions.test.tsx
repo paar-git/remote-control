@@ -132,6 +132,8 @@ describe('InboundSessionBanner', () => {
     const banner = screen.getByRole('status');
     expect(banner).toHaveTextContent('Gaming PC');
     expect(banner).toHaveTextContent('1m');
+    expect(banner).toHaveTextContent('has been controlling this machine');
+    expect(banner.textContent ?? '').not.toMatch(/Disconnect is controlling/);
   });
 
   it('offers an emergency disconnect that is coloured as destructive', async () => {

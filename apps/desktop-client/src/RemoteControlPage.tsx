@@ -11,6 +11,7 @@ import {
   connectToAddress,
   describeConnectionState,
   getClientInfo,
+  getConnectionState,
   getHostStatus,
   getLocalIdentity,
   isBusy,
@@ -27,18 +28,23 @@ import {
 } from './api.js';
 import { formatRelative } from './format.js';
 import { ThisDevice } from './ThisDevice';
-import { Button, Card, EmptyState, StatusBadge, TextField, type Toast } from './ui';
+import { Button, Card, StatusBadge, TextField, type Toast } from './ui';
 
 export function RemoteControlPage({
   connection,
+  onConnection,
   onConnected,
   onToast,
   onViewAllDevices,
+  hostEpoch = 0,
 }: {
   readonly connection: ConnectionState;
+  readonly onConnection: (next: ConnectionState) => void;
   readonly onConnected: () => void;
   readonly onToast: (toast: Toast) => void;
   readonly onViewAllDevices: () => void;
+  /** Bumped when something outside this page changes host status (e.g. emergency stop). */
+  readonly hostEpoch?: number | undefined;
 }): React.JSX.Element {
   const [address, setAddress] = useState('');
   const [parseError, setParseError] = useState<string | null>(null);
@@ -49,6 +55,7 @@ export function RemoteControlPage({
   const [recent, setRecent] = useState<readonly Recent[]>([]);
   const [presence, setPresence] = useState<Readonly<Record<string, Presence>>>({});
   const [toggling, setToggling] = useState(false);
+  const [dialing, setDialing] = useState(false);
 
   const refresh = useCallback(() => {
     getHostStatus()
@@ -73,47 +80,76 @@ export function RemoteControlPage({
         setOs(undefined);
         setHostname(undefined);
       });
+    let cancelled = false;
     listRecent()
       .then((entries) => {
+        if (cancelled) return;
         setRecent(entries);
         for (const entry of entries.slice(0, 5)) {
           setPresence((current) => ({ ...current, [entry.address]: 'checking' }));
           probeDevice(entry.address)
             .then((result) => {
-              setPresence((current) => ({ ...current, [entry.address]: result }));
+              if (!cancelled) {
+                setPresence((current) => ({ ...current, [entry.address]: result }));
+              }
             })
             .catch(() => {
-              setPresence((current) => ({ ...current, [entry.address]: 'offline' }));
+              if (!cancelled) {
+                setPresence((current) => ({ ...current, [entry.address]: 'offline' }));
+              }
             });
         }
       })
       .catch(() => {
-        setRecent([]);
+        if (!cancelled) setRecent([]);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [onToast]);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    const stop = refresh();
+    return stop;
+  }, [refresh, hostEpoch]);
 
   useEffect(() => {
     if (isConnected(connection)) onConnected();
   }, [connection, onConnected]);
 
-  const busy = isBusy(connection);
+  const busy = isBusy(connection) || dialing;
   const failed = connection.state === 'refused' || connection.state === 'failed';
 
   const connect = (target: string): void => {
+    if (busy) return;
     setParseError(null);
-    connectToAddress(target, null).catch((error: unknown) => {
-      onToast({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'Could not start the connection.',
+    setDialing(true);
+    connectToAddress(target, null)
+      .then((next) => {
+        onConnection(next);
+      })
+      .catch((error: unknown) => {
+        onToast({
+          kind: 'error',
+          message: error instanceof Error ? error.message : 'Could not start the connection.',
+        });
+        getConnectionState()
+          .then(onConnection)
+          .catch(() => undefined);
+      })
+      .finally(() => {
+        setDialing(false);
       });
-    });
   };
 
   const submit = (): void => {
+    const trimmed = address.trim();
+    if (/^\d{3}\s?\d{3}\s?\d{3}$/.test(trimmed) || /^\d{9}$/.test(trimmed.replace(/\s/g, ''))) {
+      setParseError(
+        'A device ID identifies a machine. Type its hostname or IP address to connect — there is no directory to look the ID up in.',
+      );
+      return;
+    }
     const parsed = parseAddress(address);
     if (!parsed.ok) {
       setParseError(parsed.reason);
@@ -161,6 +197,7 @@ export function RemoteControlPage({
             placeholder="192.168.1.77"
             mono
             autoComplete="off"
+            help="Type a hostname or IP address. The Device ID is for verifying identity, not for connecting."
             error={parseError}
             trailing={
               <Button type="submit" variant="primary" size="lg" disabled={busy}>
@@ -201,7 +238,7 @@ export function RemoteControlPage({
           )}
         </div>
         {shown.length === 0 ? (
-          <EmptyState title="No recent devices" body="Connections you make will appear here." />
+          <p className="text-sm text-(--color-text-secondary)">No recent devices.</p>
         ) : (
           <ul className="flex flex-col gap-2">
             {shown.map((entry) => (

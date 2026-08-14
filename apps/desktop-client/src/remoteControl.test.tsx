@@ -41,6 +41,7 @@ function renderPage(overrides: { readonly connection?: ConnectionState } = {}): 
   render(
     <RemoteControlPage
       connection={overrides.connection ?? { state: 'offline' }}
+      onConnection={vi.fn()}
       onConnected={vi.fn()}
       onToast={vi.fn()}
       onViewAllDevices={vi.fn()}
@@ -86,6 +87,19 @@ describe('RemoteControlPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
     expect(connectToAddress).toHaveBeenCalledWith('192.168.1.77:7443', null);
+  });
+
+  it('does not treat a device id as an address', async () => {
+    renderPage();
+
+    await userEvent.type(
+      screen.getByLabelText('Device ID, hostname, or IP address'),
+      '842 391 552',
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(vi.mocked(api.connectToAddress)).not.toHaveBeenCalled();
+    expect(screen.getByText(/no directory/i)).toBeInTheDocument();
   });
 
   it('shows progress while the connection is being made rather than appearing inert', () => {

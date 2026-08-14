@@ -28,8 +28,10 @@ export function MyDevicesPage({
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
+    let cancelled = false;
     listTrustedDevices()
       .then((loaded) => {
+        if (cancelled) return;
         setDevices(loaded);
         for (const device of loaded) {
           if (device.lastAddress === null) {
@@ -39,32 +41,40 @@ export function MyDevicesPage({
           setPresence((current) => ({ ...current, [device.identityFingerprint]: 'checking' }));
           probeDevice(device.lastAddress)
             .then((result) => {
-              setPresence((current) => ({ ...current, [device.identityFingerprint]: result }));
+              if (!cancelled) {
+                setPresence((current) => ({ ...current, [device.identityFingerprint]: result }));
+              }
             })
             .catch(() => {
-              setPresence((current) => ({ ...current, [device.identityFingerprint]: 'offline' }));
+              if (!cancelled) {
+                setPresence((current) => ({ ...current, [device.identityFingerprint]: 'offline' }));
+              }
             });
         }
       })
       .catch((error: unknown) => {
+        if (cancelled) return;
         onToast({
           kind: 'error',
           message: error instanceof Error ? error.message : 'Could not load trusted devices.',
         });
         setDevices([]);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [onToast]);
 
   useEffect(() => {
-    load();
+    return load();
   }, [load]);
 
   const connect = (device: TrustedDevice): void => {
-    if (device.lastAddress === null) return;
+    if (device.lastAddress === null || busy) return;
     setBusy(true);
     connectToAddress(device.lastAddress, null)
-      .then(() => {
-        onConnect();
+      .then((next) => {
+        if (next.state === 'connected') onConnect();
       })
       .catch((error: unknown) => {
         onToast({

@@ -51,6 +51,7 @@ export default function App(): React.JSX.Element {
   const [inSession, setInSession] = useState(false);
   const [view, setView] = useState<View>('remote-control');
   const [inbound, setInbound] = useState<readonly InboundSession[]>([]);
+  const [hostEpoch, setHostEpoch] = useState(0);
 
   const ready = gate.status === 'ready';
 
@@ -117,21 +118,34 @@ export default function App(): React.JSX.Element {
   }, []);
 
   const onDisconnectInbound = useCallback((sessionId: string) => {
-    disconnectInbound(sessionId).catch((error: unknown) => {
-      setToast({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'Could not disconnect that session.',
+    disconnectInbound(sessionId)
+      .then(() => {
+        listInboundSessions()
+          .then(setInbound)
+          .catch(() => {
+            setInbound([]);
+          });
+      })
+      .catch((error: unknown) => {
+        setToast({
+          kind: 'error',
+          message: error instanceof Error ? error.message : 'Could not disconnect that session.',
+        });
       });
-    });
   }, []);
 
   const onEmergency = useCallback(() => {
-    emergencyDisconnect().catch((error: unknown) => {
-      setToast({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'Emergency disconnect failed.',
+    emergencyDisconnect()
+      .then(() => {
+        setInbound([]);
+        setHostEpoch((epoch) => epoch + 1);
+      })
+      .catch((error: unknown) => {
+        setToast({
+          kind: 'error',
+          message: error instanceof Error ? error.message : 'Emergency disconnect failed.',
+        });
       });
-    });
   }, []);
 
   if (gate.status === 'loading') return <Splash />;
@@ -174,6 +188,7 @@ export default function App(): React.JSX.Element {
           {view === 'remote-control' && (
             <RemoteControlPage
               connection={connection.state}
+              onConnection={connection.set}
               onConnected={() => {
                 setInSession(true);
               }}
@@ -181,6 +196,7 @@ export default function App(): React.JSX.Element {
               onViewAllDevices={() => {
                 setView('my-devices');
               }}
+              hostEpoch={hostEpoch}
             />
           )}
           {view === 'my-devices' && (
@@ -198,6 +214,7 @@ export default function App(): React.JSX.Element {
               onViewDevices={() => {
                 setView('my-devices');
               }}
+              hostEpoch={hostEpoch}
             />
           )}
         </AppShell>

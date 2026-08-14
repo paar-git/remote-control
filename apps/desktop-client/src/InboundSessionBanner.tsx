@@ -22,20 +22,20 @@ export function InboundSessionBanner({
       role="status"
       className="flex flex-wrap items-center gap-3 border-b border-(--color-danger)/30 bg-(--color-danger-soft) px-4 py-2"
     >
-      <p className="min-w-0 flex-1 text-sm">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
         {sessions.map((session) => (
-          <span key={session.sessionId} className="mr-4 inline-flex items-center gap-2">
-            <span className="font-medium">{session.deviceName}</span>
-            <span className="text-(--color-text-secondary)">
-              {formatDuration(Math.max(0, (Date.now() - session.startedMs) / 1000))}
-            </span>
+          <div key={session.sessionId} className="flex min-w-0 flex-wrap items-center gap-2">
+            <p className="min-w-0 text-sm">
+              <span className="font-medium">{session.deviceName}</span>
+              {' has been controlling this machine for '}
+              {formatDuration(Math.max(0, (Date.now() - session.startedMs) / 1000))}.
+            </p>
             <Button variant="ghost" size="sm" onClick={() => onDisconnect(session.sessionId)}>
               Disconnect
             </Button>
-          </span>
+          </div>
         ))}
-        is controlling this machine.
-      </p>
+      </div>
       <Button variant="danger" size="sm" onClick={onEmergency}>
         Emergency Disconnect
       </Button>

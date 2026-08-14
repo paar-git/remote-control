@@ -27,9 +27,11 @@ const MIN_PASSWORD_LENGTH = 12;
 export function SettingsPage({
   onToast,
   onViewDevices,
+  hostEpoch = 0,
 }: {
   readonly onToast: (toast: Toast) => void;
   readonly onViewDevices: () => void;
+  readonly hostEpoch?: number | undefined;
 }): React.JSX.Element {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [status, setStatus] = useState<HostStatus | null>(null);
@@ -55,7 +57,7 @@ export function SettingsPage({
     getHostStatus()
       .then(setStatus)
       .catch(() => undefined);
-  }, []);
+  }, [hostEpoch]);
 
   const savePassword = useCallback(() => {
     if (password.length < MIN_PASSWORD_LENGTH) {

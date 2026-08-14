@@ -8,6 +8,7 @@
 import { Share2 } from 'lucide-react';
 import { useState } from 'react';
 
+import { displayAddress } from './address.js';
 import type { HostStatus, LocalIdentity } from './api.js';
 import { DeviceAvatar } from './DeviceAvatar';
 import { formatDeviceId } from './format.js';
@@ -40,12 +41,17 @@ export function ThisDevice({
       `Device ID: ${deviceId}`,
       ...(primary === null ? [] : [`Address: ${primary}`]),
     ];
-    void navigator.clipboard.writeText(lines.join('\n')).then(() => {
-      setShared(true);
-      window.setTimeout(() => {
+    void navigator.clipboard.writeText(lines.join('\n')).then(
+      () => {
+        setShared(true);
+        window.setTimeout(() => {
+          setShared(false);
+        }, 2000);
+      },
+      () => {
         setShared(false);
-      }, 2000);
-    });
+      },
+    );
   };
 
   return (
@@ -121,7 +127,7 @@ export function ThisDevice({
           </button>
           {advancedOpen && (
             <dl className="mt-3 flex flex-col gap-2 text-sm">
-              <InfoRow label="IPv4" value={ipv4Of(status.addresses) ?? '—'} />
+              <InfoRow label="IPv4" value={displayIpv4(status.addresses)} />
               {ipv6.map((address) => (
                 <InfoRow key={address} label="IPv6" value={displayIpv6(address)} />
               ))}
@@ -165,6 +171,11 @@ function displayIpv6(address: string): string {
 
 function ipv4Of(addresses: readonly string[]): string | undefined {
   return addresses.find((address) => !isIpv6(address));
+}
+
+function displayIpv4(addresses: readonly string[]): string {
+  const found = ipv4Of(addresses);
+  return found === undefined ? '—' : displayAddress(found);
 }
 
 function primaryAddress(addresses: readonly string[]): string | null {
