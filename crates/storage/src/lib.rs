@@ -18,9 +18,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod error;
+pub mod history;
 pub mod models;
 pub mod recent;
 pub mod settings;
+pub mod trust;
 
 #[cfg(test)]
 mod repo_tests;
@@ -34,14 +36,19 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Pool, Sqlite};
 
 pub use error::{Result, StorageError};
+pub use history::{
+    HISTORY_LIMIT, NewSessionRecord, SessionDirection, SessionHistoryRepository, SessionOutcome,
+    SessionRecord,
+};
 pub use recent::{RecentConnection, RecentRepository};
 pub use settings::{HostSettings, SettingsRepository};
+pub use trust::{NewTrustedDevice, TrustRepository, TrustedDevice};
 
 /// Migrations compiled into the binary.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Highest migration version this build ships.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 4;
 
 /// An open, migrated database.
 #[derive(Debug, Clone)]

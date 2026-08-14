@@ -2,10 +2,11 @@
 //!
 //! Three ways in, checked in a fixed order, and the order is the design:
 //!
-//! 1. **A pinned peer.** The user has already decided about this machine. If the
-//!    fingerprint does not match the pin, the connection is refused outright — never
-//!    handed to the Accept dialog, because an identity change must not be reachable by
-//!    a routine click.
+//! 1. **A trusted device.** Found by the identity the peer *proved* by completing TLS —
+//!    see [`rc_security::certificate`] — never by the address it arrived from. A device
+//!    marked for unattended access is admitted with exactly what it was granted. A
+//!    device that is merely trusted still reaches the dialog, because remembering a
+//!    machine and letting it in unasked are different decisions.
 //! 2. **An unattended password**, if the connection offered one. A wrong password is a
 //!    refusal, not a fallback to the dialog: falling back would let anyone with the
 //!    address raise a prompt on someone's screen by guessing, and would make a wrong
@@ -14,15 +15,28 @@
 //!    at most one dialog pending at a time — a second connection arriving while one is
 //!    open is refused immediately, without ever reaching the prompt.
 //!
+//! # Why the identity and not the address
+//!
+//! An address is not an identity. Trust keyed on one means "whatever answers at this
+//! name", and it stops meaning anything the moment a trusted machine moves. Trust keyed
+//! on a certificate breaks on the far side's first renewal, which is an ordinary
+//! maintenance event. Keyed on the identity key behind that certificate, both problems
+//! go away, and the peer still cannot lie about which device it is.
+//!
+//! The address keeps exactly one job: if a stranger answers where a trusted device used
+//! to, that is refused as [`RefusalReason::IdentityChanged`] rather than prompted. A
+//! substituted machine must not arrive as a routine click on a dialog people answer
+//! several times a day.
+//!
 //! Nothing here talks to a network or a window. The prompt is a trait so the whole
 //! decision can be tested against a scripted answer, and so the desktop application
 //! and the service can present it differently without either owning the rule.
 
 use async_trait::async_trait;
 use rc_protocol::control::WireRefusal;
-use rc_security::{Clock, Fingerprint, PermissionSet, Throttle};
-use rc_storage::{RecentRepository, SettingsRepository};
-use rc_transport::PeerAddress;
+use rc_security::{Clock, Fingerprint, Permission, PermissionSet, Throttle};
+use rc_storage::{NewTrustedDevice, SettingsRepository, TrustRepository};
+use rc_transport::{PeerAddress, PeerIdentity};
 use tokio::sync::Mutex;
 
 use crate::error::Result;
@@ -37,17 +51,49 @@ pub struct AcceptRequest {
     pub request_id: String,
     /// The address the connection came from, as it will be displayed.
     pub address: String,
-    /// The peer's certificate fingerprint, taken from the TLS connection.
-    pub fingerprint: Fingerprint,
+    /// The identity the peer proved. Shown so a human can compare it across two screens.
+    pub identity_fingerprint: Fingerprint,
+    /// The device id derived from that identity, in the form the interface displays.
+    pub device_id: String,
     /// The name the peer reported. Untrusted, and displayed as such.
     pub machine_name: String,
+    /// The operating system the peer reported. Untrusted, and displayed as such.
+    pub os_family: String,
+    /// Whether this device is already trusted, so a returning machine does not look like
+    /// a stranger. It is being asked anyway, which is what trust without unattended
+    /// access means.
+    pub trusted: bool,
+}
+
+/// How much of this decision outlives the connection it was made for.
+///
+/// Three outcomes rather than a boolean, because "let this machine in now", "remember
+/// this machine" and "let this machine in without asking me again" are three different
+/// commitments, and collapsing any two of them loses the one that matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustChoice {
+    /// This connection only. Nothing is persisted, so there is nothing to reconnect
+    /// against afterwards.
+    Once,
+    /// Remember the device, and keep asking. It appears in My Devices with the
+    /// permissions it was given, and every later connection still raises the dialog.
+    Remember,
+    /// Remember the device and stop asking. Reachable only through a deliberate second
+    /// step in the dialog, never from its primary buttons.
+    RememberUnattended,
 }
 
 /// What they decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptDecision {
-    /// Accept, granting exactly these permissions.
-    Accept(PermissionSet),
+    /// Accept, granting exactly these permissions and persisting exactly this much.
+    Accept {
+        /// What this session may do. [`rc_security::Permission::Administer`] is stripped
+        /// from whatever arrives here — see [`authorize_connection`].
+        permissions: PermissionSet,
+        /// What, if anything, outlives the connection.
+        trust: TrustChoice,
+    },
     /// Refuse. Also what a timeout, an Escape and a closed window mean.
     Dismiss,
 }
@@ -85,20 +131,17 @@ pub trait AcceptPrompt: Send + Sync {
 pub struct ConnectionRequest {
     /// The address the peer connected from.
     ///
-    /// This must be the address the user *dialled* — the same string the pin in
-    /// [`RecentRepository`] is keyed on — and not the peer's remote socket address
-    /// read off the QUIC connection. [`PeerAddress`] carries a port, and a remote
-    /// socket address's port is ephemeral: building this field from it would make
-    /// every reconnection look like a new, unpinned peer. The pin would then never
-    /// match, the identity-change refusal would never trigger, and every reconnection
-    /// — including one from an attacker presenting a different certificate — would
-    /// fall through to the human dialog. That is precisely the "identity change
-    /// reachable by a routine click" outcome this module exists to prevent.
+    /// This must be the address the user *dialled*, not the peer's remote socket address
+    /// read off the QUIC connection, whose port is ephemeral. Admission no longer turns
+    /// on this value — the identity does — but the identity-change check below does, and
+    /// building it from an ephemeral port would mean that check never fired.
     pub address: PeerAddress,
-    /// The peer's certificate fingerprint, taken from the TLS connection.
-    pub fingerprint: Fingerprint,
+    /// Who the peer is, established from the certificate it presented. **The trust key.**
+    pub identity: PeerIdentity,
     /// The name the peer reported. Untrusted, and displayed as such.
     pub machine_name: String,
+    /// The operating system the peer reported. Untrusted, and displayed as such.
+    pub os_family: String,
     /// The unattended password the peer offered, if it offered one.
     pub unattended_password: Option<String>,
 }
@@ -113,8 +156,10 @@ pub enum RefusalReason {
     Dismissed,
     /// This machine is not accepting connections at all.
     NotAccepting,
-    /// A pinned peer presented a different certificate.
+    /// A different device is answering where a trusted one used to.
     IdentityChanged,
+    /// The device is trusted, but temporarily disabled.
+    Suspended,
     /// An unattended password was offered and was wrong, or none is configured.
     WrongPassword,
     /// Too many wrong passwords; the lockout is in force.
@@ -140,9 +185,14 @@ impl From<RefusalReason> for WireRefusal {
         match reason {
             RefusalReason::NotAccepting => Self::NotAccepting,
             RefusalReason::IdentityChanged => Self::IdentityChanged,
+            // `Suspended` joins these three rather than being reported distinctly: a
+            // peer that could tell "suspended" from "rejected" would learn that it is
+            // known to this machine, which is precisely what a device someone has just
+            // disabled must not be able to confirm.
             RefusalReason::Dismissed
             | RefusalReason::WrongPassword
-            | RefusalReason::TooManyAttempts => Self::Rejected,
+            | RefusalReason::TooManyAttempts
+            | RefusalReason::Suspended => Self::Rejected,
         }
     }
 }
@@ -177,8 +227,8 @@ pub struct AccessDeps<'a> {
     /// This machine's own settings: whether it accepts connections, and unattended
     /// access.
     pub settings: &'a SettingsRepository,
-    /// Machines this installation has connected to, including any pinned identity.
-    pub recent: &'a RecentRepository,
+    /// Devices a human has decided to remember, keyed on the identity each proved.
+    pub trust: &'a TrustRepository,
     /// Asks a human when neither a pin nor a password settles the decision.
     pub prompt: &'a dyn AcceptPrompt,
     /// Rate-limits unattended-password attempts, keyed by address.
@@ -211,18 +261,32 @@ pub async fn authorize_connection(
     // The address the user dialled — see the doc comment on `ConnectionRequest::address`
     // for why this must never be built from a peer's ephemeral remote socket address.
     let key = request.address.to_string();
+    let identity = request.identity.identity_fingerprint;
 
-    // 1. A decision the user already made about this machine.
-    if let Some(entry) = deps.recent.find(&key).await?
-        && let Some(pinned) = entry.pinned_fingerprint
+    // 1. A decision a human already took about *this device*, found by the identity it
+    //    proved rather than by the address it arrived from.
+    if let Some(device) = deps.trust.find(identity).await? {
+        if device.suspended {
+            return Ok(Authorization::Refused(RefusalReason::Suspended));
+        }
+        if device.unattended {
+            deps.trust
+                .record_connection(identity, &key, deps.clock.now_ms())
+                .await?;
+            return Ok(grant_or_refuse(device.permissions));
+        }
+        // Trusted, but not for unattended access. That is a decision to remember the
+        // machine, not a decision to let it in unasked, so it falls through to the
+        // human below — carrying the fact that it is known.
+    } else if let Some(known) = deps.trust.find_by_address(&key).await?
+        && !known.identity_fingerprint.ct_eq(&identity)
     {
-        // `ct_eq`, not `==`. The crate provides it precisely so no comparison of an
-        // identity anywhere in the tree is the one that leaks a timing signal.
-        return Ok(if pinned.ct_eq(&request.fingerprint) {
-            grant_or_refuse(entry.pinned_permissions)
-        } else {
-            Authorization::Refused(RefusalReason::IdentityChanged)
-        });
+        // Something else is answering where a trusted device used to. That is either a
+        // reinstall or a substitution; both need a deliberate decision, and the dialog
+        // is the wrong place to take it because it is a thing people click through many
+        // times a day. `ct_eq`, not `==`, so no identity comparison in the tree is the
+        // one that leaks a timing signal.
+        return Ok(Authorization::Refused(RefusalReason::IdentityChanged));
     }
 
     // 2. An unattended password, if one was offered.
@@ -282,13 +346,17 @@ pub async fn authorize_connection(
     // Generated here, never accepted from the peer or from any caller-supplied value:
     // it exists only to match this specific answer back to this specific request.
     let request_id = uuid::Uuid::new_v4().to_string();
+    let trusted = deps.trust.find(identity).await?.is_some();
     let answer = deps
         .prompt
         .ask(AcceptRequest {
             request_id: request_id.clone(),
-            address: key,
-            fingerprint: request.fingerprint,
+            address: key.clone(),
+            identity_fingerprint: identity,
+            device_id: request.identity.device_id.to_canonical_string(),
             machine_name: request.machine_name.clone(),
+            os_family: request.os_family.clone(),
+            trusted,
         })
         .await;
 
@@ -301,10 +369,43 @@ pub async fn authorize_connection(
         return Ok(Authorization::Refused(RefusalReason::Dismissed));
     }
 
-    Ok(match answer.decision {
-        AcceptDecision::Accept(granted) => grant_or_refuse(granted),
-        AcceptDecision::Dismiss => Authorization::Refused(RefusalReason::Dismissed),
-    })
+    let AcceptDecision::Accept { permissions, trust } = answer.decision else {
+        return Ok(Authorization::Refused(RefusalReason::Dismissed));
+    };
+
+    // Authority over the trust database is never conferred by this dialog. Stripped
+    // here, in one place, rather than trusted not to be set by whatever implements the
+    // prompt — a window, in production, and one that could acquire the checkbox by
+    // accident. Administrator is granted from a device's own settings, behind a
+    // confirmation that names it.
+    let permissions = permissions.without(Permission::Administer);
+
+    let outcome = grant_or_refuse(permissions);
+
+    // Only a grant is remembered. Persisting a refusal would create a trust row for a
+    // device the human just turned away, and `Once` persists nothing by construction:
+    // there is then nothing for a later connection to match against.
+    if let Authorization::Granted(granted) = outcome
+        && matches!(
+            trust,
+            TrustChoice::Remember | TrustChoice::RememberUnattended
+        )
+    {
+        deps.trust
+            .trust(&NewTrustedDevice {
+                identity_fingerprint: identity,
+                device_id: request.identity.device_id.to_canonical_string(),
+                display_name: request.machine_name.clone(),
+                os_family: request.os_family.clone(),
+                address: key,
+                permissions: granted,
+                unattended: matches!(trust, TrustChoice::RememberUnattended),
+                now_ms: deps.clock.now_ms(),
+            })
+            .await?;
+    }
+
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -312,10 +413,54 @@ mod tests {
     use rc_security::{
         HashingPolicy, OsRandom, PasswordCredential, Permission, PermissionSet, Throttle,
     };
-    use rc_storage::{RecentRepository, SettingsRepository};
-    use rc_transport::PeerAddress;
+    use rc_storage::{NewTrustedDevice, SettingsRepository, TrustRepository};
+    use rc_transport::{PeerAddress, PeerIdentity};
 
     use super::*;
+
+    /// A device, and a second one that is emphatically not it.
+    ///
+    /// The certificate and identity fingerprints differ from each other as well as
+    /// between the two devices, so a test cannot pass by the code comparing the wrong
+    /// one of the pair.
+    fn identity_a() -> PeerIdentity {
+        PeerIdentity {
+            certificate_fingerprint: Fingerprint::from_bytes([1u8; 32]),
+            identity_fingerprint: Fingerprint::from_bytes([7u8; 32]),
+            device_id: rc_protocol::DeviceId::from_uuid(uuid::Uuid::from_u128(1)),
+        }
+    }
+
+    fn identity_b() -> PeerIdentity {
+        PeerIdentity {
+            certificate_fingerprint: Fingerprint::from_bytes([2u8; 32]),
+            identity_fingerprint: Fingerprint::from_bytes([8u8; 32]),
+            device_id: rc_protocol::DeviceId::from_uuid(uuid::Uuid::from_u128(2)),
+        }
+    }
+
+    fn request_from(identity: PeerIdentity, password: Option<&str>) -> ConnectionRequest {
+        ConnectionRequest {
+            address: "192.168.1.77:7443".parse::<PeerAddress>().unwrap(),
+            identity,
+            machine_name: "WORK-LAPTOP".to_owned(),
+            os_family: "windows".to_owned(),
+            unattended_password: password.map(str::to_owned),
+        }
+    }
+
+    /// The most the Accept dialog can confer: every session permission, and never
+    /// `Administer`. Tests deliberately *offer* `PermissionSet::ALL` and expect this
+    /// back, which is what proves the stripping happens rather than being assumed.
+    const SESSION_PERMISSIONS: PermissionSet = PermissionSet::ALL.without(Permission::Administer);
+
+    /// Shorthand for the common accept: everything ticked, nothing remembered.
+    const fn accept_once(permissions: PermissionSet) -> AcceptDecision {
+        AcceptDecision::Accept {
+            permissions,
+            trust: TrustChoice::Once,
+        }
+    }
 
     /// A prompt that answers however the test says, and counts how often it was asked.
     ///
@@ -328,6 +473,9 @@ mod tests {
         /// a mismatched answer, simulating a stale or misrouted response.
         respond_with: Option<String>,
         asked: std::sync::atomic::AtomicUsize,
+        /// The last request it was shown, so a test can assert what the human would
+        /// actually have seen rather than only what came back.
+        seen: std::sync::Mutex<Option<AcceptRequest>>,
     }
 
     impl ScriptedPrompt {
@@ -336,6 +484,7 @@ mod tests {
                 answer,
                 respond_with: None,
                 asked: std::sync::atomic::AtomicUsize::new(0),
+                seen: std::sync::Mutex::new(None),
             }
         }
 
@@ -346,11 +495,17 @@ mod tests {
                 answer,
                 respond_with: Some(wrong_request_id.into()),
                 asked: std::sync::atomic::AtomicUsize::new(0),
+                seen: std::sync::Mutex::new(None),
             }
         }
 
         fn asked(&self) -> usize {
             self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// What the human was actually shown, if anything.
+        fn last_request(&self) -> Option<AcceptRequest> {
+            self.seen.lock().unwrap().clone()
         }
     }
 
@@ -358,6 +513,7 @@ mod tests {
     impl AcceptPrompt for ScriptedPrompt {
         async fn ask(&self, request: AcceptRequest) -> AcceptAnswer {
             self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.seen.lock().unwrap() = Some(request.clone());
             let request_id = self.respond_with.clone().unwrap_or(request.request_id);
             AcceptAnswer {
                 request_id,
@@ -415,22 +571,13 @@ mod tests {
         }
     }
 
-    fn request(password: Option<&str>) -> ConnectionRequest {
-        ConnectionRequest {
-            address: "192.168.1.77".parse::<PeerAddress>().unwrap(),
-            fingerprint: Fingerprint::from_bytes([7u8; 32]),
-            machine_name: "WORK-LAPTOP".to_owned(),
-            unattended_password: password.map(str::to_owned),
-        }
-    }
-
     /// Everything `authorize_connection` needs, built fresh for each test.
     ///
     /// Generic over the prompt so tests can substitute [`BlockingPrompt`] for the
     /// concurrency tests without duplicating the harness.
     struct Harness<P: AcceptPrompt> {
         settings: SettingsRepository,
-        recent: RecentRepository,
+        trust: TrustRepository,
         prompt: P,
         throttle: Mutex<Throttle>,
         clock: rc_security::clock::TestClock,
@@ -445,10 +592,10 @@ mod tests {
                 .await
                 .expect("an in-memory database must always open and migrate cleanly");
             let settings = SettingsRepository::new(&database);
-            let recent = RecentRepository::new(&database);
+            let trust = TrustRepository::new(&database);
             Self {
                 settings,
-                recent,
+                trust,
                 prompt,
                 throttle: Mutex::new(Throttle::with_defaults()),
                 clock: rc_security::clock::TestClock::default(),
@@ -461,8 +608,30 @@ mod tests {
             &self.settings
         }
 
-        fn recent(&self) -> &RecentRepository {
-            &self.recent
+        fn trust(&self) -> &TrustRepository {
+            &self.trust
+        }
+
+        /// Seed a trusted device, as a human accepting-and-trusting would have.
+        async fn trust_device(
+            &self,
+            identity: PeerIdentity,
+            permissions: PermissionSet,
+            unattended: bool,
+        ) {
+            self.trust
+                .trust(&NewTrustedDevice {
+                    identity_fingerprint: identity.identity_fingerprint,
+                    device_id: identity.device_id.to_canonical_string(),
+                    display_name: "WORK-LAPTOP".to_owned(),
+                    os_family: "windows".to_owned(),
+                    address: "192.168.1.77:7443".to_owned(),
+                    permissions,
+                    unattended,
+                    now_ms: 1_000,
+                })
+                .await
+                .expect("seeding a trusted device must succeed");
         }
 
         fn prompt(&self) -> &P {
@@ -482,7 +651,7 @@ mod tests {
         async fn authorize(&self, request: ConnectionRequest) -> Result<Authorization> {
             let deps = AccessDeps {
                 settings: &self.settings,
-                recent: &self.recent,
+                trust: &self.trust,
                 prompt: &self.prompt,
                 throttle: &self.throttle,
                 clock: &self.clock,
@@ -495,79 +664,143 @@ mod tests {
     #[tokio::test]
     async fn a_dismissed_connection_is_refused_and_grants_nothing() {
         let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
         assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
     }
 
     #[tokio::test]
     async fn an_accepted_connection_gets_exactly_what_the_human_ticked() {
         let granted = PermissionSet::NONE.with(Permission::ViewMetrics);
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(granted))).await;
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(granted))).await;
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
         assert_eq!(outcome, Authorization::Granted(granted));
     }
 
     #[tokio::test]
     async fn a_machine_not_accepting_connections_is_never_prompted() {
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         harness.settings().set_accepting(false).await.unwrap();
 
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
         assert_eq!(outcome, Authorization::Refused(RefusalReason::NotAccepting));
         assert_eq!(harness.prompt().asked(), 0);
     }
 
     #[tokio::test]
-    async fn an_always_allow_peer_skips_the_prompt() {
+    async fn an_unattended_device_is_admitted_with_exactly_what_it_was_granted() {
         let granted = PermissionSet::NONE.with(Permission::TransferFiles);
         let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
-        harness
-            .recent()
-            .record("192.168.1.77:7443", "WORK-LAPTOP", 1_000)
-            .await
-            .unwrap();
-        harness
-            .recent()
-            .set_always_allow(
-                "192.168.1.77:7443",
-                Some(Fingerprint::from_bytes([7u8; 32])),
-                granted,
-            )
+        harness.trust_device(identity_a(), granted, true).await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
             .await
             .unwrap();
 
-        let outcome = harness.authorize(request(None)).await.unwrap();
         assert_eq!(outcome, Authorization::Granted(granted));
         assert_eq!(harness.prompt().asked(), 0);
     }
 
     #[tokio::test]
-    async fn a_pinned_peer_presenting_a_different_fingerprint_is_refused_not_prompted() {
-        // This is the loudest failure the system has. Falling back to the Accept
-        // dialog would turn an identity change into a routine click.
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+    async fn a_trusted_device_without_unattended_access_still_reaches_the_prompt() {
+        // Trust Device and Allow Unattended Access are different decisions. Remembering
+        // a machine must not quietly stop it asking.
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         harness
-            .recent()
-            .record("192.168.1.77:7443", "WORK-LAPTOP", 1_000)
-            .await
-            .unwrap();
-        harness
-            .recent()
-            .set_always_allow(
-                "192.168.1.77:7443",
-                Some(Fingerprint::from_bytes([99u8; 32])),
-                PermissionSet::ALL,
-            )
+            .trust_device(identity_a(), PermissionSet::ALL, false)
+            .await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
             .await
             .unwrap();
 
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        assert_eq!(outcome, Authorization::Granted(SESSION_PERMISSIONS));
+        assert_eq!(harness.prompt().asked(), 1, "it must still have been asked");
+    }
+
+    #[tokio::test]
+    async fn the_prompt_is_told_the_device_is_already_trusted() {
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+        harness
+            .trust_device(identity_a(), PermissionSet::ALL, false)
+            .await;
+
+        let _ = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        let seen = harness.prompt().last_request().expect("it was asked");
+        assert!(
+            seen.trusted,
+            "a returning device must not look like a stranger"
+        );
+        assert_eq!(
+            seen.identity_fingerprint,
+            identity_a().identity_fingerprint,
+            "and the human is shown the identity that was actually proved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stranger_is_not_told_the_machine_knows_anyone() {
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+
+        let _ = harness
+            .authorize(request_from(identity_b(), None))
+            .await
+            .unwrap();
+
+        let seen = harness.prompt().last_request().expect("it was asked");
+        assert!(!seen.trusted);
+    }
+
+    #[tokio::test]
+    async fn a_different_device_cannot_use_another_devices_authorization() {
+        // The property the whole change exists for. Device A has unattended access;
+        // device B presents its own key and is a stranger, not an heir.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+        harness
+            .trust_device(identity_a(), PermissionSet::ALL, true)
+            .await;
+
+        let outcome = harness
+            .authorize(request_from(identity_b(), None))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            outcome,
+            Authorization::Granted(PermissionSet::ALL),
+            "device B must never be admitted under device A's grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stranger_at_a_trusted_devices_address_is_refused_not_prompted() {
+        // The loudest failure the system has, re-anchored. The machine answering at a
+        // trusted address is not the machine that was trusted, and that question must
+        // not arrive as a routine click.
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
+        harness
+            .trust_device(identity_a(), PermissionSet::ALL, true)
+            .await;
+
+        let outcome = harness
+            .authorize(request_from(identity_b(), None))
+            .await
+            .unwrap();
+
         assert_eq!(
             outcome,
             Authorization::Refused(RefusalReason::IdentityChanged)
@@ -576,37 +809,266 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pinned_peer_with_no_permissions_is_refused_not_granted_an_empty_session() {
-        // The same "nothing ticked is a refusal" rule the human branch enforces must
-        // hold here too. This can happen if a pin was ever stored via
-        // `set_always_allow` with `PermissionSet::NONE` -- the storage layer allows
-        // it as long as a fingerprint is present.
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+    async fn a_renewed_certificate_does_not_break_trust() {
+        // An ordinary maintenance event on the far side. The certificate differs; the
+        // identity does not; the device is still the device. Under the old certificate
+        // pin this was the loudest refusal the system had.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
         harness
-            .recent()
-            .record("192.168.1.77:7443", "WORK-LAPTOP", 1_000)
-            .await
-            .unwrap();
-        harness
-            .recent()
-            .set_always_allow(
-                "192.168.1.77:7443",
-                Some(Fingerprint::from_bytes([7u8; 32])),
-                PermissionSet::NONE,
-            )
+            .trust_device(identity_a(), PermissionSet::ALL, true)
+            .await;
+
+        let renewed = PeerIdentity {
+            certificate_fingerprint: Fingerprint::from_bytes([99u8; 32]),
+            ..identity_a()
+        };
+        let outcome = harness
+            .authorize(request_from(renewed, None))
             .await
             .unwrap();
 
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        assert_eq!(outcome, Authorization::Granted(PermissionSet::ALL));
+        assert_eq!(harness.prompt().asked(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_suspended_device_is_refused_and_never_prompted() {
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
+        harness
+            .trust_device(identity_a(), PermissionSet::ALL, true)
+            .await;
+        harness
+            .trust()
+            .set_suspended(identity_a().identity_fingerprint, true)
+            .await
+            .unwrap();
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, Authorization::Refused(RefusalReason::Suspended));
+        assert_eq!(harness.prompt().asked(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_device_cannot_reconnect_unattended() {
+        // Revocation has to invalidate the authorization, not merely hide a row: the
+        // device connects again and is treated as the stranger it now is.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+        harness
+            .trust_device(identity_a(), PermissionSet::ALL, true)
+            .await;
+        harness
+            .trust()
+            .revoke(identity_a().identity_fingerprint)
+            .await
+            .unwrap();
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            Authorization::Refused(RefusalReason::Dismissed),
+            "with the grant gone it is a stranger, and the scripted human said no"
+        );
+        assert_eq!(
+            harness.prompt().asked(),
+            1,
+            "it reached the dialog rather than being let in"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unattended_device_granted_nothing_is_refused_not_given_an_empty_session() {
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+        harness
+            .trust_device(identity_a(), PermissionSet::NONE, true)
+            .await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
         assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
         assert_eq!(
             harness.prompt().asked(),
             0,
-            "an empty pin must not fall back to the dialog either"
+            "an empty unattended grant must not fall back to the dialog either"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unattended_connection_updates_where_and_when_but_grants_nothing_new() {
+        let granted = PermissionSet::NONE.with(Permission::ViewMetrics);
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+        harness.trust_device(identity_a(), granted, true).await;
+
+        let _ = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        let stored = harness
+            .trust()
+            .find(identity_a().identity_fingerprint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.permissions, granted, "reconnecting must not widen");
+        assert_eq!(stored.last_address.as_deref(), Some("192.168.1.77:7443"));
+        assert!(stored.last_connected_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn allow_once_persists_nothing() {
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, Authorization::Granted(SESSION_PERMISSIONS));
+        assert!(
+            harness.trust().list().await.unwrap().is_empty(),
+            "Accept Once must leave nothing behind to reconnect against"
+        );
+    }
+
+    #[tokio::test]
+    async fn trust_device_persists_without_granting_unattended_access() {
+        let granted = PermissionSet::NONE.with(Permission::ViewMetrics);
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept {
+            permissions: granted,
+            trust: TrustChoice::Remember,
+        }))
+        .await;
+
+        let _ = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        let stored = harness
+            .trust()
+            .find(identity_a().identity_fingerprint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.permissions, granted);
+        assert!(
+            !stored.unattended,
+            "remembering a machine is not the same as letting it in unasked"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_unattended_access_persists_the_access_too() {
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept {
+            permissions: PermissionSet::ALL,
+            trust: TrustChoice::RememberUnattended,
+        }))
+        .await;
+
+        let _ = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        let stored = harness
+            .trust()
+            .find(identity_a().identity_fingerprint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.unattended);
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_never_remembered() {
+        // Persisting on a refusal would create a trust row for a device the human had
+        // just turned away -- and, if it carried unattended access, would let the next
+        // connection in without anyone being asked at all.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+
+        let _ = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        assert!(harness.trust().list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepting_nothing_while_asking_to_remember_stores_nothing() {
+        // An empty grant is a refusal, and a refusal is not remembered -- so the two
+        // rules have to compose rather than the trust write happening first.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept {
+            permissions: PermissionSet::NONE,
+            trust: TrustChoice::RememberUnattended,
+        }))
+        .await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
+        assert!(harness.trust().list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn administrator_is_never_reachable_from_the_accept_dialog() {
+        // Whatever the dialog returns, the Administer bit must not survive it -- neither
+        // into the session nor into the stored grant. The dialog is clicked many times a
+        // day; authority over the trust database is not something it may confer.
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept {
+            permissions: PermissionSet::ALL,
+            trust: TrustChoice::RememberUnattended,
+        }))
+        .await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        let Authorization::Granted(granted) = outcome else {
+            panic!("expected a grant, got {outcome:?}")
+        };
+        assert!(!granted.contains(Permission::Administer));
+        let stored = harness
+            .trust()
+            .find(identity_a().identity_fingerprint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.permissions.contains(Permission::Administer));
+    }
+
+    #[tokio::test]
+    async fn an_unattended_device_granted_administrator_keeps_it() {
+        // The complement of the test above: Administer is stripped from what the *dialog*
+        // returns, not from a grant a human made deliberately in the device's settings.
+        let granted = PermissionSet::NONE
+            .with(Permission::ViewMetrics)
+            .with(Permission::Administer);
+        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Dismiss)).await;
+        harness.trust_device(identity_a(), granted, true).await;
+
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, Authorization::Granted(granted));
     }
 
     #[tokio::test]
@@ -618,7 +1080,7 @@ mod tests {
             .await;
 
         let outcome = harness
-            .authorize(request(Some("correct horse battery")))
+            .authorize(request_from(identity_a(), Some("correct horse battery")))
             .await
             .unwrap();
         assert_eq!(outcome, Authorization::Granted(granted));
@@ -628,16 +1090,13 @@ mod tests {
     #[tokio::test]
     async fn an_unattended_credential_with_no_permissions_is_refused_not_granted_an_empty_session()
     {
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         harness
             .set_unattended("correct horse battery", PermissionSet::NONE)
             .await;
 
         let outcome = harness
-            .authorize(request(Some("correct horse battery")))
+            .authorize(request_from(identity_a(), Some("correct horse battery")))
             .await
             .unwrap();
         assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
@@ -652,16 +1111,13 @@ mod tests {
     async fn a_wrong_unattended_password_is_refused_without_falling_back_to_the_prompt() {
         // Falling back would make a wrong password indistinguishable from no password
         // and would let an attacker convert a guess into a prompt on someone's screen.
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         harness
             .set_unattended("correct horse battery", PermissionSet::ALL)
             .await;
 
         let outcome = harness
-            .authorize(request(Some("wrong password here")))
+            .authorize(request_from(identity_a(), Some("wrong password here")))
             .await
             .unwrap();
         assert_eq!(
@@ -674,12 +1130,9 @@ mod tests {
     #[tokio::test]
     async fn a_password_offered_when_none_is_configured_is_refused_identically() {
         // The answer must not disclose whether unattended access exists.
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         let outcome = harness
-            .authorize(request(Some("anything at all")))
+            .authorize(request_from(identity_a(), Some("anything at all")))
             .await
             .unwrap();
         assert_eq!(
@@ -699,13 +1152,13 @@ mod tests {
         // check takes microseconds, so a generous bound distinguishes the two without
         // being sensitive to ordinary scheduling jitter.
         let overlong = "a".repeat(rc_security::password::MAX_PASSWORD_BYTES + 1);
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
 
         let started = std::time::Instant::now();
-        let outcome = harness.authorize(request(Some(&overlong))).await.unwrap();
+        let outcome = harness
+            .authorize(request_from(identity_a(), Some(&overlong)))
+            .await
+            .unwrap();
         let elapsed = started.elapsed();
 
         assert_eq!(
@@ -723,16 +1176,16 @@ mod tests {
         // The credentialed path must behave the same way: this is the equal-cost half
         // of the same guarantee, not just a regression guard on the branch above.
         let overlong = "a".repeat(rc_security::password::MAX_PASSWORD_BYTES + 1);
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         harness
             .set_unattended("correct horse battery", PermissionSet::ALL)
             .await;
 
         let started = std::time::Instant::now();
-        let outcome = harness.authorize(request(Some(&overlong))).await.unwrap();
+        let outcome = harness
+            .authorize(request_from(identity_a(), Some(&overlong)))
+            .await
+            .unwrap();
         let elapsed = started.elapsed();
 
         assert_eq!(
@@ -754,12 +1207,12 @@ mod tests {
 
         for _ in 0..5 {
             let _ = harness
-                .authorize(request(Some("wrong password here")))
+                .authorize(request_from(identity_a(), Some("wrong password here")))
                 .await
                 .unwrap();
         }
         let outcome = harness
-            .authorize(request(Some("correct horse battery")))
+            .authorize(request_from(identity_a(), Some("correct horse battery")))
             .await
             .unwrap();
         assert_eq!(
@@ -793,7 +1246,7 @@ mod tests {
             let harness = std::sync::Arc::clone(&harness);
             handles.push(tokio::spawn(async move {
                 harness
-                    .authorize(request(Some("wrong password here")))
+                    .authorize(request_from(identity_a(), Some("wrong password here")))
                     .await
                     .unwrap()
             }));
@@ -821,16 +1274,16 @@ mod tests {
     async fn no_password_offered_still_reaches_the_prompt_when_unattended_is_configured() {
         // Configuring unattended access adds a second way in; it does not remove the
         // first.
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::ALL,
-        )))
-        .await;
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::ALL))).await;
         harness
             .set_unattended("correct horse battery", PermissionSet::ALL)
             .await;
 
-        let outcome = harness.authorize(request(None)).await.unwrap();
-        assert_eq!(outcome, Authorization::Granted(PermissionSet::ALL));
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
+        assert_eq!(outcome, Authorization::Granted(SESSION_PERMISSIONS));
         assert_eq!(harness.prompt().asked(), 1);
     }
 
@@ -838,11 +1291,11 @@ mod tests {
     async fn accepting_with_nothing_ticked_is_a_refusal_not_an_empty_session() {
         // A session that may do nothing is a connection nobody can use and nobody can
         // see. Saying no is clearer.
-        let harness = Harness::new(ScriptedPrompt::new(AcceptDecision::Accept(
-            PermissionSet::NONE,
-        )))
-        .await;
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        let harness = Harness::new(ScriptedPrompt::new(accept_once(PermissionSet::NONE))).await;
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
         assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
     }
 
@@ -854,12 +1307,15 @@ mod tests {
         // human approved for someone else. The correlation ID exists to make this
         // path structurally unreachable, not merely unlikely.
         let harness = Harness::new(ScriptedPrompt::stale(
-            AcceptDecision::Accept(PermissionSet::ALL),
+            accept_once(PermissionSet::ALL),
             "not-the-request-that-is-pending",
         ))
         .await;
 
-        let outcome = harness.authorize(request(None)).await.unwrap();
+        let outcome = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
         assert_eq!(outcome, Authorization::Refused(RefusalReason::Dismissed));
         assert_eq!(
             harness.prompt().asked(),
@@ -871,23 +1327,28 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_second_connection_is_refused_while_a_dialog_is_pending() {
         let harness = std::sync::Arc::new(
-            Harness::new(BlockingPrompt::new(AcceptDecision::Accept(
-                PermissionSet::ALL,
-            )))
-            .await,
+            Harness::new(BlockingPrompt::new(accept_once(PermissionSet::ALL))).await,
         );
 
         // Start the first connection; it blocks inside `ask` until released, so the
         // pending slot stays held.
         let first = {
             let harness = std::sync::Arc::clone(&harness);
-            tokio::spawn(async move { harness.authorize(request(None)).await.unwrap() })
+            tokio::spawn(async move {
+                harness
+                    .authorize(request_from(identity_a(), None))
+                    .await
+                    .unwrap()
+            })
         };
         harness.prompt().wait_until_entered().await;
 
         // A second connection arriving now must be refused immediately, without ever
         // reaching the prompt.
-        let second = harness.authorize(request(None)).await.unwrap();
+        let second = harness
+            .authorize(request_from(identity_a(), None))
+            .await
+            .unwrap();
         assert_eq!(second, Authorization::Refused(RefusalReason::Dismissed));
         assert_eq!(
             harness.prompt().calls(),
@@ -897,7 +1358,7 @@ mod tests {
 
         harness.prompt().release();
         let first_outcome = first.await.unwrap();
-        assert_eq!(first_outcome, Authorization::Granted(PermissionSet::ALL));
+        assert_eq!(first_outcome, Authorization::Granted(SESSION_PERMISSIONS));
     }
 
     #[test]

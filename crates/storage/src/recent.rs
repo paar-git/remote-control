@@ -1,20 +1,24 @@
-//! Machines this installation has connected to.
+//! Machines this installation has dialled.
 //!
-//! One row per address, keyed by the address itself rather than by an identity: the
-//! address is what the user typed, and a machine reached under a different address is
-//! a different row by design — its pin has to be re-decided.
+//! One row per address, keyed by the address itself, because the address is what the
+//! user types to reach a machine. This is the *outgoing* history and nothing more: it
+//! grants nothing and admits nobody. Incoming trust lives in [`crate::trust`], keyed on
+//! a device identity, precisely because an address is not an identity.
 //!
-//! # The pin is never silently re-granted
+//! # `known_identity` is a pin, not a grant
 //!
-//! [`RecentRepository::record`] runs on every connection, successful or not yet
-//! authorized, to keep the "last connected" list current. It deliberately leaves
-//! `pinned_fingerprint` and `pinned_permissions` untouched: those columns are written
-//! only by [`RecentRepository::set_always_allow`], which is reached solely from a
-//! human ticking "always allow" on the Accept dialog. If `record` touched the pin, a
-//! machine the user had un-pinned would silently regain always-allow the next time it
-//! was dialled — a permission grant with no human decision behind it.
+//! It records which identity answered at this address, written on the first successful
+//! connection and compared on every later one, so a substituted machine at a familiar
+//! address is visible rather than silently connected to. It pins the *identity* rather
+//! than the certificate, so an ordinary renewal on the far side is not mistaken for a
+//! different machine.
+//!
+//! [`RecentRepository::record`] runs on every connection, successful or not, to keep
+//! the list current, and deliberately leaves `known_identity` untouched. If it did not,
+//! a machine that had been substituted would overwrite the very value the comparison
+//! exists to make.
 
-use rc_security::{Fingerprint, PermissionSet};
+use rc_security::Fingerprint;
 
 use crate::error::Result;
 
@@ -27,14 +31,8 @@ pub struct RecentConnection {
     pub machine_name: String,
     /// When a connection to it was last recorded.
     pub last_connected_ms: i64,
-    /// The fingerprint pinned for always-allow, if the user set one.
-    pub pinned_fingerprint: Option<Fingerprint>,
-    /// The permissions an always-allow connection receives.
-    ///
-    /// Meaningless, and always [`PermissionSet::NONE`], when `pinned_fingerprint` is
-    /// `None` — enforced by the schema's `CHECK` and by
-    /// [`RecentRepository::set_always_allow`] never writing one without the other.
-    pub pinned_permissions: PermissionSet,
+    /// The identity that answered here, once one has. Compared, never trusted blindly.
+    pub known_identity: Option<Fingerprint>,
 }
 
 /// Reads and writes recent connections.
@@ -83,7 +81,7 @@ impl RecentRepository {
 
     /// Record that a connection to `address` was made, upserting the name and time.
     ///
-    /// Deliberately leaves any existing pin untouched — see the module documentation.
+    /// Deliberately leaves `known_identity` untouched — see the module documentation.
     ///
     /// # Errors
     /// Propagates query failures.
@@ -104,37 +102,21 @@ impl RecentRepository {
         Ok(())
     }
 
-    /// Set or clear the always-allow pin for `address`.
+    /// Record the identity this address is now known to have.
     ///
-    /// Passing `None` for `fingerprint` always writes [`PermissionSet::NONE`] for the
-    /// permissions too, regardless of what was asked for — this is what makes the
-    /// schema's `CHECK (pinned_fingerprint IS NOT NULL OR pinned_permissions = 0)`
-    /// unreachable from this repository rather than merely guarded by it.
+    /// Written on the first successful connection and compared on every later one, so a
+    /// substituted machine at a familiar address is visible rather than silent.
     ///
     /// # Errors
     /// [`crate::StorageError::NotFound`] if the address has no recorded connection yet.
-    pub async fn set_always_allow(
-        &self,
-        address: &str,
-        fingerprint: Option<Fingerprint>,
-        permissions: PermissionSet,
-    ) -> Result<()> {
-        let (fingerprint_hex, permissions) = match fingerprint {
-            Some(fingerprint) => (Some(fingerprint.to_hex()), permissions),
-            None => (None, PermissionSet::NONE),
-        };
-
-        let affected = sqlx::query(
-            "UPDATE recent_connections
-             SET pinned_fingerprint = ?, pinned_permissions = ?
-             WHERE address = ?",
-        )
-        .bind(fingerprint_hex)
-        .bind(i64::from(permissions.bits()))
-        .bind(address)
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+    pub async fn set_known_identity(&self, address: &str, identity: Fingerprint) -> Result<()> {
+        let affected =
+            sqlx::query("UPDATE recent_connections SET known_identity = ? WHERE address = ?")
+                .bind(identity.to_hex())
+                .bind(address)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
 
         if affected == 0 {
             Err(crate::StorageError::NotFound)
@@ -143,7 +125,7 @@ impl RecentRepository {
         }
     }
 
-    /// Forget a connection entirely, pin included.
+    /// Forget a connection entirely, its known identity included.
     ///
     /// Removing an unknown address succeeds without changing anything: the caller
     /// wanted the address gone, and it already is.
@@ -166,47 +148,35 @@ struct RecentConnectionRaw {
     address: String,
     machine_name: String,
     last_connected_ms: i64,
-    pinned_fingerprint: Option<String>,
-    pinned_permissions: i64,
+    known_identity: Option<String>,
 }
 
 impl TryFrom<RecentConnectionRaw> for RecentConnection {
     type Error = crate::StorageError;
 
     fn try_from(raw: RecentConnectionRaw) -> Result<Self> {
-        let pinned_fingerprint = raw
-            .pinned_fingerprint
+        let known_identity = raw
+            .known_identity
             .map(|hex| {
                 hex.parse::<Fingerprint>()
                     .map_err(|_| crate::StorageError::MalformedColumn {
-                        column: "pinned_fingerprint",
+                        column: "known_identity",
                     })
             })
             .transpose()?;
-
-        let bits = u8::try_from(raw.pinned_permissions).map_err(|_| {
-            crate::StorageError::MalformedColumn {
-                column: "pinned_permissions",
-            }
-        })?;
-        let pinned_permissions =
-            PermissionSet::from_bits(bits).ok_or(crate::StorageError::MalformedColumn {
-                column: "pinned_permissions",
-            })?;
 
         Ok(Self {
             address: raw.address,
             machine_name: raw.machine_name,
             last_connected_ms: raw.last_connected_ms,
-            pinned_fingerprint,
-            pinned_permissions,
+            known_identity,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rc_security::{Fingerprint, Permission, PermissionSet};
+    use rc_security::Fingerprint;
 
     use super::*;
     use crate::test_support::temp_database;
@@ -230,8 +200,7 @@ mod tests {
         let found = repository.find("192.168.1.77").await.unwrap().unwrap();
         assert_eq!(found.machine_name, "WORK-LAPTOP");
         assert_eq!(found.last_connected_ms, 1_700_000_000_000);
-        assert!(found.pinned_fingerprint.is_none());
-        assert!(found.pinned_permissions.is_empty());
+        assert!(found.known_identity.is_none());
     }
 
     #[tokio::test]
@@ -281,51 +250,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn always_allow_stores_the_pin_and_the_permissions() {
+    async fn the_known_identity_round_trips() {
         let database = temp_database().await;
         let repository = RecentRepository::new(&database);
         repository.record("10.0.0.1", "BOX", 1_000).await.unwrap();
 
-        let fingerprint = Fingerprint::from_bytes([7u8; 32]);
-        let granted = PermissionSet::NONE.with(Permission::TransferFiles);
+        let identity = Fingerprint::from_bytes([7u8; 32]);
         repository
-            .set_always_allow("10.0.0.1", Some(fingerprint), granted)
+            .set_known_identity("10.0.0.1", identity)
             .await
             .unwrap();
 
         let found = repository.find("10.0.0.1").await.unwrap().unwrap();
-        assert_eq!(found.pinned_fingerprint, Some(fingerprint));
-        assert_eq!(found.pinned_permissions, granted);
+        assert_eq!(found.known_identity, Some(identity));
     }
 
     #[tokio::test]
-    async fn clearing_always_allow_clears_the_permissions_too() {
-        // A row with permissions but no pin would be a grant nothing can match, which
-        // the schema refuses. Clearing must clear both or the write fails.
+    async fn recording_a_connection_leaves_the_known_identity_alone() {
+        // If `record` overwrote it, a substituted machine would replace the very value
+        // the comparison exists to make -- and the substitution would go unnoticed.
         let database = temp_database().await;
         let repository = RecentRepository::new(&database);
         repository.record("10.0.0.1", "BOX", 1_000).await.unwrap();
+        let identity = Fingerprint::from_bytes([7u8; 32]);
         repository
-            .set_always_allow(
-                "10.0.0.1",
-                Some(Fingerprint::from_bytes([7u8; 32])),
-                PermissionSet::ALL,
-            )
+            .set_known_identity("10.0.0.1", identity)
             .await
             .unwrap();
 
-        repository
-            .set_always_allow("10.0.0.1", None, PermissionSet::ALL)
-            .await
-            .unwrap();
+        repository.record("10.0.0.1", "BOX", 2_000).await.unwrap();
 
         let found = repository.find("10.0.0.1").await.unwrap().unwrap();
-        assert!(found.pinned_fingerprint.is_none());
-        assert!(found.pinned_permissions.is_empty());
+        assert_eq!(found.known_identity, Some(identity));
+        assert_eq!(found.last_connected_ms, 2_000);
     }
 
     #[tokio::test]
-    async fn removing_an_entry_removes_its_pin() {
+    async fn pinning_an_address_never_dialled_is_reported_rather_than_ignored() {
+        let database = temp_database().await;
+        let repository = RecentRepository::new(&database);
+
+        let outcome = repository
+            .set_known_identity("10.0.0.9", Fingerprint::from_bytes([7u8; 32]))
+            .await;
+
+        assert!(matches!(outcome, Err(crate::StorageError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn removing_an_entry_removes_its_known_identity() {
         let database = temp_database().await;
         let repository = RecentRepository::new(&database);
         repository.record("10.0.0.1", "BOX", 1_000).await.unwrap();

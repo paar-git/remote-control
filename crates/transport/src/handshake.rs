@@ -33,12 +33,12 @@
 //! anyone able to reach the port could fingerprint the machine and then be dismissed,
 //! having learned everything anyway.
 //!
-//! # The decision is made from the observed fingerprint, never from a claim
+//! # The decision is made from the observed certificate, never from a claim
 //!
 //! [`Hello`] carries a device id, but that value is *asserted by the peer*. Any
-//! admission decision uses the certificate fingerprint recorded by the TLS verifier
-//! ([`crate::tls::ObservedPeer`]) and carried on [`AuthenticatedPeer`]. The claimed id
-//! is never what performs a lookup.
+//! admission decision uses the [`PeerIdentity`] built from the certificate the peer
+//! actually presented, which it proved possession of by completing TLS. The claimed id
+//! is never what performs a lookup — it is display text.
 //!
 //! # This crate does not decide; it carries the decision
 //!
@@ -77,14 +77,56 @@ use crate::error::{Result, TransportError};
 /// penalised for time already spent completing an earlier leg.
 pub const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 
+/// Who a peer is, established from the certificate it actually presented.
+///
+/// Built only by [`PeerIdentity::from_certificate_der`], from the DER the TLS layer
+/// recorded for this connection — never from a message body. A peer that could name its
+/// own identity could name someone else's, and that property is what makes every trust
+/// decision downstream sound.
+///
+/// The three values are not interchangeable:
+///
+/// | Field | Derived from | Changes on renewal? |
+/// |---|---|---|
+/// | `certificate_fingerprint` | the certificate DER | yes |
+/// | `identity_fingerprint` | the identity public key | **no** — the trust key |
+/// | `device_id` | the identity public key | no |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIdentity {
+    /// Fingerprint of the certificate presented on this connection.
+    pub certificate_fingerprint: Fingerprint,
+    /// Fingerprint of the identity key behind it. **The trust key.**
+    pub identity_fingerprint: Fingerprint,
+    /// Stable id derived from the same identity key.
+    pub device_id: DeviceId,
+}
+
+impl PeerIdentity {
+    /// Establish a peer's identity from the certificate it presented.
+    ///
+    /// # Errors
+    /// Propagates [`rc_security::SecurityError::MalformedIdentity`] when the certificate
+    /// carries no Ed25519 identity key. Such a connection must be refused rather than
+    /// admitted under an invented identity — see [`rc_security::certificate`].
+    pub fn from_certificate_der(der: &[u8]) -> rc_security::Result<Self> {
+        let key = rc_security::identity_key_of_certificate(der)?;
+        Ok(Self {
+            certificate_fingerprint: Fingerprint::of_certificate_der(der),
+            identity_fingerprint: Fingerprint::of_public_key(&key),
+            device_id: rc_security::derive_device_id(&key),
+        })
+    }
+}
+
 /// What the agent learned about an admitted peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPeer {
-    /// Derived deterministically from the observed certificate fingerprint. There is no
-    /// trusted-device store in this build to assign a stable id from, so this is the
-    /// closest available analogue: the same peer, presenting the same certificate,
-    /// always yields the same id, without anything being persisted about it.
+    /// Stable identifier derived from the peer's **identity** key, so the same device
+    /// keeps the same id across certificate renewal. It was once derived from the
+    /// certificate fingerprint, which meant it changed whenever the certificate did.
     pub device_id: DeviceId,
+    /// The identity the peer proved by completing TLS. The key trust is stored under.
+    pub identity_fingerprint: Fingerprint,
     /// Name to show in the UI. Untrusted text; sanitise before rendering.
     pub display_name: String,
     /// Permissions this session was admitted with.
@@ -138,11 +180,12 @@ pub const fn negotiate(ours: ProtocolVersion, theirs: ProtocolVersion) -> Protoc
 
 /// Run the agent's side of the handshake.
 ///
-/// `observed` is the fingerprint the TLS verifier recorded for this connection. Passing
-/// anything else — in particular anything from the peer's message — defeats the point.
+/// `observed` is the [`PeerIdentity`] built from the certificate the TLS layer recorded
+/// for this connection. Passing anything else — in particular anything derived from the
+/// peer's message — defeats the point.
 ///
-/// `authorize` is called once, after `Authenticate` arrives, with the observed
-/// fingerprint, the peer's self-reported machine name (from [`Hello`], untrusted) and
+/// `authorize` is called once, after `Authenticate` arrives, with that identity, the
+/// peer's self-reported machine name (from [`Hello`], untrusted) and
 /// any unattended password it offered. It decides admission; this function only carries
 /// the decision to the peer and, on success, builds the [`AuthenticatedPeer`] the caller
 /// runs the session against.
@@ -154,14 +197,14 @@ pub const fn negotiate(ours: ProtocolVersion, theirs: ProtocolVersion) -> Protoc
 pub async fn accept_handshake<F, Fut>(
     reader: &mut ChannelReader,
     writer: &mut ChannelWriter,
-    observed: Fingerprint,
+    observed: PeerIdentity,
     agent_descriptor: DeviceDescriptor,
     agent_capabilities: Capabilities,
     now_ms: i64,
     authorize: F,
 ) -> Result<AuthenticatedPeer>
 where
-    F: FnOnce(Fingerprint, PeerAddress, String, Option<String>) -> Fut + Send,
+    F: FnOnce(PeerIdentity, PeerAddress, String, Option<String>) -> Fut + Send,
     Fut: Future<Output = HandshakeAuthorization> + Send,
 {
     let Opening::Hello(hello) = read_opening(reader).await? else {
@@ -209,7 +252,7 @@ pub async fn read_opening(reader: &mut ChannelReader) -> Result<Opening> {
 pub async fn finish_accept<F, Fut>(
     reader: &mut ChannelReader,
     writer: &mut ChannelWriter,
-    observed: Fingerprint,
+    observed: PeerIdentity,
     hello: Hello,
     agent_descriptor: DeviceDescriptor,
     agent_capabilities: Capabilities,
@@ -217,7 +260,7 @@ pub async fn finish_accept<F, Fut>(
     authorize: F,
 ) -> Result<AuthenticatedPeer>
 where
-    F: FnOnce(Fingerprint, PeerAddress, String, Option<String>) -> Fut + Send,
+    F: FnOnce(PeerIdentity, PeerAddress, String, Option<String>) -> Fut + Send,
     Fut: Future<Output = HandshakeAuthorization> + Send,
 {
     // A client that announces itself as an agent is not something to accommodate.
@@ -286,10 +329,11 @@ where
             );
 
             Ok(AuthenticatedPeer {
-                device_id: rc_security::derive_device_id(observed.as_bytes()),
+                device_id: observed.device_id,
+                identity_fingerprint: observed.identity_fingerprint,
                 display_name: hello.descriptor.display_name,
                 permissions,
-                certificate_fingerprint: observed,
+                certificate_fingerprint: observed.certificate_fingerprint,
                 negotiated_version,
                 capabilities: hello.capabilities,
                 session_id,
@@ -297,7 +341,7 @@ where
         }
         HandshakeAuthorization::Refused(reason) => {
             tracing::warn!(
-                observed = %observed,
+                identity = %observed.identity_fingerprint,
                 reason = ?reason,
                 "refusing a connection after authentication"
             );
@@ -518,6 +562,51 @@ pub const HANDSHAKE_CHANNEL: Channel = Channel::Control;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_identity_is_derived_from_the_certificate_not_claimed_by_the_peer() {
+        let clock = rc_security::clock::TestClock::default();
+        let identity = rc_security::DeviceIdentity::generate("peer", &clock).unwrap();
+        let public = identity.public();
+
+        let derived = PeerIdentity::from_certificate_der(&public.certificate_der).unwrap();
+
+        assert_eq!(derived.identity_fingerprint, public.identity_fingerprint);
+        assert_eq!(
+            derived.certificate_fingerprint,
+            public.certificate_fingerprint
+        );
+        assert_eq!(
+            derived.device_id, public.device_id,
+            "the device id must come from the identity key, so the same device always \
+             reports the same id -- deriving it from the certificate made it change on \
+             every renewal"
+        );
+    }
+
+    #[test]
+    fn a_renewed_certificate_keeps_the_device_id_and_changes_only_the_credential() {
+        let clock = rc_security::clock::TestClock::default();
+        let identity = rc_security::DeviceIdentity::generate("peer", &clock).unwrap();
+        let before =
+            PeerIdentity::from_certificate_der(&identity.public().certificate_der).unwrap();
+
+        clock.advance_ms(24 * 3600 * 1000);
+        let renewed = identity.renew_certificate("peer", &clock).unwrap();
+        let after = PeerIdentity::from_certificate_der(&renewed.public().certificate_der).unwrap();
+
+        assert_eq!(after.identity_fingerprint, before.identity_fingerprint);
+        assert_eq!(after.device_id, before.device_id);
+        assert_ne!(
+            after.certificate_fingerprint, before.certificate_fingerprint,
+            "the credential is the part that rotates"
+        );
+    }
+
+    #[test]
+    fn a_peer_identity_cannot_be_built_from_a_certificate_with_no_identity() {
+        assert!(PeerIdentity::from_certificate_der(b"not a certificate").is_err());
+    }
 
     #[test]
     fn versions_negotiate_to_the_lower_minor() {

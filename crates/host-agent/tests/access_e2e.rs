@@ -41,7 +41,7 @@ use rc_security::{
     DeviceIdentity, Fingerprint, HashingPolicy, OsRandom, PasswordCredential, Permission,
     PermissionSet, SystemClock,
 };
-use rc_storage::{Database, RecentRepository, SettingsRepository};
+use rc_storage::{Database, SettingsRepository, TrustRepository};
 use rc_transport::{ClientConnector, PeerAddress, PinPolicy, TransportError};
 
 /// What to write into the agent's database before it starts.
@@ -49,8 +49,14 @@ use rc_transport::{ClientConnector, PeerAddress, PinPolicy, TransportError};
 struct Seed {
     /// An unattended password and what it grants.
     unattended: Option<(String, PermissionSet)>,
-    /// A pinned identity for the address the client will dial, and what it grants.
-    pin: Option<(Fingerprint, PermissionSet)>,
+    /// A trusted device: the identity it will prove, what it grants, and whether it
+    /// may reconnect without anyone approving.
+    trusted: Option<(Fingerprint, PermissionSet, bool)>,
+    /// An identity to revoke immediately after trusting it, so a test can assert that
+    /// revocation invalidates rather than merely hides.
+    revoke: Option<Fingerprint>,
+    /// An identity to suspend after trusting it.
+    suspend: Option<Fingerprint>,
     /// Whether the machine accepts connections at all.
     not_accepting: bool,
 }
@@ -237,17 +243,36 @@ async fn seed_database(root: &Path, quic_port: u16, seed: &Seed) {
             .unwrap();
     }
 
-    if let Some((fingerprint, permissions)) = &seed.pin {
+    if let Some((identity, permissions, unattended)) = &seed.trusted {
         let key = format!("127.0.0.1:{quic_port}");
-        let recent = RecentRepository::new(&database);
-        // A real timestamp: the column has a `CHECK (last_connected_ms > 0)`, because a
-        // row claiming the epoch is a row nothing wrote deliberately.
-        recent
-            .record(&key, "Integration Client", 1_700_000_000_000)
+        let trust = TrustRepository::new(&database);
+        // A real timestamp: the column has a `CHECK (added_ms > 0)`, because a row
+        // claiming the epoch is a row nothing wrote deliberately.
+        trust
+            .trust(&rc_storage::NewTrustedDevice {
+                identity_fingerprint: *identity,
+                device_id: "dev-integration".to_owned(),
+                display_name: "Integration Client".to_owned(),
+                os_family: "linux".to_owned(),
+                address: key,
+                permissions: *permissions,
+                unattended: *unattended,
+                now_ms: 1_700_000_000_000,
+            })
             .await
             .unwrap();
-        recent
-            .set_always_allow(&key, Some(*fingerprint), *permissions)
+    }
+
+    if let Some(identity) = &seed.revoke {
+        TrustRepository::new(&database)
+            .revoke(*identity)
+            .await
+            .unwrap();
+    }
+
+    if let Some(identity) = &seed.suspend {
+        TrustRepository::new(&database)
+            .set_suspended(*identity, true)
             .await
             .unwrap();
     }
@@ -506,17 +531,21 @@ async fn a_wrong_unattended_password_is_refused_indistinguishably() {
 }
 
 #[tokio::test]
-async fn a_pinned_peer_with_a_changed_certificate_is_refused_outright() {
+async fn a_stranger_at_a_trusted_devices_address_is_refused_outright() {
     // The case the pin exists for. It must never reach the dialog: an identity change
     // that arrives as a routine Accept prompt gets accepted by reflex.
     let pinned = client_identity("the-real-one");
     let agent = RunningAgent::start_with(Seed {
-        pin: Some((pinned.public().certificate_fingerprint, PermissionSet::ALL)),
+        trusted: Some((
+            pinned.public().identity_fingerprint,
+            PermissionSet::ALL,
+            true,
+        )),
         ..Seed::default()
     })
     .await;
 
-    // A different identity dialling the same pinned address.
+    // A different identity dialling the same trusted address.
     let impostor = client_identity("someone-else");
     let error = connect(&agent, &impostor, None).await.unwrap_err();
 
@@ -562,10 +591,14 @@ async fn a_correct_unattended_password_is_admitted_with_what_it_grants() {
 }
 
 #[tokio::test]
-async fn a_pinned_peer_is_admitted_without_being_asked_about() {
+async fn an_unattended_device_is_admitted_without_being_asked_about() {
     let pinned = client_identity("known");
     let agent = RunningAgent::start_with(Seed {
-        pin: Some((pinned.public().certificate_fingerprint, PermissionSet::ALL)),
+        trusted: Some((
+            pinned.public().identity_fingerprint,
+            PermissionSet::ALL,
+            true,
+        )),
         ..Seed::default()
     })
     .await;
@@ -615,13 +648,17 @@ async fn a_withheld_permission_is_refused_per_request() {
 }
 
 #[tokio::test]
-async fn a_pin_survives_an_agent_restart() {
+async fn unattended_access_survives_an_agent_restart() {
     // The regression test for the bug where the certificate was reissued on every load.
     // A pin keyed on a fingerprint that changes at every start is a pin that never
     // matches, and every reconnection would fall through to the dialog.
     let pinned = client_identity("persistent");
     let agent = RunningAgent::start_with(Seed {
-        pin: Some((pinned.public().certificate_fingerprint, PermissionSet::ALL)),
+        trusted: Some((
+            pinned.public().identity_fingerprint,
+            PermissionSet::ALL,
+            true,
+        )),
         ..Seed::default()
     })
     .await;
@@ -643,5 +680,83 @@ async fn a_pin_survives_an_agent_restart() {
         after.session.descriptor.certificate_fingerprint, agent_identity_before,
         "the agent must present the same certificate across a restart, or every peer \
          that pinned it would refuse it"
+    );
+}
+
+#[tokio::test]
+async fn a_revoked_device_is_refused_after_a_restart() {
+    // Revocation must invalidate the authorization, not merely hide a row from a list.
+    // Asserted by connecting again against a restarted process rather than by reading
+    // the table back: the table is not what admits anyone.
+    let revoked = client_identity("revoked");
+    let agent = RunningAgent::start_with(Seed {
+        trusted: Some((
+            revoked.public().identity_fingerprint,
+            PermissionSet::ALL,
+            true,
+        )),
+        revoke: Some(revoked.public().identity_fingerprint),
+        ..Seed::default()
+    })
+    .await;
+
+    let agent = agent.restart().await;
+
+    let outcome = connect(&agent, &revoked, None).await;
+
+    assert!(
+        outcome.is_err(),
+        "a revoked device must not get back in, and the agent's prompt dismisses \
+         everything, so reaching a session at all would mean the grant survived"
+    );
+}
+
+#[tokio::test]
+async fn a_suspended_device_is_refused_but_keeps_its_settings() {
+    let suspended = client_identity("suspended");
+    let agent = RunningAgent::start_with(Seed {
+        trusted: Some((
+            suspended.public().identity_fingerprint,
+            PermissionSet::ALL,
+            true,
+        )),
+        suspend: Some(suspended.public().identity_fingerprint),
+        ..Seed::default()
+    })
+    .await;
+
+    let outcome = connect(&agent, &suspended, None).await;
+
+    assert!(outcome.is_err(), "a suspended device must be refused");
+}
+
+#[tokio::test]
+async fn a_second_device_cannot_reuse_the_first_devices_grant() {
+    // Two genuinely different identity keys, dialling the same address. The grant
+    // belongs to the key, so the second device inherits nothing from the first.
+    let trusted = client_identity("trusted");
+    let stranger = client_identity("stranger");
+    let agent = RunningAgent::start_with(Seed {
+        trusted: Some((
+            trusted.public().identity_fingerprint,
+            PermissionSet::ALL,
+            true,
+        )),
+        ..Seed::default()
+    })
+    .await;
+
+    // The trusted one gets in, so the seed is known to be live rather than inert.
+    let admitted = connect(&agent, &trusted, None)
+        .await
+        .expect("the trusted device must be admitted");
+    assert_eq!(admitted.session.permissions, PermissionSet::ALL);
+    drop(admitted);
+
+    let outcome = connect(&agent, &stranger, None).await;
+
+    assert!(
+        outcome.is_err(),
+        "holding a different key must mean holding no grant"
     );
 }

@@ -123,8 +123,11 @@ impl Harness {
 
             // Read from the connection, not from the endpoint: the endpoint-wide
             // record is shared by every concurrent handshake.
-            let observed = rc_transport::peer_certificate_fingerprint(&connection)
-                .expect("TLS must have recorded the client certificate");
+            let observed = rc_transport::PeerIdentity::from_certificate_der(
+                &rc_transport::peer_certificate_der(&connection)
+                    .expect("TLS must have recorded the client certificate"),
+            )
+            .expect("the client's certificate must carry an identity key");
 
             let seen = Arc::new(Mutex::new(None));
             let recorder = Arc::clone(&seen);
@@ -140,9 +143,9 @@ impl Harness {
                     descriptor(&self.agent, "Agent"),
                     capabilities(),
                     0,
-                    move |fingerprint, dialed_address, machine_name, password| async move {
+                    move |identity, dialed_address, machine_name, password| async move {
                         *recorder.lock().unwrap() = Some(SeenByAuthorize {
-                            fingerprint,
+                            identity,
                             dialed_address,
                             machine_name,
                             unattended_password: password,
@@ -205,7 +208,10 @@ impl Harness {
 
         let agent_side = async {
             let connection = listener.accept().await.unwrap().unwrap();
-            let observed = rc_transport::peer_certificate_fingerprint(&connection).unwrap();
+            let observed = rc_transport::PeerIdentity::from_certificate_der(
+                &rc_transport::peer_certificate_der(&connection).unwrap(),
+            )
+            .unwrap();
             let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await.unwrap();
             let _ = handshake::accept_handshake(
                 &mut reader,
@@ -214,7 +220,7 @@ impl Harness {
                 descriptor(&self.agent, "Agent"),
                 capabilities(),
                 0,
-                |_fingerprint, _dialed_address, _machine_name, _password| async {
+                |_identity, _dialed_address, _machine_name, _password| async {
                     handshake::HandshakeAuthorization::Refused(WireRefusal::Rejected)
                 },
             )
@@ -263,7 +269,7 @@ impl Harness {
 /// What the `authorize` callback was handed for one connection.
 #[derive(Debug, Clone)]
 struct SeenByAuthorize {
-    fingerprint: rc_security::Fingerprint,
+    identity: rc_transport::PeerIdentity,
     dialed_address: PeerAddress,
     machine_name: String,
     unattended_password: Option<String>,
@@ -419,9 +425,19 @@ async fn the_dialled_address_reaches_the_decision_unchanged() {
 
     let seen = seen.expect("the decision must have been asked for");
     assert_eq!(
-        seen.fingerprint,
+        seen.identity.certificate_fingerprint,
         harness.client.public().certificate_fingerprint,
-        "the decision is made from the observed fingerprint, never a claim"
+        "the decision is made from the observed certificate, never a claim"
+    );
+    assert_eq!(
+        seen.identity.identity_fingerprint,
+        harness.client.public().identity_fingerprint,
+        "and the trust key it carries is the client's real identity, read out of that          certificate rather than taken from anything the client said"
+    );
+    assert_eq!(
+        seen.identity.device_id,
+        harness.client.public().device_id,
+        "the device id follows the identity, so it survives certificate renewal"
     );
     assert_eq!(
         seen.dialed_address.to_string(),
@@ -481,7 +497,10 @@ async fn the_agent_refuses_a_peer_claiming_to_be_an_agent() {
     let agent_side = async {
         let connection = listener.accept().await.unwrap()?;
         let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
-        let observed = rc_transport::peer_certificate_fingerprint(&connection).unwrap();
+        let observed = rc_transport::PeerIdentity::from_certificate_der(
+            &rc_transport::peer_certificate_der(&connection).unwrap(),
+        )
+        .unwrap();
 
         handshake::accept_handshake(
             &mut reader,
@@ -490,7 +509,7 @@ async fn the_agent_refuses_a_peer_claiming_to_be_an_agent() {
             descriptor(&harness.agent, "Agent"),
             capabilities(),
             0,
-            |_fingerprint, _dialed_address, _machine_name, _password| async {
+            |_identity, _dialed_address, _machine_name, _password| async {
                 handshake::HandshakeAuthorization::Granted(PermissionSet::ALL)
             },
         )
@@ -550,7 +569,10 @@ async fn a_silent_client_hits_the_handshake_deadline() {
     let agent_side = async {
         let connection = listener.accept().await.unwrap()?;
         let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
-        let observed = rc_transport::peer_certificate_fingerprint(&connection).unwrap();
+        let observed = rc_transport::PeerIdentity::from_certificate_der(
+            &rc_transport::peer_certificate_der(&connection).unwrap(),
+        )
+        .unwrap();
 
         handshake::accept_handshake(
             &mut reader,
@@ -559,7 +581,7 @@ async fn a_silent_client_hits_the_handshake_deadline() {
             descriptor(&harness.agent, "Agent"),
             capabilities(),
             0,
-            |_fingerprint, _dialed_address, _machine_name, _password| async {
+            |_identity, _dialed_address, _machine_name, _password| async {
                 handshake::HandshakeAuthorization::Granted(PermissionSet::ALL)
             },
         )

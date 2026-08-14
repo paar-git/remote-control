@@ -1,9 +1,13 @@
 //! What a session is allowed to do.
 //!
-//! Three permissions, chosen by a human on the Accept dialog or pre-selected for
-//! unattended access. There are no roles: a role is an indirection that only pays for
-//! itself when there are many permissions and many kinds of user, and this product has
-//! three of one and one of the other.
+//! Four permissions. Three are chosen by a human on the Accept dialog or pre-selected
+//! for unattended access. The fourth, [`Permission::Administer`], is never reachable
+//! from that dialog at all — it is granted only from a trusted device's own settings,
+//! behind a confirmation that names the device.
+//!
+//! There are no roles: a role is an indirection that only pays for itself when there are
+//! many permissions and many kinds of user, and this product has four of one and one of
+//! the other.
 //!
 //! A permission is granted for the lifetime of a session and cannot be escalated
 //! within it. Widening requires a new connection, which means a new decision by a
@@ -21,11 +25,24 @@ pub enum Permission {
     TransferFiles,
     /// Read CPU, memory, disk and network readings.
     ViewMetrics,
+    /// Read and change this machine's trusted devices and their permissions.
+    ///
+    /// Deliberately separate from the other three, and from unattended access. A device
+    /// permitted to reconnect without anyone approving has said nothing about whether it
+    /// may rewrite the list of who else may, and a device permitted to move the mouse
+    /// has said nothing either. Nothing implies this bit; it is always granted on its
+    /// own.
+    Administer,
 }
 
 impl Permission {
     /// Every permission, in the order the interface presents them.
-    pub const ALL: [Self; 3] = [Self::ControlInput, Self::TransferFiles, Self::ViewMetrics];
+    pub const ALL: [Self; 4] = [
+        Self::ControlInput,
+        Self::TransferFiles,
+        Self::ViewMetrics,
+        Self::Administer,
+    ];
 
     /// Stable name used in errors, logs and the interface.
     #[must_use]
@@ -34,6 +51,7 @@ impl Permission {
             Self::ControlInput => "control_input",
             Self::TransferFiles => "transfer_files",
             Self::ViewMetrics => "view_metrics",
+            Self::Administer => "administer",
         }
     }
 
@@ -43,6 +61,7 @@ impl Permission {
             Self::ControlInput => 0b0000_0001,
             Self::TransferFiles => 0b0000_0010,
             Self::ViewMetrics => 0b0000_0100,
+            Self::Administer => 0b0000_1000,
         }
     }
 }
@@ -57,12 +76,15 @@ pub struct PermissionSet(u8);
 
 impl PermissionSet {
     /// Every bit that any known permission uses.
-    const KNOWN: u8 = 0b0000_0111;
+    const KNOWN: u8 = 0b0000_1111;
 
     /// Grants nothing. What a connection holds before a human has decided.
     pub const NONE: Self = Self(0);
 
-    /// Grants everything. The Accept dialog's default selection.
+    /// Grants everything, [`Permission::Administer`] included.
+    ///
+    /// **Not** the Accept dialog's default selection: that dialog offers the three
+    /// session permissions and strips `Administer` from whatever it returns.
     pub const ALL: Self = Self(Self::KNOWN);
 
     /// This set with `permission` added.
@@ -133,6 +155,7 @@ mod tests {
 
     #[test]
     fn all_grants_every_permission() {
+        assert_eq!(Permission::ALL.len(), 4);
         for permission in Permission::ALL {
             assert!(PermissionSet::ALL.contains(permission));
         }
@@ -190,5 +213,52 @@ mod tests {
         assert_eq!(Permission::ControlInput.name(), "control_input");
         assert_eq!(Permission::TransferFiles.name(), "transfer_files");
         assert_eq!(Permission::ViewMetrics.name(), "view_metrics");
+        assert_eq!(Permission::Administer.name(), "administer");
+    }
+
+    #[test]
+    fn administer_is_a_permission_of_its_own() {
+        let set = PermissionSet::NONE.with(Permission::Administer);
+        assert!(set.contains(Permission::Administer));
+        assert!(!set.contains(Permission::ControlInput));
+        assert!(!set.contains(Permission::TransferFiles));
+        assert!(!set.contains(Permission::ViewMetrics));
+    }
+
+    #[test]
+    fn no_other_permission_implies_administer() {
+        // The separation the design rests on: nothing granted for ordinary remote
+        // control may be read as authority over the trust database.
+        for permission in [
+            Permission::ControlInput,
+            Permission::TransferFiles,
+            Permission::ViewMetrics,
+        ] {
+            assert!(
+                !PermissionSet::NONE
+                    .with(permission)
+                    .contains(Permission::Administer),
+                "{} must not imply administer",
+                permission.name()
+            );
+        }
+    }
+
+    #[test]
+    fn removing_administer_leaves_the_rest_intact() {
+        let set = PermissionSet::ALL.without(Permission::Administer);
+        assert!(!set.contains(Permission::Administer));
+        assert!(set.contains(Permission::ControlInput));
+        assert!(set.contains(Permission::TransferFiles));
+        assert!(set.contains(Permission::ViewMetrics));
+    }
+
+    #[test]
+    fn the_administer_bit_is_known_and_bit_five_is_not() {
+        assert_eq!(
+            PermissionSet::from_bits(0b0000_1000),
+            Some(PermissionSet::NONE.with(Permission::Administer))
+        );
+        assert_eq!(PermissionSet::from_bits(0b0001_0000), None);
     }
 }

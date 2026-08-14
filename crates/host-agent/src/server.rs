@@ -37,8 +37,9 @@ use rc_protocol::control::{
     Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
     ControlResult, DeviceDescriptor, DisconnectReason, Opening, WireRefusal,
 };
-use rc_security::{Clock, DeviceIdentity, Fingerprint, Permission, PermissionSet, SystemClock};
-use rc_storage::{RecentRepository, SettingsRepository};
+use rc_security::{Clock, DeviceIdentity, Permission, PermissionSet, SystemClock};
+use rc_storage::{SessionHistoryRepository, SettingsRepository, TrustRepository};
+use rc_transport::handshake::HandshakeAuthorization;
 use rc_transport::{AgentListener, ChannelReader, ChannelWriter, PinPolicy, TransportError};
 
 use crate::access::{
@@ -69,7 +70,8 @@ pub struct AgentServer {
     /// This machine's own access settings.
     settings: SettingsRepository,
     /// Recently seen and pinned peer identities.
-    recent: RecentRepository,
+    trust: TrustRepository,
+    history: SessionHistoryRepository,
     /// UI boundary for human accept/deny decisions.
     prompt: Arc<dyn AcceptPrompt>,
     /// Rate limiter for unattended-password attempts.
@@ -93,7 +95,8 @@ impl AcceptPrompt for DismissingPrompt {
     async fn ask(&self, request: AcceptRequest) -> AcceptAnswer {
         tracing::warn!(
             address = %request.address,
-            fingerprint = %request.fingerprint,
+            identity = %request.identity_fingerprint,
+            trusted = request.trusted,
             "no interactive accept prompt is attached; dismissing connection request"
         );
         AcceptAnswer {
@@ -123,7 +126,8 @@ impl AgentServer {
                 rc_monitoring::MetricsCollector::new(),
             )),
             settings: SettingsRepository::new(database),
-            recent: RecentRepository::new(database),
+            trust: TrustRepository::new(database),
+            history: SessionHistoryRepository::new(database),
             prompt,
             throttle: tokio::sync::Mutex::new(rc_security::Throttle::with_defaults()),
             pending_dialog: tokio::sync::Mutex::new(()),
@@ -209,7 +213,15 @@ impl AgentServer {
 
         // From this connection, never from a message and never from the endpoint-wide
         // record, which every concurrent handshake shares.
-        let observed = rc_transport::peer_certificate_fingerprint(&connection)?;
+        //
+        // A certificate carrying no Ed25519 identity key cannot be trusted or even
+        // named, so such a connection is refused here rather than admitted under an
+        // identity this build would have to invent for it.
+        let der = rc_transport::peer_certificate_der(&connection)?;
+        let observed = rc_transport::PeerIdentity::from_certificate_der(&der).map_err(|err| {
+            tracing::warn!(%remote, %err, "refusing a peer whose certificate carries no identity");
+            TransportError::IdentityProofRejected
+        })?;
 
         let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
         let opening = rc_transport::handshake::read_opening(&mut reader).await?;
@@ -239,7 +251,7 @@ impl AgentServer {
         reader: &mut ChannelReader,
         writer: &mut ChannelWriter,
         hello: rc_protocol::control::Hello,
-        observed: Fingerprint,
+        observed: rc_transport::PeerIdentity,
         remote: SocketAddr,
     ) -> anyhow::Result<()> {
         // Checked before authenticating, so an authenticated client is never turned
@@ -257,6 +269,13 @@ impl AgentServer {
             .into());
         };
 
+        // Taken before `hello` is moved into the handshake. Untrusted, like the display
+        // name beside it, and stored only so My Devices can show what kind of machine a
+        // trusted device is.
+        let peer_os = os_family_name(hello.descriptor.os_family).to_owned();
+        // Kept for the history record on the refusal path, where `peer` does not exist.
+        let peer_name = hello.descriptor.display_name.clone();
+
         let peer = match rc_transport::handshake::finish_accept(
             reader,
             writer,
@@ -267,36 +286,17 @@ impl AgentServer {
             self.clock.now_ms(),
             {
                 let server = Arc::clone(self);
-                move |fingerprint, dialed_address, machine_name, unattended_password| async move {
-                    let request = ConnectionRequest {
-                        address: dialed_address,
-                        fingerprint,
-                        machine_name,
-                        unattended_password,
-                    };
-                    let deps = AccessDeps {
-                        settings: &server.settings,
-                        recent: &server.recent,
-                        prompt: server.prompt.as_ref(),
-                        throttle: &server.throttle,
-                        clock: server.clock.as_ref(),
-                        pending_dialog: &server.pending_dialog,
-                    };
-
-                    match authorize_connection(&request, &deps).await {
-                        Ok(Authorization::Granted(permissions)) => {
-                            rc_transport::handshake::HandshakeAuthorization::Granted(permissions)
-                        }
-                        Ok(Authorization::Refused(reason)) => {
-                            rc_transport::handshake::HandshakeAuthorization::Refused(reason.into())
-                        }
-                        Err(err) => {
-                            tracing::error!(%err, "could not decide connection authorization");
-                            rc_transport::handshake::HandshakeAuthorization::Refused(
-                                WireRefusal::Rejected,
-                            )
-                        }
-                    }
+                let peer_os = peer_os.clone();
+                move |identity, dialed_address, machine_name, unattended_password| async move {
+                    server
+                        .decide(ConnectionRequest {
+                            address: dialed_address,
+                            identity,
+                            machine_name,
+                            os_family: peer_os,
+                            unattended_password,
+                        })
+                        .await
                 }
             },
         )
@@ -304,25 +304,8 @@ impl AgentServer {
         {
             Ok(peer) => peer,
             Err(err) => {
-                tracing::warn!(
-                    source = %redact_address(remote),
-                    // The observed fingerprint is not secret and is what an operator
-                    // needs in order to tell a renewal apart from an impostor.
-                    %observed,
-                    %err,
-                    "refusing a connection"
-                );
-                // The refusal has been written and its stream finished. Wait for the
-                // peer to acknowledge by closing, rather than dropping the connection
-                // out from under the frame: a peer that never receives its refusal sees
-                // a lost connection instead, which is retryable, and would reconnect in
-                // a loop against a machine that had already refused it.
-                //
-                // Bounded, because a peer that does not close is not something to wait
-                // on. Two seconds is far longer than a loopback or LAN round trip.
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(2), connection.closed())
-                        .await;
+                self.on_refused(connection, observed, remote, &peer_name, &err)
+                    .await;
                 return Err(err.into());
             }
         };
@@ -338,6 +321,20 @@ impl AgentServer {
         );
 
         record_session_start(&peer, remote);
+
+        let history_id = self
+            .record_history(&rc_storage::NewSessionRecord {
+                session_id: Some(session_id.to_canonical_string()),
+                identity_fingerprint: Some(peer.identity_fingerprint),
+                device_name: peer.display_name.clone(),
+                direction: rc_storage::SessionDirection::Incoming,
+                address: redact_address(remote),
+                started_ms: self.clock.now_ms(),
+                permissions: peer.permissions,
+                outcome: rc_storage::SessionOutcome::Completed,
+                end_reason: None,
+            })
+            .await;
 
         // The permissions this connection was admitted with, re-checked on every
         // request rather than assumed for the life of the session.
@@ -360,7 +357,119 @@ impl AgentServer {
         channel_server.abort();
 
         tracing::info!(%device_id, %session_id, reason = reason_name(reason), "session ended");
+
+        if let Some(id) = history_id
+            && let Err(err) = self
+                .history
+                .finish(
+                    id,
+                    self.clock.now_ms(),
+                    outcome_of(reason),
+                    Some(reason_name(reason)),
+                )
+                .await
+        {
+            tracing::warn!(%err, "could not record how the session ended");
+        }
+
         Ok(())
+    }
+
+    /// Apply the admission rule to one connection.
+    ///
+    /// The rule itself lives in [`crate::access`] and is shared with the desktop
+    /// application, so the two cannot drift into deciding differently. This method
+    /// supplies it with everything it reads and translates its answer into the coarse
+    /// outcome the transport carries to the peer.
+    ///
+    /// A failure to *decide* is a refusal. Anything else would mean a database that had
+    /// gone away could admit a connection nobody approved.
+    async fn decide(&self, request: ConnectionRequest) -> HandshakeAuthorization {
+        let deps = AccessDeps {
+            settings: &self.settings,
+            trust: &self.trust,
+            prompt: self.prompt.as_ref(),
+            throttle: &self.throttle,
+            clock: self.clock.as_ref(),
+            pending_dialog: &self.pending_dialog,
+        };
+
+        match authorize_connection(&request, &deps).await {
+            Ok(Authorization::Granted(permissions)) => HandshakeAuthorization::Granted(permissions),
+            Ok(Authorization::Refused(reason)) => HandshakeAuthorization::Refused(reason.into()),
+            Err(err) => {
+                tracing::error!(%err, "could not decide connection authorization");
+                HandshakeAuthorization::Refused(WireRefusal::Rejected)
+            }
+        }
+    }
+
+    /// Log, record and wind down a connection that was not admitted.
+    ///
+    /// Separate from [`Self::handle_session`] because it is a whole story of its own —
+    /// what the operator is told, what the peer is allowed to observe, and how the
+    /// connection is closed — and because keeping it inline made the admission path
+    /// harder to read than the branch it guards.
+    async fn on_refused(
+        &self,
+        connection: &quinn::Connection,
+        observed: rc_transport::PeerIdentity,
+        remote: SocketAddr,
+        peer_name: &str,
+        err: &TransportError,
+    ) {
+        tracing::warn!(
+            source = %redact_address(remote),
+            // Neither value is secret, and together they are what an operator needs in
+            // order to tell a renewal apart from an impostor: the identity is the same
+            // across a renewal, the certificate is not.
+            identity = %observed.identity_fingerprint,
+            certificate = %observed.certificate_fingerprint,
+            %err,
+            "refusing a connection"
+        );
+
+        // The refusal has been written and its stream finished. Wait for the peer to
+        // acknowledge by closing, rather than dropping the connection out from under the
+        // frame: a peer that never receives its refusal sees a lost connection instead,
+        // which is retryable, and would reconnect in a loop against a machine that had
+        // already refused it.
+        //
+        // Bounded, because a peer that does not close is not something to wait on. Two
+        // seconds is far longer than a loopback or LAN round trip.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), connection.closed()).await;
+
+        // Recorded so the operator can see that someone was turned away. A refusal has
+        // no session id, and a stranger has no trust row, so both travel as `None`
+        // rather than being invented. The name is what the peer called itself, which is
+        // untrusted and displayed as such.
+        self.record_history(&rc_storage::NewSessionRecord {
+            session_id: None,
+            identity_fingerprint: None,
+            device_name: peer_name.to_owned(),
+            direction: rc_storage::SessionDirection::Incoming,
+            address: redact_address(remote),
+            started_ms: self.clock.now_ms(),
+            permissions: PermissionSet::NONE,
+            outcome: rc_storage::SessionOutcome::Refused,
+            end_reason: None,
+        })
+        .await;
+    }
+
+    /// Write a history row, reporting a failure rather than failing the connection.
+    ///
+    /// A session that ran is a fact whether or not it could be written down, and a
+    /// database that has gone away must not turn an admitted session into a refused
+    /// one. The row id comes back so the session can be finished later.
+    async fn record_history(&self, entry: &rc_storage::NewSessionRecord) -> Option<i64> {
+        match self.history.record(entry).await {
+            Ok(id) => Some(id),
+            Err(err) => {
+                tracing::warn!(%err, "could not record a session in the history");
+                None
+            }
+        }
     }
 
     /// Serve control requests until the client disconnects or the session times out.
@@ -691,22 +800,48 @@ async fn read_control_request(
 
 /// Record that a session began.
 ///
-/// Called only after the peer has been admitted, so a refused connection never
-/// appears to have started a session.
+/// Called only after the peer has been admitted, so a refused connection never appears
+/// to have started a session.
 ///
-/// There is no trusted-device table to update in this build — the model it described
-/// (identity anchoring, pairing history) was dropped along with it; see
-/// `crates/storage/migrations/0003_anydesk_model.sql`. What a "last connected" entry
-/// means for the `AnyDesk` model is `RecentRepository::record`, which belongs to
-/// admission, not to this already-authenticated path.
+/// The trusted-device row's "last connected" is written by `authorize_connection`, which
+/// belongs to admission rather than to this already-authenticated path — and which must
+/// write it for an unattended reconnection that never reaches here as a decision at all.
 fn record_session_start(peer: &rc_transport::AuthenticatedPeer, remote: SocketAddr) {
     tracing::info!(
         device_id = %peer.device_id,
+        identity = %peer.identity_fingerprint,
         session_id = %peer.session_id,
         permissions = %permission_names(peer.permissions),
         %remote,
         "session started"
     );
+}
+
+/// The stored form of an operating-system family.
+///
+/// Kept next to its one caller rather than on the protocol type: this is the string the
+/// database and the interface use, and pinning it here means a rename in the protocol
+/// enum cannot silently change what is already stored in a trust row.
+const fn os_family_name(family: rc_protocol::control::OsFamily) -> &'static str {
+    match family {
+        rc_protocol::control::OsFamily::Windows => "windows",
+        rc_protocol::control::OsFamily::Linux => "linux",
+        rc_protocol::control::OsFamily::MacOs => "macos",
+        _ => "unknown",
+    }
+}
+
+/// How a session that ended for `reason` is recorded.
+///
+/// Only a transport failure or a protocol error is a failure; everything else, including
+/// an idle timeout and a host-initiated disconnect, is a session that ran and finished.
+const fn outcome_of(reason: DisconnectReason) -> rc_storage::SessionOutcome {
+    match reason {
+        DisconnectReason::TransportFailure | DisconnectReason::ProtocolError => {
+            rc_storage::SessionOutcome::Failed
+        }
+        _ => rc_storage::SessionOutcome::Completed,
+    }
 }
 
 /// Stable name for a disconnect reason, for logs and audit records.

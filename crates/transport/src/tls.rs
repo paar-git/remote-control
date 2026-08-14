@@ -329,6 +329,32 @@ pub fn peer_certificate_fingerprint(connection: &quinn::Connection) -> Result<Fi
     }
 }
 
+/// The DER of the certificate the peer presented **on this connection**.
+///
+/// The sanctioned source for establishing a [`crate::PeerIdentity`], and subject to
+/// exactly the reasoning in [`peer_certificate_fingerprint`]: read back from the
+/// connection, where QUIC keeps it per-connection and it cannot be raced by a second
+/// handshake arriving at the same endpoint.
+///
+/// # Errors
+/// [`TransportError::IdentityProofRejected`] if the peer presented no certificate, or
+/// presented something other than a single end-entity certificate.
+pub fn peer_certificate_der(connection: &quinn::Connection) -> Result<Vec<u8>> {
+    let identity = connection
+        .peer_identity()
+        .ok_or(TransportError::IdentityProofRejected)?;
+
+    let certificates = identity
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| TransportError::IdentityProofRejected)?;
+
+    // Exactly one, for the same reason `verify_pinned` refuses a chain.
+    match certificates.as_slice() {
+        [end_entity] => Ok(end_entity.as_ref().to_vec()),
+        _ => Err(TransportError::IdentityProofRejected),
+    }
+}
+
 /// The crypto provider used everywhere. `ring`, matching the `quinn` feature set.
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())

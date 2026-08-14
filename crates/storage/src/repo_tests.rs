@@ -32,12 +32,17 @@ async fn the_schema_holds_exactly_the_tables_this_build_knows_about() {
         "host_settings",
         "local_identity",
         "recent_connections",
+        "session_history",
         "transfer_state",
+        "trusted_devices",
     ];
     expected.sort_unstable();
 
     assert_eq!(tables, expected, "got tables: {tables:?}");
 
+    // `trusted_device` (singular) was the old model's table and is still gone.
+    // `trusted_devices` (plural) is this build's, keyed on a device identity, and is
+    // expected above -- the two are different tables answering different questions.
     for gone in [
         "owner_account",
         "owner_accounts",
@@ -45,21 +50,82 @@ async fn the_schema_holds_exactly_the_tables_this_build_knows_about() {
         "audit_event",
         "audit_events",
         "trusted_device",
-        "trusted_devices",
         "session_token",
+        "recent_connections_new",
+        "host_settings_new",
     ] {
         assert!(!tables.contains(&gone.to_string()), "{gone} must be gone");
     }
 }
 
 #[tokio::test]
-async fn a_recent_connection_cannot_carry_permissions_without_a_pin() {
+async fn a_recent_connection_cannot_hold_a_malformed_identity() {
+    // The column is a pin, and a pin that is not a whole fingerprint could never match
+    // anything -- so it is refused at the schema rather than surfacing later as a
+    // device that mysteriously never verifies.
     let database = temp_database().await;
 
     let err = sqlx::query(
         "INSERT INTO recent_connections
-             (address, machine_name, last_connected_ms, pinned_fingerprint, pinned_permissions)
-         VALUES ('10.0.0.1', 'BOX', 1, NULL, 1)",
+             (address, machine_name, last_connected_ms, known_identity)
+         VALUES ('10.0.0.1', 'BOX', 1, 'too-short')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{err}").to_uppercase().contains("CHECK"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_trusted_device_cannot_hold_a_permission_bit_this_build_does_not_know() {
+    // Four permissions occupy bits 1-4. A row carrying bit 5 is not a grant with one
+    // extra permission, it is a value this build cannot interpret, and `from_bits`
+    // refuses it -- so the schema refuses to store one in the first place.
+    let database = temp_database().await;
+
+    let err = sqlx::query(
+        "INSERT INTO trusted_devices
+             (identity_fingerprint, device_id, display_name, os_family, added_ms, permissions)
+         VALUES (?, 'dev', 'Box', 'linux', 1, 16)",
+    )
+    .bind("a".repeat(64))
+    .execute(database.pool())
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{err}").to_uppercase().contains("CHECK"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn unattended_permissions_may_now_carry_the_administer_bit() {
+    // The bound widened from 7 to 15 with the fourth permission. If the rebuild in
+    // migration 0004 had not carried the new CHECK, this write would fail.
+    let database = temp_database().await;
+
+    sqlx::query(
+        "INSERT INTO host_settings (id, machine_name, unattended_phc, unattended_permissions)
+         VALUES (1, 'box', 'not-a-real-phc', 15)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_session_history_row_must_say_which_way_it_went() {
+    let database = temp_database().await;
+
+    let err = sqlx::query(
+        "INSERT INTO session_history
+             (device_name, direction, address, started_ms, outcome)
+         VALUES ('Box', 'sideways', '10.0.0.1:7443', 1, 'completed')",
     )
     .execute(database.pool())
     .await
