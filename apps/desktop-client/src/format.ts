@@ -5,6 +5,26 @@
  * grouping, which the operator relies on to compare two screens — are unit-testable.
  */
 
+/**
+ * A nine-digit display identity, grouped like a phone number.
+ *
+ * Derived from a fingerprint or device-id string so the same machine always shows the
+ * same number. It is for reading out and recognising a machine, not for routing — there
+ * is no directory behind it.
+ */
+export function formatDeviceId(source: string): string {
+  const hex = source.replace(/[^0-9a-fA-F]/g, '');
+  if (hex.length < 8) return '—';
+  const n = Number(BigInt(`0x${hex.slice(0, 12)}`) % 1_000_000_000n);
+  const digits = n.toString().padStart(9, '0');
+  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 9)}`;
+}
+
+/** Strip grouping spaces from a displayed device id. */
+export function compactDeviceId(formatted: string): string {
+  return formatted.replace(/\s+/g, '');
+}
+
 /** Format a fingerprint as uppercase groups of four, matching the Rust display form. */
 export function formatFingerprintGroups(hex: string): string {
   return (hex.toUpperCase().match(/.{1,4}/g) ?? []).join(' ');

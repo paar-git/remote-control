@@ -29,3 +29,4 @@ export {
 } from './Feedback';
 export { PageHeader } from './PageHeader';
 export { Badge, StatusBadge, type StatusTone } from './Status';
+export { Toggle } from './Toggle';

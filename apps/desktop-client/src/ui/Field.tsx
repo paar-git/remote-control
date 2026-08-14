@@ -49,7 +49,7 @@ export function TextField({
 
   return (
     <div className={`flex flex-col gap-1.5 ${className}`}>
-      <label htmlFor={id} className="text-xs font-medium text-(--color-text-secondary)">
+      <label htmlFor={id} className="text-sm font-medium text-(--color-text-secondary)">
         {label}
       </label>
       <div className="flex items-center gap-2">
@@ -69,7 +69,7 @@ export function TextField({
           aria-invalid={invalid || undefined}
           aria-describedby={help !== undefined || invalid ? helpId : undefined}
           className={
-            'h-9 w-full min-w-0 rounded-lg border bg-(--color-page) px-3 text-sm ' +
+            'h-11 w-full min-w-0 rounded-xl border bg-(--color-page) px-3.5 text-[15px] ' +
             'transition-[border-color,background-color] duration-150 ease-(--ease-ui) ' +
             'placeholder:text-(--color-text-secondary) hover:border-(--color-border-hover) ' +
             (invalid ? 'border-(--color-danger) ' : 'border-(--color-border) ') +

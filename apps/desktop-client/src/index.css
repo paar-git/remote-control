@@ -3,74 +3,69 @@
 /*
  * Design tokens.
  *
- * One light theme, matching the product this is modelled on. There is no dark variant
- * and no `data-theme` opt-in: this file previously carried a whole second palette for a
- * theme nothing could select, and a token defined for a theme nobody can reach is dead
- * code.
+ * Two themes, one accent. The accent is a primary blue used for Connect and selected
+ * chrome. Red is reserved for Disconnect, refusals and errors — using it on the main
+ * action made every connect look like a warning.
  *
- * * **Two surfaces.** A pale page, white cards on top of it. Depth comes from the
- *   hairline border and one soft shadow, not from a stack of greys.
- * * **One accent.** Reserved for the primary action and for the current state of a
- *   control. Status colours mean the state they name and are never decorative.
+ * * **Two surfaces.** A page colour, cards sitting on top of it. Depth comes from a
+ *   hairline border and one soft shadow.
+ * * **One accent.** Reserved for the primary action and the current state of a control.
  * * **Soft variants.** Each status colour has a low-alpha companion used as a fill
  *   behind the solid colour, so a badge reads as a state rather than as a button.
  */
 @theme {
-  --color-page: #f5f6f8;
+  --color-page: #f4f6fa;
   --color-card: #ffffff;
-
-  /*
-   * A hover fill distinct from both surfaces. Without it, a control sitting on a card
-   * has no colour to move to — `card` on `card` is not a hover state, it is the
-   * absence of one.
-   */
-  --color-hover: #eef0f3;
-
-  /*
-   * Two border weights, not one. Collapsing them left inputs and rows whose resting
-   * and hover borders were the same value, so every text field in the app silently
-   * lost its affordance. `border` is the resting hairline; `border-hover` is what a
-   * control moves to under the pointer or focus.
-   */
-  --color-border: #e3e5e9;
-  --color-border-hover: #c9cfd8;
-
-  --color-text: #1a1a1a;
-  /* #6B7280 measured 4.47:1 on the page background — just under AA. */
+  --color-sidebar: #eef1f6;
+  --color-hover: #e8ecf2;
+  --color-border: #dfe3ea;
+  --color-border-hover: #c5cbd6;
+  --color-text: #141820;
   --color-text-secondary: #5b6472;
-
-  /*
-   * The accent is darkened from AnyDesk's own red. White on #EF443B is 3.78:1, below
-   * AA for the button label it carries; this reads as the same red and passes at
-   * 4.65:1.
-   */
-  --color-accent: #d93a32;
-  --color-accent-hover: #c0322b;
-  --color-accent-soft: rgb(217 58 50 / 10%);
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-soft: rgb(37 99 235 / 12%);
   --color-accent-text: #ffffff;
-
   --color-success: #1a7333;
   --color-success-soft: rgb(26 115 51 / 12%);
-  /*
-   * Warning is a distinct tone, not an alias for danger. Merging them made "no
-   * computers yet" — a first-run state — render identically to "the database could not
-   * be opened".
-   */
   --color-warning: #8f5706;
   --color-warning-soft: rgb(143 87 6 / 12%);
   --color-danger: #c62828;
   --color-danger-soft: rgb(198 40 40 / 10%);
-
-  --radius-card: 8px;
-  --shadow-card: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 4%);
-
-  /* One motion vocabulary, so nothing invents its own timing. */
+  --radius-card: 16px;
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 5%), 0 8px 24px rgb(16 24 40 / 6%);
   --ease-ui: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+[data-theme='dark'] {
+  --color-page: #101218;
+  --color-card: #181b22;
+  --color-sidebar: #14171e;
+  --color-hover: #22262f;
+  --color-border: #2a303b;
+  --color-border-hover: #3b4250;
+  --color-text: #f2f4f8;
+  --color-text-secondary: #9aa3b2;
+  --color-accent: #3b82f6;
+  --color-accent-hover: #60a5fa;
+  --color-accent-soft: rgb(59 130 246 / 16%);
+  --color-accent-text: #ffffff;
+  --color-success: #3dba63;
+  --color-success-soft: rgb(61 186 99 / 16%);
+  --color-warning: #e0a23a;
+  --color-warning-soft: rgb(224 162 58 / 16%);
+  --color-danger: #f07171;
+  --color-danger-soft: rgb(240 113 113 / 16%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 35%), 0 10px 28px rgb(0 0 0 / 28%);
 }
 
 @layer base {
   :root {
     color-scheme: light;
+  }
+
+  [data-theme='dark'] {
+    color-scheme: dark;
   }
 
   html,
@@ -199,5 +194,30 @@
 
   .animate-toast-in {
     animation: rc-toast-in 180ms var(--ease-ui) both;
+  }
+
+  @keyframes rc-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .animate-spin-slow {
+    animation: rc-spin 700ms linear infinite;
+  }
+
+  @keyframes rc-dot {
+    from {
+      transform: scale(0.6);
+      opacity: 0.4;
+    }
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+
+  .animate-status-dot {
+    animation: rc-dot 180ms var(--ease-ui) both;
   }
 }

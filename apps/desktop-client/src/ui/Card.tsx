@@ -22,10 +22,11 @@ export function Card({
   return (
     <div
       className={
-        'rounded-xl border border-(--color-border) bg-(--color-card) ' +
-        (padded ? 'p-4 ' : '') +
+        'rounded-[var(--radius-card)] border border-(--color-border) bg-(--color-card) ' +
+        'shadow-(--shadow-card) ' +
+        (padded ? 'p-6 ' : '') +
         (interactive
-          ? 'transition-colors duration-150 ease-(--ease-ui) hover:border-(--color-border-hover) hover:bg-(--color-hover) '
+          ? 'transition-[border-color,box-shadow,transform] duration-200 ease-(--ease-ui) hover:border-(--color-border-hover) '
           : '') +
         className
       }
@@ -52,7 +53,7 @@ export function CardHeader({
           <Icon aria-hidden="true" className="size-4" />
         </span>
       )}
-      <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h3>
+      <h3 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">{title}</h3>
       {trailing}
     </div>
   );

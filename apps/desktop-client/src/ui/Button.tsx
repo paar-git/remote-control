@@ -12,7 +12,7 @@ import type { LucideIcon } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 
 export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost' | 'subtle';
-export type ButtonSize = 'sm' | 'md';
+
 
 /**
  * Shared by every variant.
@@ -38,9 +38,12 @@ const VARIANTS: Record<ButtonVariant, string> = {
   subtle: 'bg-(--color-accent-soft) text-(--color-accent) hover:bg-(--color-accent)/25',
 };
 
+export type ButtonSize = 'sm' | 'md' | 'lg';
+
 const SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs',
   md: 'h-8 px-3 text-sm',
+  lg: 'h-11 px-5 text-[15px]',
 };
 
 /** A labelled button with a consistent focus ring and disabled treatment. */

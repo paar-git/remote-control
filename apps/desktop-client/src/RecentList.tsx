@@ -1,18 +1,18 @@
 /**
- * Machines connected to before.
+ * Machines connected to before, as compact device cards.
  *
- * Each row is one button, not a row with a button in it: the whole thing is the target,
- * and clicking anywhere on it connects. The per-row menu is deliberately absent — the
- * two things you can do to an entry (always-allow, forget) live in the settings dialog,
- * so a mis-click in the list cannot change what a machine is permitted to do.
+ * Online/offline is not shown: this product has no presence channel, and a grey dot
+ * pretending a machine is offline would be a lie. Last-connected time is the fact we
+ * actually have.
  */
 
-import { Clock } from 'lucide-react';
+import { Monitor } from 'lucide-react';
 
 import { displayAddress } from './address.js';
 import type { Recent } from './api.js';
+import { DeviceAvatar } from './DeviceAvatar';
 import { formatRelative } from './format.js';
-import { Card, CardHeader, EmptyState } from './ui';
+import { Button, Card } from './ui';
 
 export function RecentList({
   entries,
@@ -20,56 +20,58 @@ export function RecentList({
   busy,
 }: {
   readonly entries: readonly Recent[];
-  /** Given the canonical `host:port` already stored for the entry. */
   readonly onConnect: (address: string) => void;
   readonly busy: boolean;
 }): React.JSX.Element {
   return (
-    <Card>
-      <CardHeader icon={Clock} title="Recent" />
+    <section id="recent-sessions" className="flex flex-col gap-4">
+      <h2 className="text-xl font-semibold tracking-tight">Recent sessions</h2>
 
       {entries.length === 0 ? (
-        <EmptyState
-          title="Nothing yet"
-          body="Machines you connect to will appear here, ready to reconnect in one click."
-        />
+        <div className="flex items-center gap-3 rounded-[var(--radius-card)] border border-dashed border-(--color-border) px-4 py-4">
+          <span className="flex size-10 items-center justify-center rounded-xl bg-(--color-hover) text-(--color-text-secondary)">
+            <Monitor aria-hidden="true" className="size-5" />
+          </span>
+          <div>
+            <p className="text-sm font-medium">No recent devices.</p>
+            <p className="text-sm text-(--color-text-secondary)">
+              Machines you connect to appear here for one-click reconnect.
+            </p>
+          </div>
+        </div>
       ) : (
-        <ul className="flex flex-col gap-1">
-          {entries.map((entry) => (
-            <li key={entry.address}>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  onConnect(entry.address);
-                }}
+        <Card padded={false}>
+          <ul>
+            {entries.map((entry, index) => (
+              <li
+                key={entry.address}
                 className={
-                  'flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left ' +
-                  'transition-colors duration-150 ease-(--ease-ui) ' +
-                  'hover:bg-(--color-hover) disabled:pointer-events-none disabled:opacity-45 ' +
-                  'focus-visible:outline-2 focus-visible:outline-offset-2 ' +
-                  'focus-visible:outline-(--color-accent)'
+                  'animate-fade-in flex items-center gap-3 px-5 py-3.5 ' +
+                  (index > 0 ? 'border-t border-(--color-border) ' : '')
                 }
               >
-                <span className="min-w-0 flex-1">
-                  {/*
-                   * Chosen by the other machine. `untrustedText` in the schema has
-                   * already stripped the control characters and bidi overrides that
-                   * would let it render as a different name.
-                   */}
-                  <span className="block truncate text-sm font-medium">{entry.machineName}</span>
-                  <code className="block truncate font-mono text-xs text-(--color-text-secondary)">
-                    {displayAddress(entry.address)}
-                  </code>
-                </span>
-                <span className="shrink-0 text-xs text-(--color-text-secondary)">
-                  {formatRelative(entry.lastConnectedMs)}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
+                <DeviceAvatar name={entry.machineName} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium">{entry.machineName}</p>
+                  <p className="truncate text-sm text-(--color-text-secondary)">
+                    {displayAddress(entry.address)} · {formatRelative(entry.lastConnectedMs)}
+                  </p>
+                </div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => {
+                    onConnect(entry.address);
+                  }}
+                >
+                  Connect
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </Card>
       )}
-    </Card>
+    </section>
   );
 }

@@ -134,6 +134,7 @@ export default function App(): React.JSX.Element {
               onOpenSettings={() => {
                 setSettingsOpen(true);
               }}
+              connection={connection.state}
             />
           </div>
         </div>

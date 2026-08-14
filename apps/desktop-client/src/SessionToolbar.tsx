@@ -156,11 +156,11 @@ export function SessionToolbar({
         type="button"
         onClick={onDisconnect}
         className={
-          'inline-flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-2.5 py-1.5 ' +
-          'text-xs font-medium text-(--color-accent-text) ' +
+          'inline-flex items-center gap-1.5 rounded-lg bg-(--color-danger) px-2.5 py-1.5 ' +
+          'text-xs font-medium text-white ' +
           'transition-colors duration-150 ease-(--ease-ui) hover:opacity-90 ' +
           'focus-visible:outline-2 focus-visible:outline-offset-2 ' +
-          'focus-visible:outline-(--color-accent)'
+          'focus-visible:outline-(--color-danger)'
         }
       >
         <LogOut aria-hidden="true" className="size-3.5" />

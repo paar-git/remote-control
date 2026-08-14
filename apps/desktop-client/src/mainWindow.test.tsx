@@ -8,6 +8,18 @@ import { MainWindow } from './MainWindow';
 const invoked = vi.mocked(invoke);
 
 /** Backend answers for one render. Anything not listed is an unexpected call. */
+function identity() {
+  return {
+    deviceId: 'dev_1f0c9a2b-3d4e-4f5a-8b6c-7d8e9f0a1b2c',
+    identityFingerprint: 'a'.repeat(64),
+    certificateFingerprint: 'b'.repeat(64),
+    certificateVersion: 1,
+    certificateNotBeforeMs: 1,
+    certificateNotAfterMs: 2,
+    needsRenewal: false,
+  };
+}
+
 function backend(
   overrides: {
     accepting?: boolean;
@@ -16,7 +28,7 @@ function backend(
     connect?: () => unknown;
   } = {},
 ) {
-  invoked.mockImplementation((command: string) => {
+  invoked.mockImplementation((command: string, args?: unknown) => {
     switch (command) {
       case 'host_status':
         return Promise.resolve({
@@ -27,6 +39,28 @@ function backend(
         });
       case 'list_recent':
         return Promise.resolve(overrides.recent ?? []);
+      case 'local_identity':
+        return Promise.resolve(identity());
+      case 'client_info':
+        return Promise.resolve({
+          appVersion: '0.2.0',
+          protocolVersion: { major: 1, minor: 0 },
+          hostname: 'KOREN-PC',
+          osFamily: 'windows',
+          osVersion: '10.0',
+          architecture: 'x86_64',
+          elevated: false,
+          databaseReady: true,
+        });
+      case 'set_accepting': {
+        const accepting = (args as { accepting: boolean }).accepting;
+        return Promise.resolve({
+          accepting,
+          addresses: overrides.addresses ?? ['192.168.1.42:7443'],
+          machineName: 'KOREN-PC',
+          listenPort: 7443,
+        });
+      }
       case 'connect_to_address':
         return Promise.resolve(
           overrides.connect?.() ?? {
@@ -53,7 +87,14 @@ function recentEntry(overrides: Record<string, unknown> = {}) {
 }
 
 function renderWindow() {
-  return render(<MainWindow onConnected={vi.fn()} onToast={vi.fn()} onOpenSettings={vi.fn()} />);
+  return render(
+    <MainWindow
+      onConnected={vi.fn()}
+      onToast={vi.fn()}
+      onOpenSettings={vi.fn()}
+      connection={{ state: 'offline' }}
+    />,
+  );
 }
 
 describe('MainWindow', () => {
@@ -61,39 +102,48 @@ describe('MainWindow', () => {
     invoked.mockReset();
   });
 
-  it('renders each address this machine can be reached on', async () => {
+  it('hides raw addresses until advanced network info is opened', async () => {
     backend({ addresses: ['192.168.1.42:7443', '10.0.0.5:7443'] });
+    const user = userEvent.setup();
     renderWindow();
 
+    expect(await screen.findByText('KOREN-PC')).toBeInTheDocument();
+    expect(screen.queryByText('192.168.1.42')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /advanced network info/i }));
     expect(await screen.findByText('192.168.1.42')).toBeInTheDocument();
     expect(screen.getByText('10.0.0.5')).toBeInTheDocument();
-    // One copy control per address, so a user can hand either one over.
-    expect(screen.getAllByRole('button', { name: /copy/i })).toHaveLength(2);
   });
 
-  it('says it is accepting connections when it is', async () => {
+  it('says it is ready when incoming connections are allowed', async () => {
     backend({ accepting: true });
     renderWindow();
 
-    expect(await screen.findByText(/^Accepting connections$/)).toBeInTheDocument();
+    expect(await screen.findByText(/^Ready for connections$/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: /allow incoming connections/i })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
   });
 
-  it('says it is not accepting connections when it is not', async () => {
-    // The dangerous direction to get wrong: someone who believes they are reachable
-    // and is not will wait for a connection that can never arrive.
+  it('says it is not accepting when incoming connections are off', async () => {
     backend({ accepting: false });
     renderWindow();
 
     expect(await screen.findByText(/^Not accepting connections$/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: /allow incoming connections/i })).toHaveAttribute(
+      'aria-checked',
+      'false',
+    );
   });
 
   it('shows nothing rather than a placeholder when no address could be determined', async () => {
-    // A machine with no network gets an honest empty state, never a fake address.
     backend({ addresses: [] });
+    const user = userEvent.setup();
     renderWindow();
 
+    await user.click(await screen.findByRole('button', { name: /advanced network info/i }));
     expect(await screen.findByText(/no network address/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /copy/i })).not.toBeInTheDocument();
   });
 
   it('reports an invalid address under the field and keeps what was typed', async () => {
@@ -102,7 +152,7 @@ describe('MainWindow', () => {
     const user = userEvent.setup();
     renderWindow();
 
-    const field = await screen.findByLabelText(/address/i);
+    const field = await screen.findByLabelText(/device id, hostname, or ip/i);
     await user.type(field, 'https://192.168.1.77');
     await user.click(screen.getByRole('button', { name: /^connect$/i }));
 
@@ -116,7 +166,7 @@ describe('MainWindow', () => {
     const user = userEvent.setup();
     renderWindow();
 
-    const field = await screen.findByLabelText(/address/i);
+    const field = await screen.findByLabelText(/device id, hostname, or ip/i);
     // Typed without a port and with stray whitespace; the backend must receive neither.
     await user.type(field, '  192.168.1.77  ');
     await user.click(screen.getByRole('button', { name: /^connect$/i }));
@@ -136,17 +186,15 @@ describe('MainWindow', () => {
     backend({ recent: [] });
     renderWindow();
 
-    expect(
-      await screen.findByText(/machines you connect to will appear here/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/no recent devices/i)).toBeInTheDocument();
   });
 
   it('shows a recent machine with its name, address and when it was last reached', async () => {
     backend({ recent: [recentEntry()] });
     renderWindow();
 
-    expect(await screen.findByText('WORK-LAPTOP')).toBeInTheDocument();
-    expect(screen.getByText('192.168.1.77')).toBeInTheDocument();
+    expect((await screen.findAllByText('WORK-LAPTOP')).length).toBeGreaterThan(0);
+    expect(screen.getByText(/192\.168\.1\.77/)).toBeInTheDocument();
     expect(screen.getByText(/ago$/)).toBeInTheDocument();
   });
 
@@ -155,7 +203,7 @@ describe('MainWindow', () => {
     const user = userEvent.setup();
     renderWindow();
 
-    await user.click(await screen.findByRole('button', { name: /WORK-LAPTOP/ }));
+    await user.click((await screen.findAllByRole('button', { name: 'WORK-LAPTOP' }))[0]!);
 
     await waitFor(() => {
       expect(invoked).toHaveBeenCalledWith('connect_to_address', {
@@ -171,7 +219,7 @@ describe('MainWindow', () => {
     backend({ recent: [recentEntry({ machineName: 'WORK‮POTAL' })] });
     renderWindow();
 
-    expect(await screen.findByText('WORKPOTAL')).toBeInTheDocument();
+    expect((await screen.findAllByText('WORKPOTAL')).length).toBeGreaterThan(0);
   });
 
   it('surfaces a refusal rather than leaving the button spinning', async () => {
@@ -183,7 +231,7 @@ describe('MainWindow', () => {
     const user = userEvent.setup();
     renderWindow();
 
-    const field = await screen.findByLabelText(/address/i);
+    const field = await screen.findByLabelText(/device id, hostname, or ip/i);
     await user.type(field, '192.168.1.77');
     await user.click(screen.getByRole('button', { name: /^connect$/i }));
 
