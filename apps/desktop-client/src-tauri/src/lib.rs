@@ -18,6 +18,7 @@ mod host;
 mod host_commands;
 mod host_events;
 mod session_commands;
+mod trust_commands;
 mod update_commands;
 
 use std::sync::Arc;
@@ -308,10 +309,19 @@ pub fn run() {
             host_commands::answer_accept_request,
             host_commands::dismiss_accept_request,
             host_commands::list_recent,
-            host_commands::set_always_allow,
             host_commands::remove_recent,
             host_commands::host_settings,
             host_commands::set_unattended_password,
+            trust_commands::list_trusted_devices,
+            trust_commands::set_device_permissions,
+            trust_commands::set_device_unattended,
+            trust_commands::set_device_suspended,
+            trust_commands::revoke_device,
+            trust_commands::probe_device,
+            trust_commands::list_session_history,
+            trust_commands::inbound_sessions,
+            trust_commands::disconnect_inbound,
+            trust_commands::emergency_disconnect,
             connect_commands::connect_to_address,
             connect_commands::disconnect_from_server,
             connect_commands::connection_state,

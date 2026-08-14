@@ -43,12 +43,11 @@
 //! Holding an `AppHandle` in a field the tests construct is enough to keep that code
 //! reachable and drag it in. Behind a trait object, it stays out of the test binary.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rc_host_agent::{AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest};
-use rc_security::{Fingerprint, PermissionSet};
+use rc_security::PermissionSet;
 use serde::Serialize;
 use tokio::sync::{Mutex, oneshot};
 
@@ -80,10 +79,18 @@ pub struct AcceptRequestDto {
     pub request_id: String,
     /// The address the connection came from.
     pub address: String,
-    /// The peer's certificate fingerprint, as lowercase hex.
-    pub fingerprint: String,
+    /// The identity the peer proved, as lowercase hex. Shown so a human can compare it
+    /// against what the other machine displays.
+    pub identity_fingerprint: String,
+    /// The device id derived from that identity.
+    pub device_id: String,
     /// The name the peer reported. Untrusted; the interface sanitises it again.
     pub machine_name: String,
+    /// The operating system the peer reported. Untrusted.
+    pub os_family: String,
+    /// Whether this device is already trusted. It is being asked anyway, which is what
+    /// trust without unattended access means.
+    pub trusted: bool,
 }
 
 impl From<&AcceptRequest> for AcceptRequestDto {
@@ -91,8 +98,11 @@ impl From<&AcceptRequest> for AcceptRequestDto {
         Self {
             request_id: request.request_id.clone(),
             address: request.address.clone(),
-            fingerprint: request.fingerprint.to_hex(),
+            identity_fingerprint: request.identity_fingerprint.to_hex(),
+            device_id: request.device_id.clone(),
             machine_name: request.machine_name.clone(),
+            os_family: request.os_family.clone(),
+            trusted: request.trusted,
         }
     }
 }
@@ -305,14 +315,13 @@ pub struct HostRuntime {
     prompt: Arc<TauriPrompt>,
     /// Cancels the running listener. `None` when nothing is listening.
     listener: Mutex<Option<ListenerHandle>>,
-    /// Fingerprints seen at the door, keyed by the address that was dialled.
+    /// The live sessions of the running listener, if one is running.
     ///
-    /// Pinning a machine needs an identity to pin, and only a connection supplies one.
-    /// This remembers what the last connection from each address presented, so "always
-    /// allow" in the recent list has something real to pin rather than pinning nothing.
-    /// In memory only: a pin the user actually made is in the database, and this is
-    /// merely what would be pinned next.
-    seen: Mutex<HashMap<String, Fingerprint>>,
+    /// Borrowed from the agent rather than kept separately: a second list of who is
+    /// connected is a second answer that can disagree with the first, and the one thing
+    /// this display must never do is say nobody is controlling the machine while
+    /// somebody is.
+    sessions: Mutex<Option<Arc<rc_host_agent::sessions::SessionRegistry>>>,
 }
 
 /// A running listener and the switch that stops it.
@@ -329,7 +338,7 @@ impl HostRuntime {
         Self {
             prompt,
             listener: Mutex::new(None),
-            seen: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(None),
         }
     }
 
@@ -349,17 +358,31 @@ impl HostRuntime {
         self.listener.lock().await.as_ref().map(|l| l.port)
     }
 
-    /// Remember what a peer at `address` presented, so it can be pinned later.
-    pub async fn remember_seen(&self, address: &str, fingerprint: Fingerprint) {
-        self.seen
+    /// Sessions currently controlling this machine.
+    ///
+    /// Empty when nothing is listening, which is the truth rather than a placeholder:
+    /// a machine that is not accepting cannot be being controlled.
+    pub async fn inbound_sessions(&self) -> Vec<rc_host_agent::sessions::LiveSession> {
+        self.sessions
             .lock()
             .await
-            .insert(address.to_owned(), fingerprint);
+            .as_ref()
+            .map(|registry| registry.list())
+            .unwrap_or_default()
     }
 
-    /// What the last connection from `address` presented, if this run has seen one.
-    pub async fn seen_fingerprint(&self, address: &str) -> Option<Fingerprint> {
-        self.seen.lock().await.get(address).copied()
+    /// End one session controlling this machine.
+    ///
+    /// Reports whether it was there to end rather than always succeeding.
+    pub async fn disconnect_inbound(&self, session_id: rc_protocol::SessionId) -> bool {
+        let registry = self.sessions.lock().await.clone();
+        registry.is_some_and(|registry| registry.end(session_id))
+    }
+
+    /// End every session controlling this machine, returning how many were ended.
+    pub async fn disconnect_all_inbound(&self) -> usize {
+        let registry = self.sessions.lock().await.clone();
+        registry.map_or(0, |registry| registry.end_all())
     }
 
     /// Stop the listener, if one is running.
@@ -367,6 +390,10 @@ impl HostRuntime {
     /// Waits for it to finish so a subsequent start cannot race the old one for the
     /// port and report a bind failure that is really just a slow shutdown.
     pub async fn stop(&self) {
+        // Cleared first: a stopped listener has no sessions, and reporting the last
+        // ones it had would be a display of connections that no longer exist.
+        self.sessions.lock().await.take();
+
         let handle = self.listener.lock().await.take();
         if let Some(handle) = handle {
             // A send failure means the task has already ended, which is the state being
@@ -405,6 +432,7 @@ impl HostRuntime {
 
         let (shutdown, on_shutdown) = oneshot::channel();
         let ready = server.listener_ready();
+        *self.sessions.lock().await = Some(server.sessions());
 
         let task = tokio::spawn(async move {
             if let Err(err) = server
@@ -465,8 +493,8 @@ pub fn permission_names(set: PermissionSet) -> Vec<String> {
 mod tests {
     use std::time::Duration;
 
-    use rc_host_agent::{AcceptDecision, AcceptPrompt};
-    use rc_security::{Fingerprint, Permission, PermissionSet};
+    use rc_host_agent::{AcceptDecision, AcceptPrompt, TrustChoice};
+    use rc_security::{Permission, PermissionSet};
 
     use super::*;
 
@@ -474,8 +502,11 @@ mod tests {
         AcceptRequest {
             request_id: "r1".to_owned(),
             address: "192.168.1.77:7443".to_owned(),
-            fingerprint: Fingerprint::from_bytes([7u8; 32]),
+            identity_fingerprint: rc_security::Fingerprint::from_bytes([7u8; 32]),
+            device_id: "dev-test".to_owned(),
             machine_name: "WORK-LAPTOP".to_owned(),
+            os_family: "windows".to_owned(),
+            trusted: false,
         }
     }
 
@@ -509,7 +540,13 @@ mod tests {
         assert!(prompt.pending().await.is_none(), "the slot must be free");
         assert!(
             !prompt
-                .answer("r1", AcceptDecision::Accept(PermissionSet::ALL))
+                .answer(
+                    "r1",
+                    AcceptDecision::Accept {
+                        permissions: PermissionSet::ALL,
+                        trust: TrustChoice::Once
+                    }
+                )
                 .await,
             "a late answer to a timed-out request must not be delivered"
         );
@@ -531,10 +568,26 @@ mod tests {
         while prompt.pending().await.is_none() {
             tokio::task::yield_now().await;
         }
-        assert!(prompt.answer("r1", AcceptDecision::Accept(granted)).await);
+        assert!(
+            prompt
+                .answer(
+                    "r1",
+                    AcceptDecision::Accept {
+                        permissions: granted,
+                        trust: TrustChoice::Once
+                    }
+                )
+                .await
+        );
 
         let answer = asking.await.unwrap();
-        assert_eq!(answer.decision, AcceptDecision::Accept(granted));
+        assert_eq!(
+            answer.decision,
+            AcceptDecision::Accept {
+                permissions: granted,
+                trust: TrustChoice::Once
+            }
+        );
         assert_eq!(answer.request_id, "r1");
     }
 
@@ -555,7 +608,13 @@ mod tests {
 
         assert!(
             !prompt
-                .answer("stale", AcceptDecision::Accept(PermissionSet::ALL))
+                .answer(
+                    "stale",
+                    AcceptDecision::Accept {
+                        permissions: PermissionSet::ALL,
+                        trust: TrustChoice::Once
+                    }
+                )
                 .await,
             "an answer to another request must be refused"
         );
@@ -609,20 +668,28 @@ mod tests {
 
         let dto = prompt.pending().await.unwrap();
         assert_eq!(
-            dto.fingerprint.len(),
+            dto.identity_fingerprint.len(),
             64,
-            "the fingerprint reaches the UI whole"
+            "the identity reaches the UI whole -- it is compared by eye, so a              truncated one would be compared against nothing"
         );
         assert_eq!(dto.machine_name, "WORK-LAPTOP");
 
         let json = serde_json::to_value(&dto).unwrap();
-        for key in ["requestId", "address", "fingerprint", "machineName"] {
+        for key in [
+            "requestId",
+            "address",
+            "identityFingerprint",
+            "deviceId",
+            "machineName",
+            "osFamily",
+            "trusted",
+        ] {
             assert!(json.get(key).is_some(), "missing key {key}");
         }
         assert_eq!(
             json.as_object().unwrap().len(),
-            4,
-            "nothing beyond those four fields may cross the boundary, got {json}"
+            7,
+            "nothing beyond those seven fields may cross the boundary, got {json}"
         );
 
         asking.abort();
@@ -661,26 +728,5 @@ mod tests {
         // Stopping something that is not running is not an error: the caller wanted it
         // stopped and it already is.
         runtime.stop().await;
-    }
-
-    #[tokio::test]
-    async fn a_fingerprint_seen_at_the_door_is_remembered_for_pinning() {
-        let runtime = HostRuntime::new(TauriPrompt::for_tests());
-        let fingerprint = Fingerprint::from_bytes([3u8; 32]);
-
-        assert_eq!(runtime.seen_fingerprint("192.168.1.77:7443").await, None);
-        runtime
-            .remember_seen("192.168.1.77:7443", fingerprint)
-            .await;
-
-        assert_eq!(
-            runtime.seen_fingerprint("192.168.1.77:7443").await,
-            Some(fingerprint)
-        );
-        assert_eq!(
-            runtime.seen_fingerprint("192.168.1.78:7443").await,
-            None,
-            "one address's identity must not answer for another's"
-        );
     }
 }

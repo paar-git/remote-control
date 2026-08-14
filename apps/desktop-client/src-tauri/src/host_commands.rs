@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use rc_host_agent::AcceptDecision;
+use rc_host_agent::{AcceptDecision, TrustChoice};
 use rc_security::{HashingPolicy, OsRandom, PasswordCredential, PermissionSet};
 use serde::Serialize;
 
@@ -73,9 +73,9 @@ pub struct RecentDto {
     /// When a connection to it was last recorded.
     pub last_connected_ms: i64,
     /// Whether a pinned identity lets it in without asking.
-    pub always_allow: bool,
-    /// What an always-allow connection receives. Empty unless `always_allow`.
-    pub pinned_permissions: Vec<String>,
+    /// The identity that answered here, once one has. Compared on every later
+    /// connection; a mismatch is reported rather than silently connected to.
+    pub known_identity: Option<String>,
 }
 
 /// The database, or a refusal the user can act on.
@@ -216,13 +216,19 @@ pub async fn pending_accept_request(
 /// refusal, in one place that every door funnels through; deciding it a second time
 /// here would be a second rule that could disagree with that one.
 ///
+/// `trust` says how much of the answer outlives the connection. Persisting it is the
+/// decision layer's job, not this command's: writing the trust row here would mean a
+/// second place that could remember a device the rule had actually refused.
+///
 /// # Errors
-/// [`CommandError`] if `granted` names a permission this build does not know.
+/// [`CommandError`] if `granted` names a permission this build does not know, or if
+/// `trust` is not one of the three choices.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub async fn answer_accept_request(
     request_id: String,
     granted: Vec<String>,
+    trust: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<()> {
     let permissions = permissions_from_names(&granted).ok_or_else(|| {
@@ -232,48 +238,35 @@ pub async fn answer_accept_request(
         )
     })?;
 
-    // Read before answering: answering frees the slot, and the address is needed to
-    // remember what this peer presented.
-    let pending = state.host_runtime.prompt().pending().await;
+    let trust = trust_choice_from_name(&trust).ok_or_else(|| {
+        CommandError::new(
+            "unknown_trust_choice",
+            "That is not a trust choice this version understands.",
+        )
+    })?;
 
-    let delivered = state
+    state
         .host_runtime
         .prompt()
-        .answer(&request_id, AcceptDecision::Accept(permissions))
+        .answer(&request_id, AcceptDecision::Accept { permissions, trust })
         .await;
 
-    if delivered
-        && !permissions.is_empty()
-        && let Some(pending) = pending
-        && pending.request_id == request_id
-        && let Ok(fingerprint) = pending.fingerprint.parse::<rc_security::Fingerprint>()
-    {
-        // Remembered so "always allow" in the recent list has a real identity to pin.
-        // Only on an accept: refusing a machine is not a reason to keep its identity
-        // ready to be trusted.
-        state
-            .host_runtime
-            .remember_seen(&pending.address, fingerprint)
-            .await;
-
-        if let Ok(db) = database(&state) {
-            let recent = rc_storage::RecentRepository::new(db);
-            if let Err(err) = recent
-                .record(
-                    &pending.address,
-                    &pending.machine_name,
-                    state.clock.now_ms(),
-                )
-                .await
-            {
-                // The connection is already authorised; failing to write the history
-                // entry must not undo that.
-                tracing::warn!(%err, "could not record an accepted connection");
-            }
-        }
-    }
-
     Ok(())
+}
+
+/// The wire name of a trust choice, as the interface sends it.
+///
+/// A closed set: an unrecognised value is refused rather than falling back to the most
+/// permissive -- or, worse, to the most permissive-looking. `remember_unattended` is
+/// the only value that grants access without a human, and it must never be reachable by
+/// a typo.
+fn trust_choice_from_name(name: &str) -> Option<TrustChoice> {
+    match name {
+        "once" => Some(TrustChoice::Once),
+        "remember" => Some(TrustChoice::Remember),
+        "remember_unattended" => Some(TrustChoice::RememberUnattended),
+        _ => None,
+    }
 }
 
 /// Dismiss a pending accept request.
@@ -317,67 +310,16 @@ pub async fn list_recent(state: tauri::State<'_, Arc<AppState>>) -> CommandResul
             address: entry.address,
             machine_name: entry.machine_name,
             last_connected_ms: entry.last_connected_ms,
-            always_allow: entry.pinned_fingerprint.is_some(),
-            pinned_permissions: permission_names(entry.pinned_permissions),
+            known_identity: entry.known_identity.map(|identity| identity.to_hex()),
         })
         .collect())
 }
 
-/// Pin or unpin a machine's identity.
+/// Forget a machine from the dial history.
 ///
-/// Turning this on pins the identity the machine presented when it last connected. If
-/// this run has not seen it connect there is nothing to pin, and that is an error
-/// rather than a pin of nothing — an "always allow" entry with no identity behind it
-/// would either let anyone in under that address or silently do nothing, and both are
-/// worse than saying so.
-///
-/// Turning it off always works, including for an entry whose identity is not known
-/// here: withdrawing trust must never be the operation that fails.
-///
-/// # Errors
-/// [`CommandError`] if the database is unavailable, if the address has no recorded
-/// connection, or if turning it on with no identity to pin.
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command]
-pub async fn set_always_allow(
-    address: String,
-    always: bool,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> CommandResult<()> {
-    let recent = rc_storage::RecentRepository::new(database(&state)?);
-
-    let (fingerprint, permissions) = if always {
-        let fingerprint = state
-            .host_runtime
-            .seen_fingerprint(&address)
-            .await
-            .ok_or_else(|| {
-                CommandError::host(
-                    "Let that machine connect once in this session before allowing it \
-                     automatically — there is no identity to remember yet.",
-                )
-            })?;
-        // Everything, matching the Accept dialog's default. Narrowing what an
-        // always-allow connection receives is the settings dialog's job, so there is
-        // one place that decides it rather than two.
-        (Some(fingerprint), PermissionSet::ALL)
-    } else {
-        (None, PermissionSet::NONE)
-    };
-
-    recent
-        .set_always_allow(&address, fingerprint, permissions)
-        .await
-        .map_err(|err| match err {
-            rc_storage::StorageError::NotFound => CommandError::new(
-                "not_found",
-                "That machine is not in the list any more. Refresh and try again.",
-            ),
-            other => storage_failed(&other),
-        })
-}
-
-/// Forget a machine, pin included.
+/// This is the *outgoing* list. It does not revoke anything: incoming trust lives in
+/// My Devices, keyed on a device identity, and is revoked there. Removing an address
+/// here forgets where this machine dialled, nothing more.
 ///
 /// # Errors
 /// [`CommandError`] if the local database is not available.
@@ -547,17 +489,10 @@ mod tests {
             address: "192.168.1.77:7443".to_owned(),
             machine_name: "WORK-LAPTOP".to_owned(),
             last_connected_ms: 1,
-            always_allow: true,
-            pinned_permissions: vec!["control_input".to_owned()],
+            known_identity: Some("a".repeat(64)),
         })
         .unwrap();
-        for key in [
-            "address",
-            "machineName",
-            "lastConnectedMs",
-            "alwaysAllow",
-            "pinnedPermissions",
-        ] {
+        for key in ["address", "machineName", "lastConnectedMs", "knownIdentity"] {
             assert!(recent.get(key).is_some(), "missing key {key}");
         }
     }

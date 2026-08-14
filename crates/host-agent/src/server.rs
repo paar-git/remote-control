@@ -317,6 +317,8 @@ impl AgentServer {
         slot.activate(
             session_id,
             device_id,
+            peer.identity_fingerprint,
+            peer.display_name.clone(),
             peer.permissions,
             remote,
             self.clock.now_ms(),
@@ -352,9 +354,17 @@ impl AgentServer {
         let channel_server =
             self.spawn_channel_server(connection, session, device_id, session_id, subscribed);
 
-        let reason = self
-            .run_session(connection, reader, writer, &slot, &session, &subscription)
-            .await;
+        // Selected against the operator's Disconnect, so ending a session closes the
+        // connection rather than only clearing it from a list. `HostTerminated` is not
+        // eligible for automatic reconnection, so the peer does not immediately come
+        // back — which is what someone pressing Disconnect means.
+        let reason = tokio::select! {
+            reason = self.run_session(connection, reader, writer, &slot, &session, &subscription) => reason,
+            () = slot.ended() => {
+                tracing::info!(%session_id, "the operator ended this session");
+                DisconnectReason::HostTerminated
+            }
+        };
 
         channel_server.abort();
 

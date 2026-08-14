@@ -234,6 +234,8 @@ mod tests {
         slot.activate(
             rc_protocol::SessionId::generate(),
             rc_protocol::DeviceId::generate(),
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
             rc_security::PermissionSet::ALL,
             "10.0.0.2:5000".parse().unwrap(),
             1,
