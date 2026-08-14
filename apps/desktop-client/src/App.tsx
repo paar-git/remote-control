@@ -5,34 +5,36 @@
  * can be reached at all, which is a real condition — the webview can load without its
  * Tauri host ever responding — not a placeholder for a deleted owner account.
  *
- * # Two states, and only two
- *
- * Out of session the window is {@link MainWindow}: two cards and a recent list. Inside
- * a session it becomes the remote machine — {@link SessionScreen} replaces the entire
+ * Out of session the window is four categories inside {@link AppShell}. Inside a
+ * session it becomes the remote machine — {@link SessionScreen} replaces the entire
  * frame. That is the design: once you are connected, the interface gets out of the way.
  *
- * `inSession` switches between them and is never set unless the backend reports a live
- * connection. A session that ends, deliberately or not, drops the window back to the
- * main one, because the backend's state is the authority and not this flag.
- *
- * # What lives here
- *
- * Only what more than one state needs and what must agree across them: the live
- * connection, the pending update, the toast bar, and the accept dialog. The accept
- * dialog in particular belongs here rather than in `MainWindow` — a connection request
- * arrives whether or not you are looking at the main window, and it must be answerable
- * from inside a session too.
+ * The accept dialog belongs here rather than in a page — a connection request arrives
+ * whether or not you are looking at the home page, and it must be answerable from
+ * inside a session too.
  */
 
 import { AlertTriangle, MonitorCog } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { AcceptDialog } from './AcceptDialog';
-import { getClientInfo, isConnected } from './api.js';
+import { AppShell } from './AppShell';
+import {
+  disconnectInbound,
+  emergencyDisconnect,
+  getClientInfo,
+  isConnected,
+  listInboundSessions,
+  type InboundSession,
+} from './api.js';
+import { InboundSessionBanner } from './InboundSessionBanner';
 import { isTauriAvailable } from './ipc.js';
-import { MainWindow } from './MainWindow';
+import { MyDevicesPage } from './MyDevicesPage';
+import { type View } from './navigation.js';
+import { RemoteControlPage } from './RemoteControlPage';
 import { SessionScreen } from './SessionScreen';
-import { SettingsDialog } from './SettingsDialog';
+import { SessionsPage } from './SessionsPage';
+import { SettingsPage } from './SettingsPage';
 import { useConnectionState } from './useConnection.js';
 import { isReadyToInstall, pendingUpdateVersion } from './updates.js';
 import { useUpdateWatcher } from './useUpdateWatcher.js';
@@ -47,12 +49,11 @@ export default function App(): React.JSX.Element {
   const [gate, setGate] = useState<Gate>({ status: 'loading' });
   const [toast, setToast] = useState<Toast | null>(null);
   const [inSession, setInSession] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [view, setView] = useState<View>('remote-control');
+  const [inbound, setInbound] = useState<readonly InboundSession[]>([]);
 
   const ready = gate.status === 'ready';
 
-  // Only poll once the backend is known reachable; before that every call would just
-  // fail the same way the reachability probe already did.
   const updates = useUpdateWatcher(ready);
   const pendingVersion = pendingUpdateVersion(updates.status);
   const connection = useConnectionState(ready);
@@ -70,8 +71,6 @@ export default function App(): React.JSX.Element {
     }
 
     let cancelled = false;
-    // `client_info` is a cheap, side-effect-free call — it exists to answer this
-    // question, not because its value is needed here.
     getClientInfo()
       .then(() => {
         if (!cancelled) setGate({ status: 'ready' });
@@ -89,28 +88,78 @@ export default function App(): React.JSX.Element {
     };
   }, []);
 
-  // A session that ends — deliberately or not — must not leave the window pretending to
-  // be a remote machine. The backend's state is the authority.
   useEffect(() => {
     if (!live) setInSession(false);
   }, [live]);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    const poll = (): void => {
+      listInboundSessions()
+        .then((sessions) => {
+          if (!cancelled) setInbound(sessions);
+        })
+        .catch(() => {
+          if (!cancelled) setInbound([]);
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [ready]);
 
   const dismissToast = useCallback(() => {
     setToast(null);
   }, []);
 
-  const closeSettings = useCallback(() => {
-    setSettingsOpen(false);
+  const onDisconnectInbound = useCallback((sessionId: string) => {
+    disconnectInbound(sessionId).catch((error: unknown) => {
+      setToast({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'Could not disconnect that session.',
+      });
+    });
+  }, []);
+
+  const onEmergency = useCallback(() => {
+    emergencyDisconnect().catch((error: unknown) => {
+      setToast({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'Emergency disconnect failed.',
+      });
+    });
   }, []);
 
   if (gate.status === 'loading') return <Splash />;
 
   if (gate.status === 'unavailable') return <BackendUnavailable message={gate.message} />;
 
+  const banner = (
+    <>
+      {pendingVersion !== null && (
+        <UpdateBanner
+          version={pendingVersion}
+          ready={isReadyToInstall(updates.status)}
+          onOpenSettings={() => {
+            setView('settings');
+          }}
+        />
+      )}
+      <InboundSessionBanner
+        sessions={inbound}
+        onDisconnect={onDisconnectInbound}
+        onEmergency={onEmergency}
+      />
+    </>
+  );
+
   return (
     <>
       {inSession && live ? (
-        // The session owns the whole window: no title bar, no cards over it.
         <SessionScreen
           connection={connection.state}
           deviceName={null}
@@ -121,40 +170,46 @@ export default function App(): React.JSX.Element {
           }}
         />
       ) : (
-        <div className="flex h-full flex-col">
-          {pendingVersion !== null && (
-            <UpdateBanner version={pendingVersion} ready={isReadyToInstall(updates.status)} />
-          )}
-          <div className="min-h-0 flex-1">
-            <MainWindow
+        <AppShell view={view} onNavigate={setView} banner={banner}>
+          {view === 'remote-control' && (
+            <RemoteControlPage
+              connection={connection.state}
               onConnected={() => {
                 setInSession(true);
               }}
               onToast={setToast}
-              onOpenSettings={() => {
-                setSettingsOpen(true);
+              onViewAllDevices={() => {
+                setView('my-devices');
               }}
-              connection={connection.state}
             />
-          </div>
-        </div>
+          )}
+          {view === 'my-devices' && (
+            <MyDevicesPage
+              onConnect={() => {
+                setInSession(true);
+              }}
+              onToast={setToast}
+            />
+          )}
+          {view === 'sessions' && <SessionsPage onToast={setToast} />}
+          {view === 'settings' && (
+            <SettingsPage
+              onToast={setToast}
+              onViewDevices={() => {
+                setView('my-devices');
+              }}
+            />
+          )}
+        </AppShell>
       )}
 
-      {/*
-       * Outside the two states on purpose. A connection request arrives whether or not
-       * anyone is looking at the main window, and it has to be answerable from inside a
-       * session as well.
-       */}
       <AcceptDialog onToast={setToast} />
-
-      {settingsOpen && <SettingsDialog onClose={closeSettings} onToast={setToast} />}
 
       <ToastBar toast={toast} onDismiss={dismissToast} />
     </>
   );
 }
 
-/** The first frame, before the backend has answered. */
 function Splash(): React.JSX.Element {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 bg-(--color-page)">
@@ -168,7 +223,6 @@ function Splash(): React.JSX.Element {
   );
 }
 
-/** The one failure the root itself has to render: no backend at all. */
 function BackendUnavailable({ message }: { readonly message: string }): React.JSX.Element {
   return (
     <div className="flex h-full items-center justify-center bg-(--color-page) p-6">
@@ -188,18 +242,14 @@ function BackendUnavailable({ message }: { readonly message: string }): React.JS
   );
 }
 
-/**
- * A quiet strip under the title bar while a newer release is waiting.
- *
- * Installing is a settings action, so this says what is true and points there rather
- * than offering a second place to do it.
- */
 function UpdateBanner({
   version,
   ready,
+  onOpenSettings,
 }: {
   readonly version: string;
   readonly ready: boolean;
+  readonly onOpenSettings: () => void;
 }): React.JSX.Element {
   return (
     <div
@@ -213,6 +263,13 @@ function UpdateBanner({
           {ready ? 'It is verified and ready to install.' : 'Open settings to review it.'}
         </span>
       </p>
+      <button
+        type="button"
+        className="text-sm font-medium text-(--color-accent) hover:underline"
+        onClick={onOpenSettings}
+      >
+        Settings
+      </button>
     </div>
   );
 }

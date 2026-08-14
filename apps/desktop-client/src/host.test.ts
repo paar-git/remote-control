@@ -32,14 +32,17 @@ describe('host DTO schemas', () => {
     ).toThrow();
   });
 
-  it('accepts an accept request and keeps the fingerprint intact', () => {
+  it('accepts an accept request and keeps the identity intact', () => {
     const parsed = acceptRequestSchema.parse({
       requestId: 'r1',
       address: '192.168.1.77:7443',
-      fingerprint: 'a'.repeat(64),
+      identityFingerprint: 'a'.repeat(64),
+      deviceId: 'dev-1',
       machineName: 'WORK-LAPTOP',
+      osFamily: 'windows',
+      trusted: false,
     });
-    expect(parsed.fingerprint).toHaveLength(64);
+    expect(parsed.identityFingerprint).toHaveLength(64);
   });
 
   it('strips control characters and bidi overrides from an untrusted machine name', () => {
@@ -48,34 +51,34 @@ describe('host DTO schemas', () => {
     const parsed = acceptRequestSchema.parse({
       requestId: 'r1',
       address: '192.168.1.77:7443',
-      fingerprint: 'a'.repeat(64),
-      machineName: 'WORK‮POTAL',
+      identityFingerprint: 'a'.repeat(64),
+      deviceId: 'dev-1',
+      machineName: 'WORK\u202EPOTAL',
+      osFamily: 'windows',
+      trusted: false,
     });
     expect(parsed.machineName).toBe('WORKPOTAL');
   });
 
-  it('refuses a recent entry whose pinned permissions are unknown', () => {
+  it('refuses a recent entry whose known identity is malformed', () => {
     expect(() =>
       recentSchema.parse({
         address: '192.168.1.77:7443',
         machineName: 'WORK-LAPTOP',
         lastConnectedMs: 1,
-        alwaysAllow: true,
-        pinnedPermissions: ['control_input', 'launch_missiles'],
+        knownIdentity: 'not-a-fingerprint',
       }),
     ).toThrow();
   });
 
-  it('accepts a recent entry with no pin', () => {
+  it('accepts a recent entry with no known identity', () => {
     const parsed = recentSchema.parse({
       address: '192.168.1.77:7443',
       machineName: 'WORK-LAPTOP',
       lastConnectedMs: 1,
-      alwaysAllow: false,
-      pinnedPermissions: [],
+      knownIdentity: null,
     });
-    expect(parsed.alwaysAllow).toBe(false);
-    expect(parsed.pinnedPermissions).toEqual([]);
+    expect(parsed.knownIdentity).toBeNull();
   });
 
   it('refuses settings carrying anything password-shaped', () => {

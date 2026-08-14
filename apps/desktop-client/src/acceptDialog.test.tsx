@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as api from './api.js';
 import { AcceptDialog } from './AcceptDialog';
 
 const invoked = vi.mocked(invoke);
@@ -10,11 +11,13 @@ const invoked = vi.mocked(invoke);
 const REQUEST = {
   requestId: 'r1',
   address: '192.168.1.77:7443',
-  fingerprint: 'ab'.repeat(32),
+  identityFingerprint: 'ab'.repeat(32),
+  deviceId: 'dev-1',
   machineName: 'WORK-LAPTOP',
+  osFamily: 'windows',
+  trusted: false,
 };
 
-/** Answer `pending_accept_request` with `request`, and accept any answer. */
 function backend(request: Record<string, unknown> | null = REQUEST) {
   invoked.mockImplementation((command: string) => {
     switch (command) {
@@ -29,25 +32,44 @@ function backend(request: Record<string, unknown> | null = REQUEST) {
   });
 }
 
-/** The permissions passed to the last `answer_accept_request` call. */
 function granted(): string[] | undefined {
   const call = invoked.mock.calls.findLast(([command]) => command === 'answer_accept_request');
   return (call?.[1] as { granted: string[] } | undefined)?.granted;
 }
 
-/** Whether the request was refused through the dedicated dismissal command. */
+function trust(): string | undefined {
+  const call = invoked.mock.calls.findLast(([command]) => command === 'answer_accept_request');
+  return (call?.[1] as { trust: string } | undefined)?.trust;
+}
+
 function dismissed(): boolean {
   return invoked.mock.calls.some(([command]) => command === 'dismiss_accept_request');
 }
 
 async function openDialog() {
   render(<AcceptDialog onToast={vi.fn()} />);
-  return screen.findByRole('alertdialog');
+  return screen.findByRole('dialog');
+}
+
+async function raise(overrides: Record<string, unknown>): Promise<void> {
+  backend({
+    requestId: 'req-1',
+    address: '192.168.1.77:7443',
+    identityFingerprint: 'ab'.repeat(32),
+    deviceId: 'dev-1',
+    machineName: 'Koren Laptop',
+    osFamily: 'windows',
+    trusted: false,
+    ...overrides,
+  });
+  render(<AcceptDialog onToast={vi.fn()} />);
+  await screen.findByRole('dialog');
 }
 
 describe('AcceptDialog', () => {
   beforeEach(() => {
     invoked.mockReset();
+    vi.restoreAllMocks();
   });
 
   it('renders nothing at all when no request is waiting', async () => {
@@ -57,7 +79,7 @@ describe('AcceptDialog', () => {
     await waitFor(() => {
       expect(invoked).toHaveBeenCalledWith('pending_accept_request', undefined);
     });
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('names the address, the machine and the fingerprint', async () => {
@@ -66,10 +88,8 @@ describe('AcceptDialog', () => {
 
     expect(screen.getByText('WORK-LAPTOP')).toBeInTheDocument();
     expect(screen.getByText(/192\.168\.1\.77/)).toBeInTheDocument();
-    // Grouped and uppercased for reading aloud, but every one of the 64 characters is
-    // present: this is the value someone compares against another screen.
     const fingerprint = screen.getByTestId('accept-fingerprint').textContent ?? '';
-    expect(fingerprint.replaceAll(/\s/g, '').toLowerCase()).toBe(REQUEST.fingerprint);
+    expect(fingerprint.replaceAll(/\s/g, '').toLowerCase()).toBe(REQUEST.identityFingerprint);
   });
 
   it('ticks all three permissions by default', async () => {
@@ -82,14 +102,12 @@ describe('AcceptDialog', () => {
     expect(screen.getAllByRole('checkbox')).toHaveLength(3);
   });
 
-  it('gives initial focus to Dismiss, so a stray Enter refuses', async () => {
-    // The whole point of the dialog. If Accept took focus, holding Enter on a keyboard
-    // would hand control of the machine to whoever was knocking.
+  it('gives initial focus to Reject, so a stray Enter refuses', async () => {
     backend();
     await openDialog();
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /dismiss/i })).toHaveFocus();
+      expect(screen.getByRole('button', { name: /reject/i })).toHaveFocus();
     });
   });
 
@@ -106,12 +124,12 @@ describe('AcceptDialog', () => {
     expect(granted()).toBeUndefined();
   });
 
-  it('refuses when Dismiss is clicked', async () => {
+  it('refuses when Reject is clicked', async () => {
     backend();
     const user = userEvent.setup();
     await openDialog();
 
-    await user.click(screen.getByRole('button', { name: /dismiss/i }));
+    await user.click(screen.getByRole('button', { name: /reject/i }));
 
     await waitFor(() => {
       expect(dismissed()).toBe(true);
@@ -119,12 +137,12 @@ describe('AcceptDialog', () => {
     expect(granted()).toBeUndefined();
   });
 
-  it('grants all three when Accept is clicked with all three ticked', async () => {
+  it('grants all three when Accept Once is clicked with all three ticked', async () => {
     backend();
     const user = userEvent.setup();
     await openDialog();
 
-    await user.click(screen.getByRole('button', { name: /^accept$/i }));
+    await user.click(screen.getByRole('button', { name: 'Accept Once' }));
 
     await waitFor(() => {
       expect(granted()).toEqual(
@@ -132,16 +150,16 @@ describe('AcceptDialog', () => {
       );
     });
     expect(granted()).toHaveLength(3);
+    expect(trust()).toBe('once');
   });
 
   it('grants only what is ticked', async () => {
-    // The direction that matters: a permission the human took away must not be sent.
     backend();
     const user = userEvent.setup();
     await openDialog();
 
-    await user.click(screen.getByRole('checkbox', { name: /transfer files/i }));
-    await user.click(screen.getByRole('button', { name: /^accept$/i }));
+    await user.click(screen.getByRole('checkbox', { name: /file transfer/i }));
+    await user.click(screen.getByRole('button', { name: 'Accept Once' }));
 
     await waitFor(() => {
       expect(granted()).toEqual(expect.arrayContaining(['control_input', 'view_metrics']));
@@ -151,8 +169,6 @@ describe('AcceptDialog', () => {
   });
 
   it('refuses through the dismissal command when nothing is ticked', async () => {
-    // An empty grant is a refusal. The backend decides that in one place, so the
-    // interface says "no" plainly rather than sending an accept of nothing.
     backend();
     const user = userEvent.setup();
     await openDialog();
@@ -160,7 +176,7 @@ describe('AcceptDialog', () => {
     for (const box of screen.getAllByRole('checkbox')) {
       await user.click(box);
     }
-    await user.click(screen.getByRole('button', { name: /^accept$/i }));
+    await user.click(screen.getByRole('button', { name: 'Accept Once' }));
 
     await waitFor(() => {
       expect(dismissed()).toBe(true);
@@ -169,7 +185,6 @@ describe('AcceptDialog', () => {
   });
 
   it('renders an untrusted machine name as inert text', async () => {
-    // The name is chosen by whoever is knocking. It must never become markup.
     backend({ ...REQUEST, machineName: '<img src=x onerror=alert(1)>' });
     const dialog = await openDialog();
 
@@ -182,10 +197,77 @@ describe('AcceptDialog', () => {
     const user = userEvent.setup();
     await openDialog();
 
-    await user.click(screen.getByRole('button', { name: /^accept$/i }));
+    await user.click(screen.getByRole('button', { name: 'Accept Once' }));
 
     await waitFor(() => {
-      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
+  });
+
+  it('identifies the device that is knocking', async () => {
+    await raise({ machineName: 'Koren Laptop', deviceId: 'dev-1', osFamily: 'windows' });
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('Koren Laptop');
+    expect(dialog).toHaveTextContent('Windows');
+    expect(dialog).toHaveTextContent('dev-1');
+  });
+
+  it('says whether this device is already trusted', async () => {
+    await raise({ trusted: true });
+    expect(screen.getByText('Trusted device')).toBeInTheDocument();
+  });
+
+  it('accepts once without remembering anything', async () => {
+    const answer = vi.spyOn(api, 'answerAcceptRequest');
+    await raise({});
+
+    await userEvent.click(screen.getByRole('button', { name: 'Accept Once' }));
+
+    expect(answer).toHaveBeenCalledWith('req-1', expect.any(Array), 'once');
+  });
+
+  it('remembers a device without letting it in unasked', async () => {
+    const answer = vi.spyOn(api, 'answerAcceptRequest');
+    await raise({});
+
+    await userEvent.click(screen.getByRole('button', { name: 'Accept & Trust' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    expect(answer).toHaveBeenCalledWith('req-1', expect.any(Array), 'remember');
+  });
+
+  it('does not offer unattended access from the primary buttons', async () => {
+    await raise({});
+
+    expect(screen.queryByRole('button', { name: /allow unattended/i })).not.toBeInTheDocument();
+  });
+
+  it('grants unattended access only after the extra step is taken', async () => {
+    const answer = vi.spyOn(api, 'answerAcceptRequest');
+    await raise({});
+
+    await userEvent.click(screen.getByRole('button', { name: 'Accept & Trust' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /connect without approval/i }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    expect(answer).toHaveBeenCalledWith('req-1', expect.any(Array), 'remember_unattended');
+  });
+
+  it('never offers administrator', async () => {
+    await raise({});
+    expect(screen.queryByText(/administrator/i)).not.toBeInTheDocument();
+  });
+
+  it('refuses when nothing is ticked rather than opening an empty session', async () => {
+    const answer = vi.spyOn(api, 'answerAcceptRequest');
+    const dismiss = vi.spyOn(api, 'dismissAcceptRequest');
+    await raise({});
+    for (const box of screen.getAllByRole('checkbox')) await userEvent.click(box);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Accept Once' }));
+
+    expect(answer).not.toHaveBeenCalled();
+    expect(dismiss).toHaveBeenCalledWith('req-1');
   });
 });

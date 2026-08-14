@@ -62,7 +62,12 @@ export function getLocalIdentity(): Promise<LocalIdentity> {
  * without the interface learning it fails validation rather than rendering a name
  * nobody has written a control for.
  */
-export const permissionSchema = z.enum(['control_input', 'transfer_files', 'view_metrics']);
+export const permissionSchema = z.enum([
+  'control_input',
+  'transfer_files',
+  'view_metrics',
+  'administer',
+]);
 export type Permission = z.infer<typeof permissionSchema>;
 
 /* -------------------------------------------------------------------------- */
@@ -665,21 +670,28 @@ export type HostStatus = z.infer<typeof hostStatusSchema>;
 export const acceptRequestSchema = z.object({
   requestId: z.string().min(1),
   address: z.string().min(1),
-  fingerprint: fingerprintSchema,
+  /** The identity the peer proved. Compared across screens; not sanitised. */
+  identityFingerprint: fingerprintSchema,
+  deviceId: z.string().min(1),
   machineName: untrustedText(64),
+  osFamily: untrustedText(32),
+  /** Whether this device already has a trust row. */
+  trusted: z.boolean(),
 });
 
 export type AcceptRequest = z.infer<typeof acceptRequestSchema>;
+
+/** How much of an Accept answer outlives the connection. */
+export const trustChoiceSchema = z.enum(['once', 'remember', 'remember_unattended']);
+export type TrustChoice = z.infer<typeof trustChoiceSchema>;
 
 /** A machine this installation has connected to before. */
 export const recentSchema = z.object({
   address: z.string().min(1),
   machineName: untrustedText(64),
   lastConnectedMs: z.number().int(),
-  /** Whether a pinned identity lets this machine in without asking. */
-  alwaysAllow: z.boolean(),
-  /** What an always-allow connection receives. Empty unless `alwaysAllow`. */
-  pinnedPermissions: z.array(permissionSchema),
+  /** The identity that answered here, once one has. Compared, never trusted blindly. */
+  knownIdentity: fingerprintSchema.nullable(),
 });
 
 export type Recent = z.infer<typeof recentSchema>;
@@ -724,8 +736,12 @@ export function getPendingAcceptRequest(): Promise<AcceptRequest | null> {
  * An empty `granted` is a refusal, not an empty session — the backend treats it as one,
  * in one place, rather than the interface deciding separately.
  */
-export function answerAcceptRequest(requestId: string, granted: Permission[]): Promise<null> {
-  return call('answer_accept_request', z.null(), { requestId, granted });
+export function answerAcceptRequest(
+  requestId: string,
+  granted: Permission[],
+  trust: TrustChoice,
+): Promise<null> {
+  return call('answer_accept_request', z.null(), { requestId, granted, trust });
 }
 
 /**
@@ -787,18 +803,7 @@ export function listRecent(): Promise<Recent[]> {
   return call('list_recent', z.array(recentSchema));
 }
 
-/**
- * Pin or unpin a machine's identity.
- *
- * Pinning requires an identity to pin, which only a connection can supply, so turning
- * this on for an address this installation has not seen connect is an error rather than
- * a pin of nothing.
- */
-export function setAlwaysAllow(address: string, always: boolean): Promise<null> {
-  return call('set_always_allow', z.null(), { address, always });
-}
-
-/** Forget a machine, pin included. */
+/** Forget a machine from the outgoing history. */
 export function removeRecent(address: string): Promise<null> {
   return call('remove_recent', z.null(), { address });
 }
@@ -820,4 +825,117 @@ export function setUnattendedPassword(
   permissions: Permission[],
 ): Promise<null> {
   return call('set_unattended_password', z.null(), { password, permissions });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Trust, history and inbound sessions                                        */
+/* -------------------------------------------------------------------------- */
+
+/** A device this machine trusts. */
+export const trustedDeviceSchema = z.object({
+  identityFingerprint: fingerprintSchema,
+  deviceId: z.string().min(1),
+  displayName: untrustedText(64),
+  osFamily: untrustedText(32),
+  lastAddress: z.string().min(1).nullable(),
+  addedMs: z.number().int(),
+  lastConnectedMs: z.number().int().nullable(),
+  unattended: z.boolean(),
+  suspended: z.boolean(),
+  permissions: z.array(permissionSchema),
+});
+
+export type TrustedDevice = z.infer<typeof trustedDeviceSchema>;
+
+/** One recorded session or refused connection. */
+export const sessionRecordSchema = z.object({
+  id: z.number().int(),
+  sessionId: z.string().min(1).nullable(),
+  identityFingerprint: fingerprintSchema.nullable(),
+  deviceName: untrustedText(64),
+  direction: z.enum(['incoming', 'outgoing']),
+  address: z.string().min(1),
+  startedMs: z.number().int(),
+  endedMs: z.number().int().nullable(),
+  permissions: z.array(permissionSchema),
+  outcome: z.enum(['completed', 'refused', 'failed']),
+  endReason: untrustedText(64).nullable(),
+});
+
+export type SessionRecord = z.infer<typeof sessionRecordSchema>;
+
+/** A session controlling this machine right now. */
+export const inboundSessionSchema = z.object({
+  sessionId: z.string().min(1),
+  identityFingerprint: fingerprintSchema,
+  deviceName: untrustedText(64),
+  address: z.string().min(1),
+  permissions: z.array(permissionSchema),
+  startedMs: z.number().int(),
+});
+
+export type InboundSession = z.infer<typeof inboundSessionSchema>;
+
+/** Whether a reachability probe found something answering. */
+export const presenceSchema = z.enum(['online', 'offline', 'checking']);
+export type Presence = z.infer<typeof presenceSchema>;
+
+/** Devices this machine trusts, most recently connected first. */
+export function listTrustedDevices(): Promise<TrustedDevice[]> {
+  return call('list_trusted_devices', z.array(trustedDeviceSchema));
+}
+
+/** Replace what an admitted session from this device receives. */
+export function setDevicePermissions(identity: string, permissions: Permission[]): Promise<null> {
+  return call('set_device_permissions', z.null(), { identity, permissions });
+}
+
+/** Allow or stop this device connecting without anyone approving. */
+export function setDeviceUnattended(identity: string, enabled: boolean): Promise<null> {
+  return call('set_device_unattended', z.null(), { identity, enabled });
+}
+
+/** Temporarily refuse a trusted device without forgetting it. */
+export function setDeviceSuspended(identity: string, suspended: boolean): Promise<null> {
+  return call('set_device_suspended', z.null(), { identity, suspended });
+}
+
+/** Forget a trusted device. */
+export function revokeDevice(identity: string): Promise<null> {
+  return call('revoke_device', z.null(), { identity });
+}
+
+/**
+ * Whether anything answers at `address`.
+ *
+ * The probe drops the connection before Authenticate, so the far side never raises a
+ * prompt, never records a session and never counts an unattended-password attempt.
+ */
+export function probeDevice(address: string): Promise<Exclude<Presence, 'checking'>> {
+  return call('probe_device', z.enum(['online', 'offline']), { address });
+}
+
+/** Recorded sessions and refusals on this machine, most recent first. */
+export function listSessionHistory(): Promise<SessionRecord[]> {
+  return call('list_session_history', z.array(sessionRecordSchema));
+}
+
+/** Sessions controlling this machine right now. */
+export function listInboundSessions(): Promise<InboundSession[]> {
+  return call('inbound_sessions', z.array(inboundSessionSchema));
+}
+
+/** End one inbound session. Returns whether that session was still live. */
+export function disconnectInbound(sessionId: string): Promise<boolean> {
+  return call('disconnect_inbound', z.boolean(), { sessionId });
+}
+
+/**
+ * End every inbound session and stop accepting.
+ *
+ * Closes the door as well as the sessions: ending them while still accepting would let
+ * an unattended device return immediately.
+ */
+export function emergencyDisconnect(): Promise<number> {
+  return call('emergency_disconnect', z.number().int().nonnegative());
 }

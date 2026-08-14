@@ -13,7 +13,6 @@ import { Tooltip } from './Tooltip';
 
 export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost' | 'subtle';
 
-
 /**
  * Shared by every variant.
  *
