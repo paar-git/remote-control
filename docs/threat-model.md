@@ -2,7 +2,7 @@
 
 Written for the current design: one application that is both the machine being
 controlled and the machine controlling, admitting connections by a human clicking Accept
-or by an unattended password.
+or by an unattended password, and remembering a device by the identity it proved.
 
 The access rules themselves are in [`access-model.md`](access-model.md). This document is
 about who can attack them and what happens when they do.
@@ -23,7 +23,7 @@ about who can attack them and what happens when they do.
 | --- | --- | --- |
 | Device private key | Versioned keystore file (DPAPI `CurrentUser` / `0600` in a `0700` dir), never the database | Implemented — see [`keystore-format.md`](keystore-format.md) |
 | Unattended password | Argon2id (m=19 MiB, t=2, p=1) PHC string in `host_settings.unattended_phc` | Implemented — never leaves the database, never crosses IPC |
-| Pinned peer fingerprints | `recent_connections.pinned_fingerprint` | Integrity of the local database |
+| Trusted-device identities | `trusted_devices.identity_fingerprint` | Integrity of the local database; the key is proved by TLS and cannot be claimed |
 | Session traffic | In flight only | mTLS 1.3 over QUIC |
 
 There are no session tokens. A session is authenticated by the mutually-authenticated
@@ -132,14 +132,14 @@ interface says so rather than silently enforcing it. A user who chooses a guessa
 
 ### A3. Stolen machine
 
-*Can:* obtain the database with pinned fingerprints and the unattended password hash,
+*Can:* obtain the database with trusted-device identities and the unattended password hash,
 and the encrypted device key.
 
 *Cannot:* recover the unattended password from its Argon2id hash at those parameters,
 cheaply. Use the device key without the OS user account it is bound to (DPAPI
 `CurrentUser` on Windows, file mode on Unix).
 
-*Residual:* the pinned fingerprints disclose which machines this one has connected to.
+*Residual:* the trusted-device list discloses which machines this one will admit.
 An attacker with the unlocked desktop has the application, per the section above.
 
 ### A4. Malicious peer that was admitted
@@ -149,7 +149,9 @@ An attacker with the unlocked desktop has the application, per the section above
 *Cannot:* widen its permissions — there is no mechanism, and every request is re-checked
 against the live set rather than a set captured at connect. Escape the configured file
 roots: every path from the wire is resolved and checked before any filesystem call.
-Reach anything requiring a permission that was not ticked.
+Reach anything requiring a permission that was not ticked. Grant itself unattended
+access or make itself un-revokable: a session may not target its own trust row, and
+revocation is immediate because there is no bearer credential to invalidate.
 
 *Residual:* what was granted. A session granted `control_input` can do anything the
 logged-in user can do on that machine. That is what remote control is.

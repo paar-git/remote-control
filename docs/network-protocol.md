@@ -33,7 +33,8 @@ The verifiers therefore check very little:
 |---|---|
 | The certificate parses as X.509 | Anything else cannot carry a key |
 | Exactly one certificate, no chain | A chain would imply a CA we do not have |
-| SHA-256 of the DER matches the pin | This is the trust decision |
+| SHA-256 of the DER matches a transport pin, when one exists | Stops a substituted certificate mid-handshake |
+| The subject public key is the device identity | Persistent trust is keyed on this, so renewal is not an identity change |
 | The handshake signature verifies | Proves possession of the private key |
 
 Hostname verification is **deliberately absent**. A peer is identified by key, not by
@@ -130,8 +131,16 @@ dismissal, a wrong unattended password and a lockout are all `Rejected`, because
 distinguishing them would tell a caller whether unattended access is configured and
 whether its guesses were landing.
 
-The responder's own five-way reason is recorded locally and never serialised. See
+A suspended or revoked device is also `Rejected` on the wire: distinguishing it would
+confirm that the caller is known.
+
+The responder's own local reason is recorded and never serialised. See
 [`access-model.md`](access-model.md).
+
+Protocol **1.1** added the `Administer` permission bit and four control-channel
+requests it gates: list trusted devices, set permissions, set unattended, revoke.
+The bump is minor because an older peer never sends them, and an unknown permission
+bit is refused rather than silently masked.
 
 ### Permissions on the wire
 
@@ -163,13 +172,13 @@ the TLS verifier observed.
 
 ## The dialled address, not the socket address
 
-`Authenticate` carries the address the user typed. The responder keys its pinned
-identities on that string.
+`Authenticate` carries the address the user typed. Persistent trust is keyed on the
+presenting identity; the address is what `IdentityChanged` compares against a trusted
+device's last-seen address, and what the outgoing recent list is keyed on.
 
 It is carried rather than read off the QUIC connection because the peer's remote socket
 address has an ephemeral source port: keying on it would make every reconnection look
-like a new, unpinned peer, so the pin would never match and a changed certificate would
-fall through to the human dialog.
+like a new address, so the identity-change comparison would never fire.
 
 ## Discovery
 

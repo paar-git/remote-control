@@ -5,11 +5,12 @@ the other machine clicks Accept, and you are connected. No account, no sign-in, 
 third-party cloud in the path.
 
 > **Status: the access model is built; the remote display is not.** Two machines can
-> find each other by address, admit each other by a human clicking Accept or by an
-> unattended password, and hold a session with file transfer and system monitoring over
-> it. There is no screen capture and no input injection yet, and the session screen says
-> so rather than showing an empty frame. See [`PROGRESS.md`](PROGRESS.md) for exactly
-> what works today.
+> find each other by address, admit each other by a trusted identity, an unattended
+> password, or a human clicking Accept, and hold a session with file transfer and system
+> monitoring over it. The window is four categories: Remote Control, My Devices,
+> Sessions and Settings. There is no screen capture and no input injection yet, and the
+> session screen says so rather than showing an empty frame. See
+> [`PROGRESS.md`](PROGRESS.md) for exactly what works today.
 
 ## Design in one paragraph
 
@@ -18,9 +19,11 @@ ones, and the same binary does both — there is no separate agent to install an
 client to pair with it. Two machines authenticate each other with mutually-authenticated
 TLS 1.3 over QUIC using self-signed certificates, and then, because completing TLS
 proves only *which key* is on the other end, the machine being connected to makes a
-separate admission decision: a pinned identity it already trusts, an unattended password
-its owner set, or a person clicking Accept. What that session may then do is fixed at
-admission and re-checked on every single request.
+separate admission decision: a trusted device identity, an unattended password its
+owner set, or a person clicking Accept. Persistent access is anchored on that identity,
+so a device reached at a new address keeps its grant and a renewed certificate is not
+an identity change. What that session may then do is fixed at admission and re-checked
+on every single request.
 
 ## Repository layout
 
@@ -49,8 +52,8 @@ admission and re-checked on every single request.
 `crates/host-agent` is both a library and a binary. The library holds the admission rule
 and the session server, and the desktop application depends on it so that the two cannot
 drift into deciding differently. The binary is a headless service for a machine with
-nobody sitting at it, where every connection request is dismissed unless an unattended
-password or a pin admits it.
+nobody sitting at it, where every connection request is dismissed unless a trusted
+unattended device or an unattended password admits it.
 
 ## Requirements
 

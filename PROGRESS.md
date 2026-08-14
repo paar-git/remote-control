@@ -15,11 +15,19 @@ that has been abandoned describes the plan, not the product.
 The connection runs over QUIC with mutually-authenticated TLS 1.3, and completing that
 handshake admits nothing on its own — the machine being connected to then decides.
 
-**The admission decision is real and is enforced.** A pinned identity, an unattended
-password, or a person clicking Accept, checked in that order. A pinned machine
-presenting a different certificate is refused outright. A wrong password is a refusal
-rather than a fallback to the dialog. Accepting with no permissions ticked is a refusal.
-See [`docs/access-model.md`](docs/access-model.md).
+**The admission decision is real and is enforced.** A trusted device identity, an
+unattended password, or a person clicking Accept, checked in that order. Trust is
+keyed on the identity the peer proved through TLS, not the address it was typed at.
+A stranger answering at a trusted device's address is refused as `IdentityChanged`
+rather than prompted. A wrong password is a refusal rather than a fallback to the
+dialog. Accepting with no permissions ticked is a refusal. See
+[`docs/access-model.md`](docs/access-model.md).
+
+**The window is four categories, and each one leads somewhere.** Remote Control is
+connect plus this device. My Devices is the trust list with a real presence probe.
+Sessions separates what is happening now from what already happened, and a banner
+sits above every page while someone is controlling this machine. Settings is
+sections, not more navigation.
 
 **A session holds exactly what it was granted.** Fixed at admission, carried on the
 session, and re-checked on every request rather than once at connect. Both machines
@@ -68,8 +76,8 @@ most heavily tested subsystem in the tree.
 This is a smaller product, not a less tested one. Read the number as deletion rather
 than decay.
 
-**TypeScript tests: 129 → 213**, because the interface was rewritten rather than
-removed.
+**TypeScript tests: 129 → 256**, because the interface was rewritten rather than
+removed, then rebuilt around four categories.
 
 ## Verification
 
@@ -77,16 +85,15 @@ Run against the current tree. Reproduce with `pnpm verify`.
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace -- --test-threads=1` | **582 passed**, 0 failed |
+| `cargo test --workspace` | **662 passed**, 0 failed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean, exit 0 |
 | `cargo fmt --all --check` | clean |
-| `cargo doc --workspace --no-deps` | clean |
-| `pnpm -r test` | **213 passed**, 0 failed |
+| `pnpm -r test:run` | **256 passed**, 0 failed (205 desktop + 51 shared-types) |
 | `pnpm -r typecheck` | clean |
 | `pnpm run lint` | clean |
 | `pnpm run format:check` | clean |
-| `pnpm --filter @rc/desktop-client build` | clean |
-| `node scripts/check-version-sync.mjs` | `Version sync OK: 0.1.1` |
+| `pnpm verify` | clean, exit 0 |
+| `node scripts/check-version-sync.mjs` | `Version sync OK: 0.2.0` |
 
 Clippy runs at pedantic with `-D warnings` across all targets and all features. A
 warning is a build failure.
@@ -114,18 +121,20 @@ Not a list of everything, but the ones that pin a property rather than a behavio
 - **The access model, against the real binary.** Nine cases in
   `crates/host-agent/tests/access_e2e.rs` spawn `rc-agent` as its own process with a
   seeded database and drive a real client at it over QUIC: dismissal, not-accepting,
-  wrong password, a pinned peer whose certificate changed, a correct password, a pinned
-  peer admitted without a prompt, a withheld permission refused per request, and a pin
-  surviving a restart.
+  wrong password, a stranger at a trusted address, a correct password, a trusted
+  identity admitted without a prompt, a withheld permission refused per request, a
+  grant surviving a restart, a revoked device refused after restart, and a second
+  device unable to reuse the first's grant.
 
 ## Known loose ends
 
-- **Tasks 11 and 12 have not been independently reviewed.** Every other change in the
-  rework went through a separate review pass; these two were implemented and verified by
-  the same process that wrote them. Task 11 is the most security-sensitive commit in the
-  project.
-- **`set_always_allow` grants everything when pinning.** It matches the Accept dialog's
-  default; narrowing it belongs in the settings dialog and is not there yet.
+- **Existing address-keyed certificate pins are not migrated.** They record a
+  certificate digest whose identity was never stored, so the new trust key cannot be
+  derived from them. Machines that were "always allowed" under the old pin must be
+  accepted again.
+- **The four-page UI and the TypeScript IPC wrappers were implemented in the same
+  session that finished them.** They have tests; they have not had a separate review
+  pass.
 - **The unattended verification uses a hard-coded production hashing policy** for the
   dummy hash, while a stored credential is verified at whatever policy its PHC string
   encodes. If a credential were ever stored under a weaker policy, the timing
