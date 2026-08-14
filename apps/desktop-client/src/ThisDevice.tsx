@@ -56,12 +56,20 @@ export function ThisDevice({
 
   return (
     <section className="rounded-[var(--radius-card)] border border-(--color-border) bg-(--color-card) p-6 shadow-(--shadow-card)">
-      <h2 className="mb-5 text-xl font-semibold tracking-tight">This Device</h2>
+      <div className="mb-5 flex items-start justify-between gap-3">
+        <h2 className="text-xl font-semibold tracking-tight">This Device</h2>
+        <Toggle
+          label="Allow incoming connections"
+          checked={status.accepting}
+          disabled={toggling}
+          onChange={onToggleAccepting}
+        />
+      </div>
 
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-4">
         <div className="flex items-start gap-3">
           <DeviceAvatar name={status.machineName} os={os} />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="truncate text-lg font-semibold" title={status.machineName}>
               {status.machineName}
             </p>
@@ -97,21 +105,6 @@ export function ThisDevice({
             </p>
             {primary !== null && <CopyButton value={primary} label="address" size="sm" />}
           </div>
-        </div>
-
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-medium">Allow incoming connections</p>
-            <p className="text-xs text-(--color-text-secondary)">
-              Other machines can reach this one only while this is on.
-            </p>
-          </div>
-          <Toggle
-            label="Allow incoming connections"
-            checked={status.accepting}
-            disabled={toggling}
-            onChange={onToggleAccepting}
-          />
         </div>
 
         <div>

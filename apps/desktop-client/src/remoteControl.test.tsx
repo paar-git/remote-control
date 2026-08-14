@@ -80,10 +80,7 @@ describe('RemoteControlPage', () => {
     const connectToAddress = vi.mocked(api.connectToAddress);
     renderPage();
 
-    await userEvent.type(
-      screen.getByLabelText('Device ID, hostname, or IP address'),
-      '192.168.1.77',
-    );
+    await userEvent.type(screen.getByLabelText('Hostname or IP address'), '192.168.1.77');
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
     expect(connectToAddress).toHaveBeenCalledWith('192.168.1.77:7443', null);
@@ -92,10 +89,7 @@ describe('RemoteControlPage', () => {
   it('does not treat a device id as an address', async () => {
     renderPage();
 
-    await userEvent.type(
-      screen.getByLabelText('Device ID, hostname, or IP address'),
-      '842 391 552',
-    );
+    await userEvent.type(screen.getByLabelText('Hostname or IP address'), '842 391 552');
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
     expect(vi.mocked(api.connectToAddress)).not.toHaveBeenCalled();
@@ -135,7 +129,7 @@ describe('RemoteControlPage', () => {
     renderPage();
 
     expect(await screen.findAllByTestId('recent-device')).toHaveLength(5);
-    expect(screen.getByRole('button', { name: 'View all devices' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'My Devices' })).toBeInTheDocument();
   });
 
   it('shows a recent device as offline rather than inventing a green dot', async () => {

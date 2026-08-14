@@ -188,7 +188,7 @@ export function RemoteControlPage({
           }}
         >
           <TextField
-            label="Device ID, hostname, or IP address"
+            label="Hostname or IP address"
             value={address}
             onChange={(value) => {
               setAddress(value);
@@ -197,7 +197,6 @@ export function RemoteControlPage({
             placeholder="192.168.1.77"
             mono
             autoComplete="off"
-            help="Type a hostname or IP address. The Device ID is for verifying identity, not for connecting."
             error={parseError}
             trailing={
               <Button type="submit" variant="primary" size="lg" disabled={busy}>
@@ -207,12 +206,14 @@ export function RemoteControlPage({
             }
           />
         </form>
-        <p role="status" className="mt-3 text-sm text-(--color-text-secondary)">
-          {describeConnectionState(connection)}
-        </p>
-        {failed && (
-          <p role="alert" className="mt-2 text-sm text-(--color-danger)">
-            {connection.message}
+        {connection.state !== 'offline' && (
+          <p
+            role={failed ? 'alert' : 'status'}
+            className={
+              'mt-3 text-sm ' + (failed ? 'text-(--color-danger)' : 'text-(--color-text-secondary)')
+            }
+          >
+            {describeConnectionState(connection)}
           </p>
         )}
       </Card>
@@ -233,7 +234,7 @@ export function RemoteControlPage({
           <h2 className="text-base font-semibold">Recent</h2>
           {recent.length > 5 && (
             <Button variant="ghost" size="sm" onClick={onViewAllDevices}>
-              View all devices
+              My Devices
             </Button>
           )}
         </div>
@@ -276,7 +277,7 @@ export function RemoteControlPage({
         {recent.length > 0 && recent.length <= 5 && (
           <div className="mt-3">
             <Button variant="ghost" size="sm" onClick={onViewAllDevices}>
-              View all devices
+              My Devices
             </Button>
           </div>
         )}

@@ -62,8 +62,6 @@ describe('DeviceDetail', () => {
     expect(screen.getByRole('heading', { name: 'Access' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Permissions' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument();
-    expect(screen.getByText('Trusted device')).toBeInTheDocument();
-    expect(screen.getByText('Enabled')).toBeInTheDocument();
     expect(screen.getByText('Device identity verified')).toBeInTheDocument();
   });
 

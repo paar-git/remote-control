@@ -31,9 +31,9 @@ export function Toggle({
     >
       <span
         className={
-          'inline-block size-5 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform ' +
+          'inline-block size-5 rounded-full bg-white shadow-sm transition-transform ' +
           'duration-200 ease-(--ease-ui) ' +
-          (checked ? 'translate-x-5' : '')
+          (checked ? 'translate-x-5' : 'translate-x-0.5')
         }
       />
     </button>

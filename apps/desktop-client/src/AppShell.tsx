@@ -27,7 +27,7 @@ export function AppShell({
           <span className="flex size-8 items-center justify-center rounded-xl bg-(--color-accent) text-(--color-accent-text)">
             <MonitorCog aria-hidden="true" className="size-4" />
           </span>
-          <p className="text-sm font-semibold tracking-tight">Remote Control</p>
+          <p className="text-sm font-semibold tracking-tight">RC</p>
         </div>
 
         <nav aria-label="Main" className="flex flex-col gap-0.5">

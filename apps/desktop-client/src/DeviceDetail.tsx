@@ -139,15 +139,6 @@ export function DeviceDetail({
 
         <section className="mb-5">
           <h3 className="mb-3 text-sm font-semibold">Access</h3>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium">Trusted device</p>
-              <p className="text-xs text-(--color-text-secondary)">
-                Remembered. Revoking is how this is turned off.
-              </p>
-            </div>
-            <p className="text-sm font-medium text-(--color-text-secondary)">Enabled</p>
-          </div>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Connect without approval</p>

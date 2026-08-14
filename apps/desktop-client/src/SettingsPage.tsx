@@ -140,7 +140,7 @@ export function SettingsPage({
             </div>
             <Toggle
               label="Allow incoming connections"
-              checked={settings.accepting}
+              checked={status?.accepting ?? settings.accepting}
               onChange={toggleAccepting}
             />
           </div>
@@ -238,7 +238,7 @@ export function SettingsPage({
         <h2 className="mb-3 text-xl font-semibold tracking-tight">Appearance</h2>
         <fieldset>
           <legend className="mb-2 text-sm text-(--color-text-secondary)">Theme</legend>
-          <div className="flex flex-wrap gap-3">
+          <div className="inline-flex rounded-xl border border-(--color-border) bg-(--color-page) p-1">
             {(
               [
                 ['light', 'Light'],
@@ -246,18 +246,23 @@ export function SettingsPage({
                 ['system', 'System'],
               ] as const
             ).map(([value, label]) => (
-              <label key={value} className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="theme"
-                  value={value}
-                  checked={theme === value}
-                  onChange={() => {
-                    changeTheme(value);
-                  }}
-                />
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={theme === value}
+                className={
+                  'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ' +
+                  (theme === value
+                    ? 'bg-(--color-card) text-(--color-text) shadow-sm'
+                    : 'text-(--color-text-secondary) hover:text-(--color-text)')
+                }
+                onClick={() => {
+                  changeTheme(value);
+                }}
+              >
                 {label}
-              </label>
+              </button>
             ))}
           </div>
         </fieldset>
