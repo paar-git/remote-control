@@ -50,8 +50,8 @@ pub use error::{ProtocolError, Result};
 pub use frame::{Channel, Frame, FrameDecoder};
 pub use ids::{DeviceId, RequestId, SessionId, TransferId, UserId};
 pub use input::{
-    Intent, InputAck, InputCapability, InputEvent, InputFailure, InputMessage, KeyState,
-    Modifiers, MouseButton, PhysicalKey,
+    InputAck, InputCapability, InputEvent, InputFailure, InputMessage, Intent, KeyState, Modifiers,
+    MouseButton, PhysicalKey,
 };
 pub use version::{CURRENT_VERSION, ProtocolVersion};
 

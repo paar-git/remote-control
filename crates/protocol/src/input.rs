@@ -129,6 +129,10 @@ impl Modifiers {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 #[expect(missing_docs, reason = "each variant is one self-describing key")]
+// The grouping is the documentation: letters, digits, function row, editing keys,
+// navigation, modifiers, numpad. One variant per line would be 100 lines that no longer
+// resemble a keyboard, so this list is laid out by hand rather than by rustfmt.
+#[rustfmt::skip]
 pub enum PhysicalKey {
     KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM,
     KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,
@@ -162,6 +166,9 @@ impl PhysicalKey {
     /// Returns `None` for codes this build does not carry, so an unrecognised key is
     /// dropped at the edge rather than delivered as some *other* key.
     #[must_use]
+    // Laid out to mirror the enum above, so a missing code is visible as a gap in the
+    // pattern rather than having to be searched for down a 130-line column.
+    #[rustfmt::skip]
     pub fn from_w3c_code(code: &str) -> Option<Self> {
         Some(match code {
             "KeyA" => Self::KeyA, "KeyB" => Self::KeyB, "KeyC" => Self::KeyC,
@@ -512,7 +519,10 @@ mod tests {
     #[test]
     fn w3c_codes_map_to_keys() {
         assert_eq!(PhysicalKey::from_w3c_code("KeyC"), Some(PhysicalKey::KeyC));
-        assert_eq!(PhysicalKey::from_w3c_code("ArrowUp"), Some(PhysicalKey::ArrowUp));
+        assert_eq!(
+            PhysicalKey::from_w3c_code("ArrowUp"),
+            Some(PhysicalKey::ArrowUp)
+        );
         assert_eq!(PhysicalKey::from_w3c_code("F11"), Some(PhysicalKey::F11));
     }
 
@@ -520,9 +530,18 @@ mod tests {
     fn command_and_super_arrive_as_meta() {
         // Chromium reports Command on macOS and Super on Linux under these codes.
         // Both must land on Meta so neither is mistaken for a Windows-specific key.
-        assert_eq!(PhysicalKey::from_w3c_code("MetaLeft"), Some(PhysicalKey::MetaLeft));
-        assert_eq!(PhysicalKey::from_w3c_code("OSLeft"), Some(PhysicalKey::MetaLeft));
-        assert_eq!(PhysicalKey::from_w3c_code("OSRight"), Some(PhysicalKey::MetaRight));
+        assert_eq!(
+            PhysicalKey::from_w3c_code("MetaLeft"),
+            Some(PhysicalKey::MetaLeft)
+        );
+        assert_eq!(
+            PhysicalKey::from_w3c_code("OSLeft"),
+            Some(PhysicalKey::MetaLeft)
+        );
+        assert_eq!(
+            PhysicalKey::from_w3c_code("OSRight"),
+            Some(PhysicalKey::MetaRight)
+        );
     }
 
     #[test]
@@ -542,39 +561,113 @@ mod tests {
 
     #[test]
     fn motion_is_unacknowledged_and_discrete_actions_are_not() {
-        assert!(!InputEvent::MouseMove { x: 0.5, y: 0.5, display: 0, seq: 1 }.is_acknowledged());
-        assert!(!InputEvent::Scroll { delta_x: 0.0, delta_y: 1.0, seq: 2 }.is_acknowledged());
-        assert!(InputEvent::MouseDown { button: MouseButton::Left, seq: 3 }.is_acknowledged());
-        assert!(InputEvent::Intent { intent: Intent::Copy, seq: 4 }.is_acknowledged());
         assert!(
-            InputEvent::KeyDown { key: PhysicalKey::KeyA, repeat: false, seq: 5 }
-                .is_acknowledged()
+            !InputEvent::MouseMove {
+                x: 0.5,
+                y: 0.5,
+                display: 0,
+                seq: 1
+            }
+            .is_acknowledged()
+        );
+        assert!(
+            !InputEvent::Scroll {
+                delta_x: 0.0,
+                delta_y: 1.0,
+                seq: 2
+            }
+            .is_acknowledged()
+        );
+        assert!(
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                seq: 3
+            }
+            .is_acknowledged()
+        );
+        assert!(
+            InputEvent::Intent {
+                intent: Intent::Copy,
+                seq: 4
+            }
+            .is_acknowledged()
+        );
+        assert!(
+            InputEvent::KeyDown {
+                key: PhysicalKey::KeyA,
+                repeat: false,
+                seq: 5
+            }
+            .is_acknowledged()
         );
     }
 
     #[test]
     fn every_event_reports_its_sequence() {
-        assert_eq!(InputEvent::MouseMove { x: 0.0, y: 0.0, display: 0, seq: 7 }.seq(), 7);
-        assert_eq!(InputEvent::Intent { intent: Intent::Paste, seq: 9 }.seq(), 9);
+        assert_eq!(
+            InputEvent::MouseMove {
+                x: 0.0,
+                y: 0.0,
+                display: 0,
+                seq: 7
+            }
+            .seq(),
+            7
+        );
+        assert_eq!(
+            InputEvent::Intent {
+                intent: Intent::Paste,
+                seq: 9
+            }
+            .seq(),
+            9
+        );
     }
 
     #[test]
     fn input_events_stay_small_on_the_wire() {
         // The input channel ceiling is 4 KiB; flooding must be bounded by the rate
         // limiter rather than by frame size.
-        let ev = InputEvent::MouseMove { x: 0.5, y: 0.25, display: 0, seq: 1 };
+        let ev = InputEvent::MouseMove {
+            x: 0.5,
+            y: 0.25,
+            display: 0,
+            seq: 1,
+        };
         assert!(postcard::to_stdvec(&ev).unwrap().len() < 32);
     }
 
     #[test]
     fn input_events_roundtrip() {
         let events = [
-            InputEvent::MouseMove { x: 0.0, y: 1.0, display: 0, seq: 1 },
-            InputEvent::MouseDown { button: MouseButton::Right, seq: 2 },
-            InputEvent::Scroll { delta_x: -1.5, delta_y: 3.0, seq: 3 },
-            InputEvent::KeyDown { key: PhysicalKey::KeyA, repeat: true, seq: 4 },
-            InputEvent::KeyUp { key: PhysicalKey::KeyA, seq: 5 },
-            InputEvent::Intent { intent: Intent::SecureAttention, seq: 6 },
+            InputEvent::MouseMove {
+                x: 0.0,
+                y: 1.0,
+                display: 0,
+                seq: 1,
+            },
+            InputEvent::MouseDown {
+                button: MouseButton::Right,
+                seq: 2,
+            },
+            InputEvent::Scroll {
+                delta_x: -1.5,
+                delta_y: 3.0,
+                seq: 3,
+            },
+            InputEvent::KeyDown {
+                key: PhysicalKey::KeyA,
+                repeat: true,
+                seq: 4,
+            },
+            InputEvent::KeyUp {
+                key: PhysicalKey::KeyA,
+                seq: 5,
+            },
+            InputEvent::Intent {
+                intent: Intent::SecureAttention,
+                seq: 6,
+            },
         ];
         for ev in events {
             let bytes = postcard::to_stdvec(&ev).unwrap();
@@ -586,7 +679,10 @@ mod tests {
     fn acks_roundtrip() {
         let acks = [
             InputAck::Ok { seq: 1 },
-            InputAck::Failed { seq: 2, reason: InputFailure::NotPermitted },
+            InputAck::Failed {
+                seq: 2,
+                reason: InputFailure::NotPermitted,
+            },
             InputAck::Applied { watermark: 99 },
         ];
         for ack in acks {
@@ -597,7 +693,12 @@ mod tests {
 
     #[test]
     fn mouse_move_carries_its_display() {
-        let ev = InputEvent::MouseMove { x: 0.5, y: 0.5, display: 2, seq: 1 };
+        let ev = InputEvent::MouseMove {
+            x: 0.5,
+            y: 0.5,
+            display: 2,
+            seq: 1,
+        };
         let bytes = postcard::to_stdvec(&ev).unwrap();
         assert_eq!(postcard::from_bytes::<InputEvent>(&bytes).unwrap(), ev);
     }
@@ -624,10 +725,15 @@ mod tests {
         };
         for message in [
             InputMessage::Ack(InputAck::Ok { seq: 1 }),
-            InputMessage::Displays { displays: vec![display] },
+            InputMessage::Displays {
+                displays: vec![display],
+            },
         ] {
             let bytes = postcard::to_stdvec(&message).unwrap();
-            assert_eq!(postcard::from_bytes::<InputMessage>(&bytes).unwrap(), message);
+            assert_eq!(
+                postcard::from_bytes::<InputMessage>(&bytes).unwrap(),
+                message
+            );
         }
     }
 
@@ -655,7 +761,10 @@ mod tests {
     fn capability_gates_usage() {
         assert!(InputCapability::Full.is_usable());
         assert!(
-            !InputCapability::Unavailable { reason: InputFailure::Unavailable }.is_usable()
+            !InputCapability::Unavailable {
+                reason: InputFailure::Unavailable
+            }
+            .is_usable()
         );
     }
 }

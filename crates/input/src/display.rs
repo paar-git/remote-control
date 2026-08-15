@@ -240,14 +240,8 @@ impl DisplayTopology {
                 // Distance from the shared edge, and the overlap that makes them
                 // neighbours at all.
                 let (gap, overlap) = match edge {
-                    Edge::Left => (
-                        left - cright,
-                        span_overlap(top, bottom, ctop, cbottom),
-                    ),
-                    Edge::Right => (
-                        cleft - right,
-                        span_overlap(top, bottom, ctop, cbottom),
-                    ),
+                    Edge::Left => (left - cright, span_overlap(top, bottom, ctop, cbottom)),
+                    Edge::Right => (cleft - right, span_overlap(top, bottom, ctop, cbottom)),
                     Edge::Top => (top - cbottom, span_overlap(left, right, cleft, cright)),
                     Edge::Bottom => (ctop - bottom, span_overlap(left, right, cleft, cright)),
                 };
@@ -417,14 +411,7 @@ const fn span_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> i64
 mod tests {
     use super::*;
 
-    fn display(
-        index: u8,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        primary: bool,
-    ) -> DisplayInfo {
+    fn display(index: u8, x: i32, y: i32, width: u32, height: u32, primary: bool) -> DisplayInfo {
         DisplayInfo {
             index,
             name: format!("Display {}", index + 1),
@@ -738,9 +725,15 @@ mod tests {
     #[test]
     fn edges_are_detected_within_tolerance() {
         assert_eq!(DisplayTopology::edge_at(0.001, 0.5, 0.01), Some(Edge::Left));
-        assert_eq!(DisplayTopology::edge_at(0.999, 0.5, 0.01), Some(Edge::Right));
+        assert_eq!(
+            DisplayTopology::edge_at(0.999, 0.5, 0.01),
+            Some(Edge::Right)
+        );
         assert_eq!(DisplayTopology::edge_at(0.5, 0.001, 0.01), Some(Edge::Top));
-        assert_eq!(DisplayTopology::edge_at(0.5, 0.999, 0.01), Some(Edge::Bottom));
+        assert_eq!(
+            DisplayTopology::edge_at(0.5, 0.999, 0.01),
+            Some(Edge::Bottom)
+        );
         assert_eq!(DisplayTopology::edge_at(0.5, 0.5, 0.01), None);
     }
 

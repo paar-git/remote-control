@@ -147,7 +147,11 @@ static LINUX: &[(Intent, Chord)] = &[
     row(Intent::SwitchApp, PhysicalKey::Tab, ALT),
     row(Intent::ShowDesktop, PhysicalKey::KeyD, META),
     row(Intent::LockScreen, PhysicalKey::KeyL, META),
-    row(Intent::Screenshot, PhysicalKey::PrintScreen, Modifiers::NONE),
+    row(
+        Intent::Screenshot,
+        PhysicalKey::PrintScreen,
+        Modifiers::NONE,
+    ),
     // No secure attention sequence on Linux.
 ];
 
@@ -453,7 +457,9 @@ mod tests {
         // If a variant is added to Intent without a table entry anywhere, this catches
         // it: no OS would list it.
         for intent in ALL_INTENTS {
-            let anywhere = HostOs::all().iter().any(|os| render(*intent, *os).is_some());
+            let anywhere = HostOs::all()
+                .iter()
+                .any(|os| render(*intent, *os).is_some());
             assert!(anywhere, "{intent:?} has no spelling on any OS");
         }
     }

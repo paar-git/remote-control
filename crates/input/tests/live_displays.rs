@@ -14,7 +14,6 @@
     reason = "integration tests are their own crate and do not inherit the library's               test-only allowances"
 )]
 
-
 use rc_input::backend::displays::enumerate;
 use rc_input::{DisplayTopology, Edge};
 

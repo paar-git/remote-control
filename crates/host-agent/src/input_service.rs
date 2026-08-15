@@ -98,9 +98,8 @@ impl<S: InputSink> InputService<S> {
     /// Always releases whatever is still held before returning: a connection dropped
     /// mid-chord must not leave a modifier jammed down on this machine.
     pub async fn run(mut self, reader: &mut ChannelReader) {
-        let mut watermark_timer = tokio::time::interval(std::time::Duration::from_millis(
-            WATERMARK_INTERVAL_MS,
-        ));
+        let mut watermark_timer =
+            tokio::time::interval(std::time::Duration::from_millis(WATERMARK_INTERVAL_MS));
         watermark_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let mut display_timer =
@@ -378,7 +377,15 @@ mod tests {
         // Motion carries no ack, so a view-only session must not appear to be moving
         // the pointer.
         let mut h = Harness::new(PermissionSet::NONE, HostOs::Windows, true);
-        assert_eq!(h.handle(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 0, seq: 1 }), None);
+        assert_eq!(
+            h.handle(InputEvent::MouseMove {
+                x: 0.5,
+                y: 0.5,
+                display: 0,
+                seq: 1
+            }),
+            None
+        );
         assert_eq!(h.input.watermark(), 0);
         assert!(h.input.sink().calls().is_empty());
     }
@@ -386,7 +393,15 @@ mod tests {
     #[test]
     fn permitted_motion_advances_the_watermark_without_an_ack() {
         let mut h = Harness::new(controlling(), HostOs::Windows, true);
-        assert_eq!(h.handle(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 0, seq: 6 }), None);
+        assert_eq!(
+            h.handle(InputEvent::MouseMove {
+                x: 0.5,
+                y: 0.5,
+                display: 0,
+                seq: 6
+            }),
+            None
+        );
         assert_eq!(h.input.watermark(), 6);
     }
 
@@ -398,7 +413,10 @@ mod tests {
             seq: 1,
         });
         let keys = h.input.sink().key_calls();
-        assert_eq!(keys.first().map(|(key, _)| *key), Some(PhysicalKey::MetaLeft));
+        assert_eq!(
+            keys.first().map(|(key, _)| *key),
+            Some(PhysicalKey::MetaLeft)
+        );
     }
 
     #[test]

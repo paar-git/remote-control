@@ -37,8 +37,7 @@ pub use intent::{Chord, HostOs, detect, render};
 pub use session::HeldKeys;
 
 use rc_protocol::{
-    Intent, InputAck, InputCapability, InputEvent, InputFailure, KeyState, MouseButton,
-    PhysicalKey,
+    InputAck, InputCapability, InputEvent, InputFailure, Intent, KeyState, MouseButton, PhysicalKey,
 };
 
 /// Why an injection did not happen.
@@ -246,7 +245,9 @@ impl<S: InputSink> InputSession<S> {
                     .ok_or(InputError::Refused(InputFailure::Unavailable))?;
                 self.sink.pointer_move_to(gx, gy)
             }
-            InputEvent::Scroll { delta_x, delta_y, .. } => self.sink.scroll(delta_x, delta_y),
+            InputEvent::Scroll {
+                delta_x, delta_y, ..
+            } => self.sink.scroll(delta_x, delta_y),
             InputEvent::MouseDown { button, .. } => {
                 self.sink.button(button, KeyState::Down)?;
                 self.held.button(button, KeyState::Down);
@@ -279,8 +280,7 @@ impl<S: InputSink> InputSession<S> {
         let os = self
             .os
             .ok_or(InputError::Refused(InputFailure::NotSupported))?;
-        let chord =
-            render(intent, os).ok_or(InputError::Refused(InputFailure::NotSupported))?;
+        let chord = render(intent, os).ok_or(InputError::Refused(InputFailure::NotSupported))?;
 
         self.press_chord(chord)
     }
@@ -391,7 +391,10 @@ mod tests {
             seq: 1,
         });
         assert_eq!(ack, Some(InputAck::Ok { seq: 1 }));
-        assert_eq!(s.sink().key_calls(), vec![(PhysicalKey::KeyA, KeyState::Down)]);
+        assert_eq!(
+            s.sink().key_calls(),
+            vec![(PhysicalKey::KeyA, KeyState::Down)]
+        );
     }
 
     #[test]
@@ -480,7 +483,12 @@ mod tests {
     fn motion_is_not_acknowledged_but_advances_the_watermark() {
         let mut s = session(HostOs::Windows);
         assert_eq!(
-            s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 0, seq: 4 }),
+            s.apply(InputEvent::MouseMove {
+                x: 0.5,
+                y: 0.5,
+                display: 0,
+                seq: 4
+            }),
             None
         );
         assert_eq!(s.watermark(), 4);
@@ -493,20 +501,41 @@ mod tests {
         // The whole point of multi-monitor support: the same fraction must resolve to
         // a completely different part of the virtual desktop.
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 1, seq: 1 });
+        s.apply(InputEvent::MouseMove {
+            x: 0.5,
+            y: 0.5,
+            display: 1,
+            seq: 1,
+        });
         assert_eq!(
             s.sink().calls(),
-            &[Call::PointerMove { gx: 1920 + 1280, gy: 200 + 720 }]
+            &[Call::PointerMove {
+                gx: 1920 + 1280,
+                gy: 200 + 720
+            }]
         );
     }
 
     #[test]
     fn the_same_fraction_differs_between_displays() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 0.25, y: 0.25, display: 0, seq: 1 });
-        s.apply(InputEvent::MouseMove { x: 0.25, y: 0.25, display: 1, seq: 2 });
+        s.apply(InputEvent::MouseMove {
+            x: 0.25,
+            y: 0.25,
+            display: 0,
+            seq: 1,
+        });
+        s.apply(InputEvent::MouseMove {
+            x: 0.25,
+            y: 0.25,
+            display: 1,
+            seq: 2,
+        });
         let calls = s.sink().calls();
-        assert_ne!(calls[0], calls[1], "both displays resolved to the same point");
+        assert_ne!(
+            calls[0], calls[1],
+            "both displays resolved to the same point"
+        );
     }
 
     #[test]
@@ -516,11 +545,20 @@ mod tests {
         let mut s = InputSession::new(MockSink::new(), Some(HostOs::Windows), true);
         s.set_topology(DisplayTopology::default());
         assert_eq!(
-            s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 3, seq: 1 }),
+            s.apply(InputEvent::MouseMove {
+                x: 0.5,
+                y: 0.5,
+                display: 3,
+                seq: 1
+            }),
             None
         );
         assert!(s.sink().calls().is_empty());
-        assert_eq!(s.watermark(), 0, "a refused move must not advance the watermark");
+        assert_eq!(
+            s.watermark(),
+            0,
+            "a refused move must not advance the watermark"
+        );
     }
 
     #[test]
@@ -528,7 +566,12 @@ mod tests {
         // The display is gone but others remain: the session continues on the primary
         // rather than dying.
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 0.0, y: 0.0, display: 9, seq: 1 });
+        s.apply(InputEvent::MouseMove {
+            x: 0.0,
+            y: 0.0,
+            display: 9,
+            seq: 1,
+        });
         assert_eq!(s.sink().calls(), &[Call::PointerMove { gx: 0, gy: 0 }]);
     }
 
@@ -536,15 +579,30 @@ mod tests {
     fn the_watermark_never_goes_backwards() {
         // Reordering cannot make the controller think earlier motion was undone.
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 0.1, y: 0.1, display: 0, seq: 9 });
-        s.apply(InputEvent::MouseMove { x: 0.2, y: 0.2, display: 0, seq: 3 });
+        s.apply(InputEvent::MouseMove {
+            x: 0.1,
+            y: 0.1,
+            display: 0,
+            seq: 9,
+        });
+        s.apply(InputEvent::MouseMove {
+            x: 0.2,
+            y: 0.2,
+            display: 0,
+            seq: 3,
+        });
         assert_eq!(s.watermark(), 9);
     }
 
     #[test]
     fn out_of_range_coordinates_are_clamped_not_dropped() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 1.5, y: -0.2, display: 0, seq: 1 });
+        s.apply(InputEvent::MouseMove {
+            x: 1.5,
+            y: -0.2,
+            display: 0,
+            seq: 1,
+        });
         // Clamped to the far right edge and the top of display 0.
         assert_eq!(s.sink().calls(), &[Call::PointerMove { gx: 1919, gy: 0 }]);
     }
@@ -607,20 +665,45 @@ mod tests {
     #[test]
     fn a_drag_is_just_down_move_up() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseDown { button: MouseButton::Left, seq: 1 });
-        s.apply(InputEvent::MouseMove { x: 0.2, y: 0.3, display: 0, seq: 2 });
+        s.apply(InputEvent::MouseDown {
+            button: MouseButton::Left,
+            seq: 1,
+        });
+        s.apply(InputEvent::MouseMove {
+            x: 0.2,
+            y: 0.3,
+            display: 0,
+            seq: 2,
+        });
         // Continuing the drag onto the second display, which is what makes a drag
         // across a monitor boundary work.
-        s.apply(InputEvent::MouseMove { x: 0.6, y: 0.7, display: 1, seq: 3 });
-        s.apply(InputEvent::MouseUp { button: MouseButton::Left, seq: 4 });
+        s.apply(InputEvent::MouseMove {
+            x: 0.6,
+            y: 0.7,
+            display: 1,
+            seq: 3,
+        });
+        s.apply(InputEvent::MouseUp {
+            button: MouseButton::Left,
+            seq: 4,
+        });
 
         assert_eq!(
             s.sink().calls(),
             &[
-                Call::Button { button: MouseButton::Left, state: KeyState::Down },
+                Call::Button {
+                    button: MouseButton::Left,
+                    state: KeyState::Down
+                },
                 Call::PointerMove { gx: 384, gy: 324 },
-                Call::PointerMove { gx: 1920 + 1536, gy: 200 + 1008 },
-                Call::Button { button: MouseButton::Left, state: KeyState::Up },
+                Call::PointerMove {
+                    gx: 1920 + 1536,
+                    gy: 200 + 1008
+                },
+                Call::Button {
+                    button: MouseButton::Left,
+                    state: KeyState::Up
+                },
             ]
         );
         assert!(s.held().is_empty());
@@ -631,9 +714,15 @@ mod tests {
         let mut s = session(HostOs::Windows);
         for seq in 1..=4 {
             let event = if seq % 2 == 1 {
-                InputEvent::MouseDown { button: MouseButton::Left, seq }
+                InputEvent::MouseDown {
+                    button: MouseButton::Left,
+                    seq,
+                }
             } else {
-                InputEvent::MouseUp { button: MouseButton::Left, seq }
+                InputEvent::MouseUp {
+                    button: MouseButton::Left,
+                    seq,
+                }
             };
             s.apply(event);
         }
@@ -654,7 +743,10 @@ mod tests {
             s.apply(InputEvent::MouseDown { button, seq: 1 });
             assert_eq!(
                 s.sink().calls(),
-                &[Call::Button { button, state: KeyState::Down }]
+                &[Call::Button {
+                    button,
+                    state: KeyState::Down
+                }]
             );
         }
     }
@@ -662,7 +754,11 @@ mod tests {
     #[test]
     fn scrolling_passes_both_axes_through() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::Scroll { delta_x: -2.0, delta_y: 3.5, seq: 1 });
+        s.apply(InputEvent::Scroll {
+            delta_x: -2.0,
+            delta_y: 3.5,
+            seq: 1,
+        });
         assert_eq!(s.sink().calls(), &[Call::Scroll { dx: -2.0, dy: 3.5 }]);
     }
 
@@ -698,19 +794,32 @@ mod tests {
     #[test]
     fn teardown_releases_a_held_mouse_button() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseDown { button: MouseButton::Left, seq: 1 });
+        s.apply(InputEvent::MouseDown {
+            button: MouseButton::Left,
+            seq: 1,
+        });
         s.release_all();
         assert_eq!(
             s.sink().calls().last(),
-            Some(&Call::Button { button: MouseButton::Left, state: KeyState::Up })
+            Some(&Call::Button {
+                button: MouseButton::Left,
+                state: KeyState::Up
+            })
         );
     }
 
     #[test]
     fn teardown_on_a_clean_session_does_nothing() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::KeyDown { key: PhysicalKey::KeyA, repeat: false, seq: 1 });
-        s.apply(InputEvent::KeyUp { key: PhysicalKey::KeyA, seq: 2 });
+        s.apply(InputEvent::KeyDown {
+            key: PhysicalKey::KeyA,
+            repeat: false,
+            seq: 1,
+        });
+        s.apply(InputEvent::KeyUp {
+            key: PhysicalKey::KeyA,
+            seq: 2,
+        });
         let before = s.sink().calls().len();
         s.release_all();
         assert_eq!(s.sink().calls().len(), before);
@@ -726,7 +835,10 @@ mod tests {
                 seq,
             });
         }
-        s.apply(InputEvent::KeyUp { key: PhysicalKey::KeyA, seq: 6 });
+        s.apply(InputEvent::KeyUp {
+            key: PhysicalKey::KeyA,
+            seq: 6,
+        });
         assert!(s.held().is_empty());
     }
 
@@ -741,7 +853,10 @@ mod tests {
 
             for to in HostOs::all() {
                 let mut s = session(to);
-                s.apply(InputEvent::Intent { intent: recognised, seq: 1 });
+                s.apply(InputEvent::Intent {
+                    intent: recognised,
+                    seq: 1,
+                });
 
                 let expected_modifier = match to {
                     HostOs::MacOs => PhysicalKey::MetaLeft,
@@ -776,20 +891,26 @@ mod tests {
                 };
 
                 let mut s = session(HostOs::MacOs);
-                s.apply(InputEvent::Intent { intent: recognised, seq: 1 });
+                s.apply(InputEvent::Intent {
+                    intent: recognised,
+                    seq: 1,
+                });
 
                 let pressed = s.sink().key_calls();
                 if let Some(expected) = render(recognised, HostOs::MacOs) {
                     let wanted = expected.mods.contains(Modifiers::META);
-                    let pressed_meta = pressed
-                        .iter()
-                        .any(|(key, _)| matches!(key, PhysicalKey::MetaLeft | PhysicalKey::MetaRight));
+                    let pressed_meta = pressed.iter().any(|(key, _)| {
+                        matches!(key, PhysicalKey::MetaLeft | PhysicalKey::MetaRight)
+                    });
                     assert_eq!(
                         pressed_meta, wanted,
                         "{intent:?} from {from:?} pressed Meta on macOS incorrectly"
                     );
                 } else {
-                    assert!(pressed.is_empty(), "{intent:?} from {from:?} was approximated on macOS");
+                    assert!(
+                        pressed.is_empty(),
+                        "{intent:?} from {from:?} was approximated on macOS"
+                    );
                 }
             }
         }

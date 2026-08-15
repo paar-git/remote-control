@@ -5,7 +5,7 @@
 //! a machine with no desktop, no display server and no accessibility permission —
 //! including CI containers on all three platforms.
 
-use rc_protocol::{Intent, InputCapability, InputFailure, KeyState, MouseButton, PhysicalKey};
+use rc_protocol::{InputCapability, InputFailure, Intent, KeyState, MouseButton, PhysicalKey};
 
 use crate::{HostOs, InputSink, Result, intent};
 

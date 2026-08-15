@@ -26,7 +26,10 @@ use rc_protocol::PhysicalKey;
 /// Returning `None` rather than a near-miss is deliberate: pressing some *other* key
 /// on a machine the operator cannot see is worse than pressing none and saying so.
 #[must_use]
-#[expect(clippy::too_many_lines, reason = "a flat lookup table reads best whole")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a flat lookup table reads best whole"
+)]
 // `allow` rather than `expect`: which arms exist here is platform-dependent, so whether
 // two of them coincide is too. An `expect` that is fulfilled on Linux and unfulfilled on
 // macOS would fail the build on one platform whichever way it was written.

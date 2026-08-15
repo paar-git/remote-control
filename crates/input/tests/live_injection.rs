@@ -20,7 +20,6 @@
     reason = "integration tests are their own crate and do not inherit the library's               test-only allowances"
 )]
 
-
 use rc_input::backend::enigo::{EnigoSink, probe};
 use rc_input::{HostOs, InputSession};
 use rc_protocol::{InputAck, InputEvent, Intent, PhysicalKey};
@@ -44,7 +43,10 @@ fn the_pointer_actually_moves() {
     session.set_topology(rc_input::backend::displays::enumerate());
 
     // Three corners, so a stuck pointer cannot pass by coincidence.
-    for (seq, (x, y)) in [(0.25, 0.25), (0.75, 0.25), (0.5, 0.6)].into_iter().enumerate() {
+    for (seq, (x, y)) in [(0.25, 0.25), (0.75, 0.25), (0.5, 0.6)]
+        .into_iter()
+        .enumerate()
+    {
         let ack = session.apply(InputEvent::MouseMove {
             x,
             y,
@@ -177,8 +179,8 @@ fn the_pointer_lands_on_the_display_it_was_aimed_at() {
 #[test]
 #[ignore = "moves the real pointer across real monitors"]
 fn crossing_an_edge_moves_the_real_pointer_to_the_neighbour() {
-    use rc_input::backend::displays::enumerate;
     use rc_input::Edge;
+    use rc_input::backend::displays::enumerate;
 
     let topology = enumerate();
     if topology.len() < 2 {

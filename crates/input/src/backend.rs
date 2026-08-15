@@ -7,8 +7,8 @@
 pub mod mock;
 
 #[cfg(feature = "inject")]
-pub mod enigo;
-#[cfg(feature = "inject")]
 pub mod displays;
+#[cfg(feature = "inject")]
+pub mod enigo;
 #[cfg(feature = "inject")]
 pub mod keymap;

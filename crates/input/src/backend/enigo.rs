@@ -24,10 +24,8 @@
 //!   detected up front and reported as [`InputFailure::Unavailable`] rather than
 //!   accepting events and dropping them.
 
-use enigo::{
-    Axis, Button, Coordinate, Direction, Enigo, Keyboard as _, Mouse as _, Settings,
-};
-use rc_protocol::{Intent, InputCapability, InputFailure, KeyState, MouseButton, PhysicalKey};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard as _, Mouse as _, Settings};
+use rc_protocol::{InputCapability, InputFailure, Intent, KeyState, MouseButton, PhysicalKey};
 
 use crate::{HostOs, InputError, InputSink, Result, intent};
 
@@ -111,8 +109,8 @@ impl EnigoSink {
         if let Some(reason) = wayland_refusal() {
             return Err(InputError::Refused(reason));
         }
-        let enigo = Enigo::new(&Settings::default())
-            .map_err(|err| InputError::Backend(err.to_string()))?;
+        let enigo =
+            Enigo::new(&Settings::default()).map_err(|err| InputError::Backend(err.to_string()))?;
         Ok(Self {
             enigo,
             capability: InputCapability::Full,
@@ -186,11 +184,9 @@ impl InputSink for EnigoSink {
     }
 
     fn key(&mut self, key: PhysicalKey, state: KeyState) -> Result<()> {
-        let native = super::keymap::to_enigo(key)
-            .ok_or(InputError::Refused(InputFailure::NotSupported))?;
-        self.enigo
-            .key(native, direction_of(state))
-            .map_err(map_err)
+        let native =
+            super::keymap::to_enigo(key).ok_or(InputError::Refused(InputFailure::NotSupported))?;
+        self.enigo.key(native, direction_of(state)).map_err(map_err)
     }
 
     fn capability(&self) -> InputCapability {
