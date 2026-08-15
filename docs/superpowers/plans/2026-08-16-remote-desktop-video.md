@@ -294,8 +294,9 @@ use crate::Result;
 
 pub mod mock;
 
-#[cfg(feature = "capture")]
-pub mod xcap_source;
+// NOTE: `pub mod xcap_source;` is deliberately NOT declared here. Task 7 creates that
+// file and adds its declaration in the same commit. Declaring it now would break
+// `cargo clippy --all-features` — which CI runs — for every commit until Task 7 lands.
 
 /// One captured frame, in RGBA order.
 ///
@@ -855,7 +856,12 @@ mod tests {
     fn a_keyframe_too_big_for_one_frame_is_split_and_counted_down() {
         // The 4K case: raw RGBA is 31.6 MiB against a 16 MiB channel limit. Every
         // slice must fit, and the last one must say the refresh is complete.
-        let budget = 8 * 1024;
+        //
+        // 40 KiB is chosen against the tile size, not arbitrarily: one 64x64 RGBA tile
+        // is exactly 16_384 bytes, so a budget below that would make a single tile
+        // unsplittable and the encoder would correctly refuse rather than slice. 40_960
+        // holds two tiles but not three, so a 16-tile frame yields eight slices.
+        let budget = 40 * 1024;
         let mut encoder = Encoder::with_budget(VideoCodec::RawRgba, 256, 256, budget)
             .expect("valid size");
 
@@ -1016,35 +1022,28 @@ impl Encoder {
         let keyframe = force_keyframe || changed.len() as u32 == self.grid.count();
 
         // Group the changed tiles into runs that each fit the ceiling.
+        //
+        // Slices are closed on *raw* size and compressed once, rather than compressing
+        // after every tile. Compressing per tile is O(n^2): a 4K keyframe is 2040 tiles,
+        // so it would compress a growing 30 MiB buffer 2040 times, costing seconds. The
+        // raw threshold only decides where to cut; the coded size is still checked
+        // against the budget below, so the guarantee does not rest on the estimate.
         let mut slices: Vec<(Vec<Rect>, Vec<u8>)> = Vec::new();
-        let mut rects: Vec<Rect> = Vec::new();
-        let mut raw: Vec<u8> = Vec::new();
+        let mut pending: Vec<u32> = Vec::new();
+        let mut pending_raw = 0usize;
 
         for index in changed {
-            let before = raw.len();
-            self.grid.copy_out(&frame.rgba, index, &mut raw);
-            rects.push(self.grid.rect(index));
-
-            let coded = self.code(&raw)?;
-            if coded.len() > self.budget {
-                if rects.len() == 1 {
-                    return Err(VideoError::FrameTooLarge {
-                        bytes: coded.len(),
-                        limit: self.budget,
-                    });
-                }
-                // Roll this tile back into the next slice.
-                raw.truncate(before);
-                let last = rects.pop().expect("just pushed at least two");
-                slices.push((std::mem::take(&mut rects), self.code(&raw)?));
-                raw.clear();
-                rects.push(last);
-                self.grid.copy_out(&frame.rgba, index, &mut raw);
+            let tile = self.grid.tile_bytes(index);
+            if !pending.is_empty() && pending_raw + tile > self.raw_threshold() {
+                self.flush(&frame.rgba, &pending, &mut slices)?;
+                pending.clear();
+                pending_raw = 0;
             }
+            pending.push(index);
+            pending_raw += tile;
         }
-        if !rects.is_empty() {
-            let coded = self.code(&raw)?;
-            slices.push((rects, coded));
+        if !pending.is_empty() {
+            self.flush(&frame.rgba, &pending, &mut slices)?;
         }
 
         let total = slices.len();
@@ -1063,6 +1062,50 @@ impl Encoder {
             self.sequence += 1;
         }
         Ok(out)
+    }
+
+    /// How many raw bytes to gather before closing a slice.
+    ///
+    /// For `RawRgba` the coded size is the raw size, so the budget is exact. For
+    /// `TiledZstd` this is a deliberate under-estimate of the compression ratio:
+    /// guessing low costs an extra slice, guessing high costs a retry, and screen
+    /// content reliably beats 3:1.
+    const fn raw_threshold(&self) -> usize {
+        match self.codec {
+            VideoCodec::RawRgba => self.budget,
+            _ => self.budget.saturating_mul(3),
+        }
+    }
+
+    /// Code `tiles` into one or more slices, splitting if the coded result overruns.
+    ///
+    /// The split is halving rather than per-tile backtracking: an overrun means the
+    /// ratio estimate was wrong for this content, and halving converges in a few steps
+    /// without another O(n^2) path.
+    fn flush(
+        &self,
+        rgba: &[u8],
+        tiles: &[u32],
+        slices: &mut Vec<(Vec<Rect>, Vec<u8>)>,
+    ) -> Result<()> {
+        let mut raw = Vec::new();
+        for &index in tiles {
+            self.grid.copy_out(rgba, index, &mut raw);
+        }
+        let coded = self.code(&raw)?;
+        if coded.len() <= self.budget {
+            slices.push((tiles.iter().map(|&i| self.grid.rect(i)).collect(), coded));
+            return Ok(());
+        }
+        if tiles.len() == 1 {
+            return Err(VideoError::FrameTooLarge {
+                bytes: coded.len(),
+                limit: self.budget,
+            });
+        }
+        let (left, right) = tiles.split_at(tiles.len() / 2);
+        self.flush(rgba, left, slices)?;
+        self.flush(rgba, right, slices)
     }
 
     /// Apply the codec to a concatenated tile payload.
@@ -1150,7 +1193,8 @@ mod tests {
     #[test]
     fn a_split_refresh_is_only_complete_when_the_last_slice_lands() {
         // Presenting a half-applied refresh shows the operator a torn screen.
-        let budget = 4 * 1024;
+        // See Task 5 on why 40 KiB: it must exceed one 16_384-byte tile.
+        let budget = 40 * 1024;
         let mut encoder =
             Encoder::with_budget(VideoCodec::RawRgba, 256, 256, budget).expect("valid size");
         let mut decoder = Decoder::new(VideoCodec::RawRgba, 256, 256).expect("valid size");
@@ -1468,7 +1512,15 @@ Expected: FAIL to compile — `could not find xcap_source in capture`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Create `crates/video/src/capture/xcap_source.rs`:
+First add the module declaration that Task 2 deliberately left out. In
+`crates/video/src/capture.rs`, replacing the NOTE comment Task 2 put there:
+
+```rust
+#[cfg(feature = "capture")]
+pub mod xcap_source;
+```
+
+Then create `crates/video/src/capture/xcap_source.rs`:
 
 ```rust
 //! Capture through `xcap`.
