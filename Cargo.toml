@@ -10,6 +10,7 @@ members = [
     "crates/updater",
     "crates/platform",
     "crates/input",
+    "crates/video",
     "crates/host-agent",
     "apps/desktop-client/src-tauri",
 ]
@@ -29,6 +30,7 @@ rc-security = { path = "crates/security" }
 rc-transport = { path = "crates/transport" }
 rc-platform = { path = "crates/platform" }
 rc-input = { path = "crates/input" }
+rc-video = { path = "crates/video" }
 rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }
 rc-file-transfer = { path = "crates/file-transfer" }
@@ -52,6 +54,8 @@ bytes = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 flate2 = "1.0"
 tar = "0.4"
+zstd = "0.13"
+rustc-hash = "2.1"
 
 # --- errors / logging ---
 thiserror = "2.0"

@@ -1,0 +1,30 @@
+[package]
+name = "rc-video"
+description = "Screen capture, tile-differencing encode and decode for the remote desktop stream."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# The real capture backend is off by default so the encoder — and every test that
+# covers it — builds on a machine with no desktop at all, including CI containers.
+# Enabling it pulls in the only dependency that talks to a display server.
+default = []
+capture = ["dep:xcap"]
+
+[dependencies]
+rc-protocol = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zstd = { workspace = true }
+rustc-hash = { workspace = true }
+xcap = { version = "0.9.8", optional = true }
+
+[dev-dependencies]
+postcard = { workspace = true }
+
+[lints]
+workspace = true
