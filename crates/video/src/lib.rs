@@ -14,6 +14,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod capture;
+pub mod tile;
 
 /// Anything that can go wrong capturing or coding a frame.
 #[derive(Debug, thiserror::Error)]
