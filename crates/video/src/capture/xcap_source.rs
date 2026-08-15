@@ -45,7 +45,8 @@ impl XcapSource {
     fn ordered() -> Result<Vec<xcap::Monitor>> {
         let mut monitors =
             xcap::Monitor::all().map_err(|err| VideoError::Capture(err.to_string()))?;
-        monitors.retain(|m| m.x().is_ok() && m.y().is_ok() && m.width().is_ok());
+        monitors
+            .retain(|m| m.x().is_ok() && m.y().is_ok() && m.width().is_ok() && m.height().is_ok());
         monitors.sort_by_key(|m| (m.x().unwrap_or(0), m.y().unwrap_or(0)));
         Ok(monitors)
     }
@@ -59,6 +60,12 @@ impl CaptureSource for XcapSource {
             let Ok(index) = u8::try_from(position) else {
                 break; // more than 255 displays; the protocol indexes with a u8
             };
+            // Unreachable in practice: `ordered()` already retains only monitors whose
+            // `width()` and `height()` both succeeded, so every index assigned below is
+            // dense. Kept as a defensive guard against `ordered()`'s retain predicate
+            // being loosened later without this call site being revisited — if that
+            // happens, skipping (rather than assigning a bogus size) is still the
+            // correct failure mode.
             let (Ok(width), Ok(height)) = (monitor.width(), monitor.height()) else {
                 continue;
             };
@@ -112,6 +119,12 @@ fn round_hz(hz: f32) -> Option<u32> {
     // subsequent `try_from` is the real (infallible-here) guard clippy asks for.
     #[allow(clippy::cast_possible_truncation)]
     let rounded = hz.round() as i64;
+    // A positive-but-sub-0.5 reading (e.g. 0.3) passes the guard above but rounds to
+    // zero. Zero is not a refresh rate any display has, so it means the same thing as
+    // a failed reading: report it as `None`, not as `Some(0)`.
+    if rounded == 0 {
+        return None;
+    }
     u32::try_from(rounded).ok()
 }
 
@@ -119,4 +132,27 @@ fn round_hz(hz: f32) -> Option<u32> {
 fn is_wayland() -> bool {
     cfg!(target_os = "linux")
         && std::env::var("XDG_SESSION_TYPE").is_ok_and(|kind| kind.eq_ignore_ascii_case("wayland"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round_hz;
+
+    #[test]
+    fn an_unusable_refresh_reading_becomes_none_rather_than_zero() {
+        // The field is Option<u32> precisely so "the display did not answer" is
+        // expressible. Reporting 0 Hz would be inventing an answer.
+        assert_eq!(round_hz(f32::NAN), None);
+        assert_eq!(round_hz(0.0), None);
+        assert_eq!(round_hz(-60.0), None);
+        assert_eq!(
+            round_hz(0.3),
+            None,
+            "rounds to zero, so it is not a refresh rate"
+        );
+        assert_eq!(round_hz(f32::INFINITY), None);
+        assert_eq!(round_hz(60.0), Some(60));
+        assert_eq!(round_hz(59.94), Some(60));
+        assert_eq!(round_hz(119.88), Some(120));
+    }
 }
