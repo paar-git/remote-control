@@ -18,10 +18,11 @@
 //! only ever match one of them. Admission is decided one layer up, in the handshake.
 //!
 //! That means an unknown peer can complete a TLS handshake and open a stream. What it
-//! cannot do is anything else. In this build the handshake has no way to authorise a
-//! peer at all — the pairing protocol has been deleted and the accept path that
-//! replaces it is not here yet — so every session is refused; see
-//! [`rc_transport::handshake`].
+//! cannot do is anything else until admission decides. Completing TLS proves only
+//! which key is on the other end. The handshake then asks
+//! [`crate::access::authorize_connection`]: a trusted identity, an unattended
+//! password, or a human clicking Accept. A refused peer learns only that it was
+//! refused; see [`rc_transport::handshake`].
 //!
 //! # Bounds
 //!
@@ -685,6 +686,30 @@ impl AgentServer {
                         );
                         tokio::spawn(service.run());
                     }
+                    rc_protocol::Channel::Input => {
+                        // The sink is built per channel so a host that cannot inject
+                        // reports that fact to this client rather than failing at
+                        // startup for every client.
+                        match rc_input::backend::enigo::EnigoSink::new() {
+                            Ok(sink) => {
+                                let service = crate::input_service::InputService::new(
+                                    writer,
+                                    session,
+                                    sink,
+                                    server.config.features.remote_desktop,
+                                );
+                                tokio::spawn(async move {
+                                    service.run(&mut reader).await;
+                                });
+                            }
+                            Err(err) => {
+                                // Answered rather than ignored: a client waiting on an
+                                // acknowledgement that never comes cannot tell a
+                                // permission problem from a dead link.
+                                tracing::warn!(%err, "input channel opened on a host that cannot inject");
+                            }
+                        }
+                    }
                     other => {
                         // A channel this build does not serve is closed rather than left
                         // open: a client waiting on a stream nobody reads would appear
@@ -714,7 +739,8 @@ impl AgentServer {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            remote_desktop: false,
+            remote_desktop: self.config.features.remote_desktop
+                && rc_input::backend::enigo::probe().is_usable(),
             file_transfer: self.config.features.file_transfer,
             monitoring: true,
             process_management: self.config.features.process_management,

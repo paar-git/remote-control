@@ -1,4 +1,7 @@
-//! Remote-desktop video and input messages.
+//! Remote-desktop video and display messages.
+//!
+//! Input lives in [`crate::input`]: physical keys and logical intents are separate
+//! concerns from video, and both peers need them without pulling in framing.
 
 use serde::{Deserialize, Serialize};
 
@@ -185,105 +188,9 @@ pub struct Rect {
     pub height: u32,
 }
 
-/// Mouse buttons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum MouseButton {
-    /// Primary button.
-    Left,
-    /// Secondary button.
-    Right,
-    /// Wheel click.
-    Middle,
-    /// Back.
-    Back,
-    /// Forward.
-    Forward,
-}
-
-/// Input events sent from client to agent.
-///
-/// The agent must drop every one of these unless the session is authenticated,
-/// authorized for control, and currently in [`InteractionMode::Control`].
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum InputEvent {
-    /// Absolute pointer move, normalised to 0.0–1.0 of the captured display so that
-    /// DPI and resolution differences between the two machines do not matter.
-    MouseMove {
-        /// Horizontal position, 0.0–1.0.
-        x: f32,
-        /// Vertical position, 0.0–1.0.
-        y: f32,
-    },
-    /// Button pressed.
-    MouseDown {
-        /// Which button.
-        button: MouseButton,
-    },
-    /// Button released.
-    MouseUp {
-        /// Which button.
-        button: MouseButton,
-    },
-    /// Wheel or trackpad scroll, in wheel deltas.
-    Scroll {
-        /// Horizontal delta.
-        delta_x: f32,
-        /// Vertical delta.
-        delta_y: f32,
-    },
-    /// Key pressed. Uses W3C `KeyboardEvent.code` semantics mapped to a portable
-    /// scancode by the client, so keyboard layouts on the two hosts stay independent.
-    KeyDown {
-        /// Portable scancode.
-        scancode: u32,
-        /// Whether this is an autorepeat.
-        repeat: bool,
-    },
-    /// Key released.
-    KeyUp {
-        /// Portable scancode.
-        scancode: u32,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn input_events_are_small_on_the_wire() {
-        // Input must stay far below the 4 KiB input-channel ceiling so flooding is
-        // bounded by the rate limiter rather than by frame size.
-        let ev = InputEvent::MouseMove { x: 0.5, y: 0.25 };
-        assert!(postcard::to_stdvec(&ev).unwrap().len() < 32);
-    }
-
-    #[test]
-    fn input_events_roundtrip() {
-        let events = [
-            InputEvent::MouseMove { x: 0.0, y: 1.0 },
-            InputEvent::MouseDown {
-                button: MouseButton::Right,
-            },
-            InputEvent::Scroll {
-                delta_x: -1.5,
-                delta_y: 3.0,
-            },
-            InputEvent::KeyDown {
-                scancode: 65,
-                repeat: true,
-            },
-            InputEvent::KeyUp { scancode: 65 },
-        ];
-        for ev in events {
-            let bytes = postcard::to_stdvec(&ev).unwrap();
-            assert_eq!(postcard::from_bytes::<InputEvent>(&bytes).unwrap(), ev);
-        }
-    }
 
     #[test]
     fn raw_fallback_codec_always_exists() {

@@ -28,7 +28,8 @@
 //! | [`control`] | Handshake, session lifecycle, errors |
 //! | [`files`] | Browsing and resumable transfer |
 //! | [`system`] | Metrics, processes, services, power |
-//! | [`desktop`] | Video streaming and input injection |
+//! | [`desktop`] | Video streaming and display enumeration |
+//! | [`input`] | Physical keys, logical intents and acknowledgement |
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
@@ -39,6 +40,7 @@ pub mod error;
 pub mod files;
 pub mod frame;
 pub mod ids;
+pub mod input;
 pub mod limits;
 pub mod replay;
 pub mod system;
@@ -47,6 +49,10 @@ pub mod version;
 pub use error::{ProtocolError, Result};
 pub use frame::{Channel, Frame, FrameDecoder};
 pub use ids::{DeviceId, RequestId, SessionId, TransferId, UserId};
+pub use input::{
+    Intent, InputAck, InputCapability, InputEvent, InputFailure, KeyState, Modifiers,
+    MouseButton, PhysicalKey,
+};
 pub use version::{CURRENT_VERSION, ProtocolVersion};
 
 /// Application-Layer Protocol Negotiation identifier offered on every QUIC/TLS
@@ -55,7 +61,7 @@ pub use version::{CURRENT_VERSION, ProtocolVersion};
 pub const ALPN_PROTOCOL: &[u8] = b"rc/1";
 
 /// Default UDP port the host agent listens on for QUIC.
-pub const DEFAULT_AGENT_PORT: u16 = 47_811;
+pub const DEFAULT_AGENT_PORT: u16 = 7443;
 
 /// Default TCP port for the agent's loopback-only health endpoint.
 pub const DEFAULT_AGENT_HEALTH_PORT: u16 = 47_813;

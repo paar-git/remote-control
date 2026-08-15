@@ -9,6 +9,7 @@ members = [
     "crates/file-transfer",
     "crates/updater",
     "crates/platform",
+    "crates/input",
     "crates/host-agent",
     "apps/desktop-client/src-tauri",
 ]
@@ -27,6 +28,7 @@ rc-protocol = { path = "crates/protocol" }
 rc-security = { path = "crates/security" }
 rc-transport = { path = "crates/transport" }
 rc-platform = { path = "crates/platform" }
+rc-input = { path = "crates/input" }
 rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }
 rc-file-transfer = { path = "crates/file-transfer" }
@@ -81,7 +83,6 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 
 # --- system / platform ---
 sysinfo = "0.39"
-portable-pty = "0.9"
 directories = "6.0"
 walkdir = "2.5"
 

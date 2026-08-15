@@ -13,6 +13,7 @@ pub mod error;
 pub mod file_service;
 pub mod health;
 pub mod identity;
+pub mod input_service;
 pub mod logging;
 pub mod metrics_service;
 pub mod server;

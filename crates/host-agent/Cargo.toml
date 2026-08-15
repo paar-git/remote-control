@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait = { workspace = true }
 rc-protocol = { workspace = true }
+rc-input = { workspace = true, features = ["inject"] }
 rc-platform = { workspace = true }
 rc-security = { workspace = true }
 rc-storage = { workspace = true }

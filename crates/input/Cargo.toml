@@ -1,0 +1,28 @@
+[package]
+name = "rc-input"
+description = "Platform-independent remote input: logical intents, per-OS translation and injection."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# The real OS backend is off by default so the pure translation logic — and every
+# test that covers it — builds and runs on a machine with no desktop at all, including
+# CI containers. Enabling it pulls in the only dependency that performs FFI.
+default = []
+inject = ["dep:enigo"]
+
+[dependencies]
+rc-protocol = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+enigo = { version = "0.6", optional = true }
+
+[dev-dependencies]
+postcard = { workspace = true }
+
+[lints]
+workspace = true
