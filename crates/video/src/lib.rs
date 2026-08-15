@@ -14,6 +14,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod capture;
+pub mod decode;
 pub mod diff;
 pub mod encode;
 pub mod tile;
