@@ -103,8 +103,9 @@ static WINDOWS: &[(Intent, Chord)] = &[
     row(Intent::SwitchApp, PhysicalKey::Tab, ALT),
     row(Intent::ShowDesktop, PhysicalKey::KeyD, META),
     row(Intent::LockScreen, PhysicalKey::KeyL, META),
-    // Snip & Sketch. The bare PrintScreen key also captures, and reaches the host as
-    // a physical key without needing an intent.
+    // Snip & Sketch. The bare PrintScreen key also captures, and reaches the host as a
+    // physical key without needing an intent — the backend injects it on Windows and
+    // Linux hosts, and refuses it on macOS, which has no virtual key for it.
     row(Intent::Screenshot, PhysicalKey::KeyS, META.with(SHIFT)),
     row(Intent::SecureAttention, PhysicalKey::Delete, CTRL.with(ALT)),
 ];

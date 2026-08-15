@@ -27,9 +27,12 @@ use rc_protocol::PhysicalKey;
 /// on a machine the operator cannot see is worse than pressing none and saying so.
 #[must_use]
 #[expect(clippy::too_many_lines, reason = "a flat lookup table reads best whole")]
-#[expect(
+// `allow` rather than `expect`: which arms exist here is platform-dependent, so whether
+// two of them coincide is too. An `expect` that is fulfilled on Linux and unfulfilled on
+// macOS would fail the build on one platform whichever way it was written.
+#[allow(
     clippy::match_same_arms,
-    reason = "distinct physical keys that happen to share a character today; merging               them would erase the distinction the scancode work will need"
+    reason = "distinct physical keys that happen to share a character today; merging them would erase the distinction the scancode work will need"
 )]
 pub fn to_enigo(key: PhysicalKey) -> Option<Key> {
     Some(match key {
@@ -142,14 +145,82 @@ pub fn to_enigo(key: PhysicalKey) -> Option<Key> {
         PhysicalKey::NumpadDivide => Key::Unicode('/'),
         PhysicalKey::NumpadDecimal => Key::Unicode('.'),
 
-        // Not expressible portably; refused rather than approximated.
-        PhysicalKey::Insert
-        | PhysicalKey::PrintScreen
-        | PhysicalKey::ScrollLock
-        | PhysicalKey::Pause
-        | PhysicalKey::ContextMenu => return None,
+        // Keys the backend expresses on some platforms but not all. Gating them per
+        // platform rather than refusing them everywhere is the difference between "this
+        // host cannot do that" and "no host can": Shift+Insert paste and the PrintScreen
+        // key work on a Windows or Linux host, and only macOS genuinely lacks them.
+        // An absent arm falls through to `_` below and is refused there.
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        PhysicalKey::Insert => Key::Insert,
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        PhysicalKey::PrintScreen => Key::PrintScr,
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        PhysicalKey::Pause => Key::Pause,
+        #[cfg(all(unix, not(target_os = "macos")))]
+        PhysicalKey::ScrollLock => Key::ScrollLock,
+
+        // No portable equivalent on any supported platform; refused, not approximated.
+        PhysicalKey::ContextMenu => return None,
 
         // PhysicalKey is non-exhaustive: a newer peer's key is refused, not guessed.
+        // This also refuses the keys whose arms above are compiled out on this platform.
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intent::{HostOs, render, supported};
+
+    /// Everything this build advertises, this build can inject.
+    ///
+    /// The intent table and this keymap are two lists that have to agree, and nothing
+    /// but a test makes them. When they drift, `supported()` promises an intent that is
+    /// then refused at the moment of injection — the host reports `NotSupported` for
+    /// something it had already claimed it could do, which is precisely the dishonesty
+    /// the table design exists to prevent.
+    ///
+    /// Scoped to [`HostOs::current`] on purpose. A host only ever renders its own
+    /// table, and the keymap is compiled for one platform, so "the Linux table is
+    /// injectable" is a claim only a Linux build can make — asserting it from a macOS
+    /// build would be modelling another platform's capabilities, which is the thing
+    /// this design refuses to do. CI runs on all three, so all three tables are covered.
+    /// The keys that were refused on every platform because one platform lacks them.
+    ///
+    /// Blanket-refusing these cost Windows and Linux hosts real function — Shift+Insert
+    /// paste, and the `PrintScreen` key that the Linux screenshot intent is spelled with.
+    #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+    #[test]
+    fn keys_absent_only_on_macos_are_injectable_here() {
+        for key in [
+            PhysicalKey::Insert,
+            PhysicalKey::PrintScreen,
+            PhysicalKey::Pause,
+        ] {
+            assert!(to_enigo(key).is_some(), "{key:?} should be injectable here");
+        }
+    }
+
+    #[test]
+    fn context_menu_is_refused_on_every_platform() {
+        // No portable equivalent anywhere, so this one stays refused rather than
+        // becoming a near-miss keypress on a machine the operator cannot see.
+        assert!(to_enigo(PhysicalKey::ContextMenu).is_none());
+    }
+
+    #[test]
+    fn every_advertised_intent_can_actually_be_injected() {
+        let Some(os) = HostOs::current() else {
+            return; // no table for this platform; nothing is advertised
+        };
+        for intent in supported(os) {
+            let chord = render(intent, os).expect("supported() came from the table");
+            assert!(
+                to_enigo(chord.key).is_some(),
+                "{os:?} spells {intent:?} with {:?}, which this backend cannot inject",
+                chord.key
+            );
+        }
+    }
 }
