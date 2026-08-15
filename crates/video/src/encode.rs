@@ -19,6 +19,16 @@ use crate::{Result, VideoError};
 /// and the tile differ has already removed the bulk of the redundancy.
 const ZSTD_LEVEL: i32 = 1;
 
+/// Bytes reserved in a frame for everything that is not the pixel payload.
+///
+/// The channel limit applies to the serialized `VideoFrame`, not to `data` alone: a
+/// frame also carries its sequence, timestamp, flags and — the part that actually
+/// scales — one `Rect` per changed tile. A `Rect` is four `u32`s, so at postcard's
+/// worst-case varint width a full 4K refresh of 2040 tiles spends roughly 41 KB on
+/// damage before a single pixel. Reserving 64 KiB covers that with margin, at a cost
+/// of 0.4% of the ceiling.
+const FRAME_OVERHEAD: usize = 64 * 1024;
+
 /// Encodes captured frames for one display at one size.
 #[derive(Debug)]
 pub struct Encoder {
@@ -35,7 +45,7 @@ impl Encoder {
     /// # Errors
     /// If the codec is not one this build produces, or the size is zero.
     pub fn new(codec: VideoCodec, width: u32, height: u32) -> Result<Self> {
-        Self::with_budget(codec, width, height, MAX_VIDEO_FRAME)
+        Self::with_budget(codec, width, height, MAX_VIDEO_FRAME - FRAME_OVERHEAD)
     }
 
     /// As [`Self::new`], but with an explicit per-frame byte ceiling, for tests.
@@ -301,5 +311,39 @@ mod tests {
         let sequences: Vec<u64> = out.iter().map(|f| f.sequence).collect();
         let expected: Vec<u64> = (0..sequences.len() as u64).collect();
         assert_eq!(sequences, expected);
+    }
+
+    fn noisy_frame(width: u32, height: u32) -> CapturedFrame {
+        let mut frame = frame(width, height, 0);
+        for (i, byte) in frame.rgba.iter_mut().enumerate() {
+            *byte = u8::try_from((i * 7919) % 256).expect("modulo keeps this in range");
+        }
+        frame
+    }
+
+    #[test]
+    fn an_emitted_frame_fits_the_channel_once_its_damage_is_counted() {
+        // The ceiling applies to the serialized frame, not to the pixel payload alone.
+        // Budgeting the whole limit for `data` leaves a frame that this encoder considers
+        // legal and the transport rejects.
+        //
+        // 2048x2048 is chosen deliberately: raw RGBA is exactly 2048*2048*4 =
+        // 16_777_216 bytes, exactly `MAX_VIDEO_FRAME`. With no headroom reserved this
+        // sits right at the old budget, so the 1024 tiles' worth of damage rectangles
+        // pushes the *serialized* frame over the ceiling even though `data` alone did
+        // not. A smaller frame would leave slack that the fix's 64 KiB reservation
+        // could hide behind; this size does not.
+        let mut encoder = Encoder::new(VideoCodec::RawRgba, 2048, 2048).expect("valid size");
+        let frames = encoder
+            .encode(&noisy_frame(2048, 2048), 1_000, true)
+            .expect("encode");
+        for frame in &frames {
+            let wire = postcard::to_allocvec(frame).expect("serialize");
+            assert!(
+                wire.len() <= MAX_VIDEO_FRAME,
+                "a {} byte frame exceeds the {MAX_VIDEO_FRAME} byte channel limit",
+                wire.len(),
+            );
+        }
     }
 }
