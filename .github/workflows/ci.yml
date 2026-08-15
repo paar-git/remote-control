@@ -113,6 +113,11 @@ jobs:
       - name: Input builds without an injection backend
         run: cargo check -p rc-input
 
+      # The capture backend needs a display server, so only its compile is checked
+      # here; the tests that touch a real screen are #[ignore]d and run by hand.
+      - name: Video capture backend compiles
+        run: cargo clippy -p rc-video --features capture --all-targets -- -D warnings
+
       # The agent's end-to-end tests each stand up a real QUIC listener and
       # client. Running them in parallel on a two-core runner starves the
       # network stack: a connection completes its handshake and is then lost

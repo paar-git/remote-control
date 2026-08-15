@@ -10,9 +10,8 @@ use crate::Result;
 
 pub mod mock;
 
-// NOTE: `pub mod xcap_source;` is deliberately NOT declared here. Task 7 creates that
-// file and adds its declaration in the same commit. Declaring it now would break
-// `cargo clippy --all-features` — which CI runs — for every commit until Task 7 lands.
+#[cfg(feature = "capture")]
+pub mod xcap_source;
 
 /// One captured frame, in RGBA order.
 ///
