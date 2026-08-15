@@ -1,3 +1,5 @@
+> Historical. Not current product documentation.
+
 # AnyDesk-style remote control — design
 
 Date: 2026-08-11

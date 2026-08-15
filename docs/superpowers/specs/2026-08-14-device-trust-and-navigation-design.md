@@ -1,3 +1,5 @@
+> Historical. Not current product documentation.
+
 # Device trust, unattended access and a four-category interface
 
 Design for the change that moves persistent access off the address it was typed at and

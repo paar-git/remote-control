@@ -29,7 +29,7 @@ Two questions were settled with the project owner and constrain everything below
 
 **The stream carries text and admin work on a LAN.** Reading terminals, config files
 and log output. This makes lossless the right default: compression artifacts on 9pt
-text are the failure mode that matters, not bandwidth. `TiledZstd` with a `RawBgra`
+text are the failure mode that matters, not bandwidth. `TiledZstd` with a `RawRgba`
 fallback — both pure Rust, no system dependencies, identical on all three platforms, and
 exactly what `desktop.rs` already documents as the always-supported path. H.264 and
 friends stay in the enum and are refused by negotiation.
@@ -53,9 +53,21 @@ pub trait CaptureSource {
 pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u8>,
+    pub rgba: Vec<u8>,
 }
 ```
+
+### The pixels are RGBA, and stay RGBA
+
+`Monitor::capture_image()` returns `ImageBuffer<Rgba<u8>, Vec<u8>>`, and the browser's
+`putImageData` takes RGBA too. The only thing in the pipeline that wants BGRA is the
+name of the `VideoCodec::RawBgra` variant.
+
+So the variant is renamed to `RawRgba` and the pixels are never swizzled — not on
+capture, not on the wire, not at the canvas. A byte-order conversion of an 8 MiB buffer
+per frame, twice, would be pure waste in service of a name. `VideoCodec` is
+`#[non_exhaustive]`, nothing implements it, and no peer has ever put it on the wire, so
+the rename costs nothing.
 
 `XcapSource` sits behind a `capture` feature, default off, so the encoder and every test
 covering it build on a machine with no desktop — the same reason `rc-input` puts its
@@ -68,9 +80,37 @@ already depends on for display enumeration, so the two agree about what a monito
 xcap supports Windows 8.1+, macOS and X11, and explicitly does not support Wayland —
 which matches the refusal the input layer already returns there.
 
-**Risk to retire first.** docs.rs failed to build xcap 0.9.8; the last successful build
-was 0.4.1. The real API must be confirmed against the crate before anything is built on
-it. This is the first implementation step, not an assumption.
+**Risk retired.** docs.rs failed to build xcap 0.9.8, so the API was confirmed by
+compiling and running a throwaway probe against the real crate on the development
+machine, before this design was finalised. Measured results:
+
+- Both monitors enumerated correctly, including the secondary at origin `(-1920, 0)`.
+- `capture_image()` costs **14–16 ms** for a 1080p frame — a 60–70 fps ceiling, with
+  comfortable headroom over the 30 fps target.
+- The buffer is exactly `width × height × 4` bytes.
+
+Confirmed signatures, which differ from the 0.4.1 documentation in ways that matter:
+
+```rust
+Monitor::all()      -> Result<Vec<Monitor>, XCapError>
+monitor.id()        -> Result<u32,    XCapError>
+monitor.name()      -> Result<String, XCapError>   // e.g. "\\\\.\\DISPLAY1"
+monitor.width()     -> Result<u32,    XCapError>
+monitor.x()         -> Result<i32,    XCapError>
+monitor.scale_factor() -> Result<f32, XCapError>
+monitor.frequency() -> Result<f32,    XCapError>   // note: f32, not u32
+monitor.is_primary()-> Result<bool,   XCapError>
+monitor.capture_image() -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>, XCapError>
+```
+
+Every accessor returns `Result`, so display enumeration must handle per-field failure
+rather than assuming a monitor describes itself completely. `frequency()` is `f32` while
+`DisplayInfo::refresh_hz` is `Option<u32>`, so it is rounded, and a non-finite or
+non-positive value becomes `None` rather than a nonsense integer.
+
+**Cost to note:** xcap pulls in 245 transitive packages, including `windows` 0.62 and
+`image` 0.25. `image` is used only as a buffer type — `into_raw()` yields the pixels with
+no re-encoding — but it is a real addition to build time and audit surface.
 
 ## Encode
 
@@ -86,7 +126,7 @@ never asked for dirty regions, so all three platforms behave identically.
 This yields `VideoFrame { sequence, captured_at_us, keyframe, data, damage }` exactly as
 already defined. No protocol change is required.
 
-`RawBgra` is the same path with no tiling and no compression, kept as the last-resort
+`RawRgba` is the same path with no tiling and no compression, kept as the last-resort
 codec the protocol promises.
 
 Two workspace dependencies are added: `zstd` for the codec, and `xcap` behind the
@@ -95,7 +135,7 @@ crate already in the tree rather than pulling in another.
 
 ### Keyframes must be splittable
 
-`MAX_VIDEO_FRAME` is 16 MiB. Raw BGRA at 1080p is 7.91 MiB (1920 × 1080 × 4) and fits.
+`MAX_VIDEO_FRAME` is 16 MiB. Raw RGBA at 1080p is 7.91 MiB (1920 × 1080 × 4) and fits.
 At 4K it is 31.6 MiB and does not, and a noisy `TiledZstd` keyframe at 4K can exceed the
 limit too.
 
@@ -119,7 +159,7 @@ also fixes `display_count` being hardcoded to `0` in two places.
 
 Client: `connection.rs` opens `Channel::Video` following the pattern already used for
 `FileTransfer` and `Metrics`, and spawns a task that decompresses frames and applies
-tiles to a persistent BGRA framebuffer.
+tiles to a persistent RGBA framebuffer.
 
 ## Reaching the webview
 
@@ -147,7 +187,7 @@ rates and would add a shader path to maintain.
 In:
 
 - One display at a time, chosen via `StartStream` and changed via `Reconfigure`.
-- `RawBgra` and `TiledZstd`, negotiated through `accepted_codecs`.
+- `RawRgba` and `TiledZstd`, negotiated through `accepted_codecs`.
 - `StartStream`, `StopStream`, `PauseStream`, `ResumeStream`, `Reconfigure`,
   `RequestKeyframe`, `ListDisplays`.
 - Frame-rate ceiling honoured.
