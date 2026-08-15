@@ -28,9 +28,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod backend;
+pub mod display;
 pub mod intent;
 pub mod session;
 
+pub use display::{Crossing, DisplayTopology, Edge};
 pub use intent::{Chord, HostOs, detect, render};
 pub use session::HeldKeys;
 
@@ -71,16 +73,16 @@ pub type Result<T> = std::result::Result<T, InputError>;
 /// Deliberately narrow: no intents, no state, no policy. Everything above this is
 /// shared across platforms, so a new OS means implementing these five methods.
 pub trait InputSink: Send {
-    /// Move the pointer to a normalised position on `display`.
+    /// Move the pointer to a virtual-desktop pixel.
     ///
-    /// Coordinates stay at the wire's `f32` precision. Widening to `f64` here would
-    /// add no information — the value never had more — while making exact comparison
-    /// impossible and inviting sub-pixel drift once multiplied by the display size.
-    /// The backend widens at the moment it scales to pixels, and not before.
+    /// Resolution from a normalised position on some display to this absolute point
+    /// happens in [`InputSession`], using the host's real topology — so a backend never
+    /// needs to know which monitor an event came from, and multi-monitor correctness is
+    /// decided once rather than once per platform.
     ///
     /// # Errors
     /// [`InputError`] if the OS refuses.
-    fn pointer_move(&mut self, x: f32, y: f32, display: u8) -> Result<()>;
+    fn pointer_move_to(&mut self, gx: i64, gy: i64) -> Result<()>;
 
     /// Press or release a mouse button.
     ///
@@ -121,6 +123,12 @@ pub struct InputSession<S: InputSink> {
     held: HeldKeys,
     may_control: bool,
     watermark: u32,
+    /// The host's monitors, as last enumerated.
+    ///
+    /// Held here rather than in the backend because every platform needs the same
+    /// answer to "where is this normalised point?", and computing it once means a
+    /// mixed-DPI, mixed-resolution arrangement behaves identically on all three.
+    topology: DisplayTopology,
 }
 
 impl<S: InputSink> InputSession<S> {
@@ -136,7 +144,21 @@ impl<S: InputSink> InputSession<S> {
             held: HeldKeys::new(),
             may_control,
             watermark: 0,
+            topology: DisplayTopology::default(),
         }
+    }
+
+    /// Replace the known display arrangement.
+    ///
+    /// Called whenever the host re-enumerates, including mid-session when a monitor is
+    /// plugged in, removed or rearranged.
+    pub fn set_topology(&mut self, topology: DisplayTopology) {
+        self.topology = topology;
+    }
+
+    /// The display arrangement this session is resolving coordinates against.
+    pub const fn topology(&self) -> &DisplayTopology {
+        &self.topology
     }
 
     /// A session for the OS this binary runs on.
@@ -204,12 +226,25 @@ impl<S: InputSink> InputSession<S> {
         }
 
         match event {
-            InputEvent::MouseMove { x, y, .. } => {
+            InputEvent::MouseMove { x, y, display, .. } => {
                 // Clamped rather than rejected: a controller rounding 1.0000001 should
                 // move the pointer to the edge, not drop the sample.
                 let x = x.clamp(0.0, 1.0);
                 let y = y.clamp(0.0, 1.0);
-                self.sink.pointer_move(x, y, 0)
+
+                // Resolved against the display the viewer was actually looking at. If
+                // that monitor has since gone away, the event is refused rather than
+                // applied to whichever display happens to be at that fraction — a
+                // click landing on the wrong screen is worse than one that did not land.
+                let target = self
+                    .topology
+                    .resolve(display)
+                    .ok_or(InputError::Refused(InputFailure::Unavailable))?;
+                let (gx, gy) = self
+                    .topology
+                    .to_global(target, x, y)
+                    .ok_or(InputError::Refused(InputFailure::Unavailable))?;
+                self.sink.pointer_move_to(gx, gy)
             }
             InputEvent::Scroll { delta_x, delta_y, .. } => self.sink.scroll(delta_x, delta_y),
             InputEvent::MouseDown { button, .. } => {
@@ -309,10 +344,42 @@ impl<S: InputSink> Drop for InputSession<S> {
 mod tests {
     use super::*;
     use backend::mock::{Call, MockSink};
+    use display::DisplayTopology;
     use rc_protocol::Modifiers;
 
     fn session(os: HostOs) -> InputSession<MockSink> {
-        InputSession::new(MockSink::new(), Some(os), true)
+        let mut session = InputSession::new(MockSink::new(), Some(os), true);
+        session.set_topology(two_displays());
+        session
+    }
+
+    /// A 1080p primary with a 1440p monitor to its right, hanging 200px lower —
+    /// mixed resolution and mixed alignment, which is the interesting case.
+    fn two_displays() -> DisplayTopology {
+        DisplayTopology::new(vec![
+            rc_protocol::desktop::DisplayInfo {
+                index: 0,
+                name: "Primary".to_owned(),
+                width: 1920,
+                height: 1080,
+                scale_factor: 1.0,
+                origin_x: 0,
+                origin_y: 0,
+                primary: true,
+                refresh_hz: Some(60),
+            },
+            rc_protocol::desktop::DisplayInfo {
+                index: 1,
+                name: "Secondary".to_owned(),
+                width: 2560,
+                height: 1440,
+                scale_factor: 2.0,
+                origin_x: 1920,
+                origin_y: 200,
+                primary: false,
+                refresh_hz: Some(144),
+            },
+        ])
     }
 
     #[test]
@@ -412,31 +479,74 @@ mod tests {
     #[test]
     fn motion_is_not_acknowledged_but_advances_the_watermark() {
         let mut s = session(HostOs::Windows);
-        assert_eq!(s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, seq: 4 }), None);
+        assert_eq!(
+            s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 0, seq: 4 }),
+            None
+        );
         assert_eq!(s.watermark(), 4);
+        // Centre of a 1920x1080 display at the origin.
+        assert_eq!(s.sink().calls(), &[Call::PointerMove { gx: 960, gy: 540 }]);
+    }
+
+    #[test]
+    fn motion_on_a_secondary_display_lands_on_that_display() {
+        // The whole point of multi-monitor support: the same fraction must resolve to
+        // a completely different part of the virtual desktop.
+        let mut s = session(HostOs::Windows);
+        s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 1, seq: 1 });
         assert_eq!(
             s.sink().calls(),
-            &[Call::PointerMove { x: 0.5, y: 0.5, display: 0 }]
+            &[Call::PointerMove { gx: 1920 + 1280, gy: 200 + 720 }]
         );
+    }
+
+    #[test]
+    fn the_same_fraction_differs_between_displays() {
+        let mut s = session(HostOs::Windows);
+        s.apply(InputEvent::MouseMove { x: 0.25, y: 0.25, display: 0, seq: 1 });
+        s.apply(InputEvent::MouseMove { x: 0.25, y: 0.25, display: 1, seq: 2 });
+        let calls = s.sink().calls();
+        assert_ne!(calls[0], calls[1], "both displays resolved to the same point");
+    }
+
+    #[test]
+    fn motion_aimed_at_a_vanished_display_is_refused_not_misplaced() {
+        // A monitor unplugged mid-drag must not silently redirect the pointer onto a
+        // different screen at the same fraction.
+        let mut s = InputSession::new(MockSink::new(), Some(HostOs::Windows), true);
+        s.set_topology(DisplayTopology::default());
+        assert_eq!(
+            s.apply(InputEvent::MouseMove { x: 0.5, y: 0.5, display: 3, seq: 1 }),
+            None
+        );
+        assert!(s.sink().calls().is_empty());
+        assert_eq!(s.watermark(), 0, "a refused move must not advance the watermark");
+    }
+
+    #[test]
+    fn motion_falls_back_to_the_primary_when_its_display_disappears() {
+        // The display is gone but others remain: the session continues on the primary
+        // rather than dying.
+        let mut s = session(HostOs::Windows);
+        s.apply(InputEvent::MouseMove { x: 0.0, y: 0.0, display: 9, seq: 1 });
+        assert_eq!(s.sink().calls(), &[Call::PointerMove { gx: 0, gy: 0 }]);
     }
 
     #[test]
     fn the_watermark_never_goes_backwards() {
         // Reordering cannot make the controller think earlier motion was undone.
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 0.1, y: 0.1, seq: 9 });
-        s.apply(InputEvent::MouseMove { x: 0.2, y: 0.2, seq: 3 });
+        s.apply(InputEvent::MouseMove { x: 0.1, y: 0.1, display: 0, seq: 9 });
+        s.apply(InputEvent::MouseMove { x: 0.2, y: 0.2, display: 0, seq: 3 });
         assert_eq!(s.watermark(), 9);
     }
 
     #[test]
     fn out_of_range_coordinates_are_clamped_not_dropped() {
         let mut s = session(HostOs::Windows);
-        s.apply(InputEvent::MouseMove { x: 1.5, y: -0.2, seq: 1 });
-        assert_eq!(
-            s.sink().calls(),
-            &[Call::PointerMove { x: 1.0, y: 0.0, display: 0 }]
-        );
+        s.apply(InputEvent::MouseMove { x: 1.5, y: -0.2, display: 0, seq: 1 });
+        // Clamped to the far right edge and the top of display 0.
+        assert_eq!(s.sink().calls(), &[Call::PointerMove { gx: 1919, gy: 0 }]);
     }
 
     #[test]
@@ -498,16 +608,18 @@ mod tests {
     fn a_drag_is_just_down_move_up() {
         let mut s = session(HostOs::Windows);
         s.apply(InputEvent::MouseDown { button: MouseButton::Left, seq: 1 });
-        s.apply(InputEvent::MouseMove { x: 0.2, y: 0.3, seq: 2 });
-        s.apply(InputEvent::MouseMove { x: 0.6, y: 0.7, seq: 3 });
+        s.apply(InputEvent::MouseMove { x: 0.2, y: 0.3, display: 0, seq: 2 });
+        // Continuing the drag onto the second display, which is what makes a drag
+        // across a monitor boundary work.
+        s.apply(InputEvent::MouseMove { x: 0.6, y: 0.7, display: 1, seq: 3 });
         s.apply(InputEvent::MouseUp { button: MouseButton::Left, seq: 4 });
 
         assert_eq!(
             s.sink().calls(),
             &[
                 Call::Button { button: MouseButton::Left, state: KeyState::Down },
-                Call::PointerMove { x: 0.2, y: 0.3, display: 0 },
-                Call::PointerMove { x: 0.6, y: 0.7, display: 0 },
+                Call::PointerMove { gx: 384, gy: 324 },
+                Call::PointerMove { gx: 1920 + 1536, gy: 200 + 1008 },
                 Call::Button { button: MouseButton::Left, state: KeyState::Up },
             ]
         );

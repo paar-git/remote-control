@@ -16,10 +16,16 @@ path = "src/lib.rs"
 name = "rc-agent"
 path = "src/main.rs"
 
+[features]
+# Real OS input injection and display enumeration. On by default for the agent,
+# which is the process that actually drives the machine.
+default = ["inject"]
+inject = ["rc-input/inject"]
+
 [dependencies]
 async-trait = { workspace = true }
 rc-protocol = { workspace = true }
-rc-input = { workspace = true, features = ["inject"] }
+rc-input = { workspace = true }
 rc-platform = { workspace = true }
 rc-security = { workspace = true }
 rc-storage = { workspace = true }

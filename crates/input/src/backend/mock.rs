@@ -13,14 +13,12 @@ use crate::{HostOs, InputSink, Result, intent};
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Call {
-    /// Pointer moved to a normalised position on a display.
+    /// Pointer moved to a virtual-desktop pixel.
     PointerMove {
-        /// Horizontal, 0.0–1.0.
-        x: f32,
-        /// Vertical, 0.0–1.0.
-        y: f32,
-        /// Which display.
-        display: u8,
+        /// Horizontal, in virtual-desktop pixels.
+        gx: i64,
+        /// Vertical, in virtual-desktop pixels.
+        gy: i64,
     },
     /// A mouse button transition.
     Button {
@@ -107,8 +105,8 @@ impl MockSink {
 }
 
 impl InputSink for MockSink {
-    fn pointer_move(&mut self, x: f32, y: f32, display: u8) -> Result<()> {
-        self.record(Call::PointerMove { x, y, display })
+    fn pointer_move_to(&mut self, gx: i64, gy: i64) -> Result<()> {
+        self.record(Call::PointerMove { gx, gy })
     }
 
     fn button(&mut self, button: MouseButton, state: KeyState) -> Result<()> {

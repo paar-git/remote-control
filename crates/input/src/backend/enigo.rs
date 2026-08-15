@@ -146,25 +146,15 @@ const fn direction_of(state: KeyState) -> Direction {
 }
 
 impl InputSink for EnigoSink {
-    fn pointer_move(&mut self, x: f32, y: f32, _display: u8) -> Result<()> {
-        // Normalised coordinates are widened to pixels here, and only here: this is
-        // the first point at which the extra range is actually used.
-        let (width, height) = self
-            .enigo
-            .main_display()
-            .map_err(|err| InputError::Backend(err.to_string()))?;
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_precision_loss,
-            reason = "a pixel coordinate is an integer by definition, and the product \
-                      of a clamped 0..=1 fraction with a display dimension cannot \
-                      exceed i32"
-        )]
-        let (px, py) = (
-            (x * width as f32).round() as i32,
-            (y * height as f32).round() as i32,
-        );
+    fn pointer_move_to(&mut self, gx: i64, gy: i64) -> Result<()> {
+        // Already an absolute virtual-desktop pixel: which monitor it falls on was
+        // decided by the topology, so this backend needs no notion of displays at all.
+        // That is what makes mixed-DPI, mixed-resolution arrangements behave the same
+        // on all three platforms.
+        let (Ok(px), Ok(py)) = (i32::try_from(gx), i32::try_from(gy)) else {
+            // A coordinate outside i32 cannot describe a real desktop.
+            return Err(InputError::Refused(InputFailure::NotSupported));
+        };
 
         self.enigo
             .move_mouse(px, py, Coordinate::Abs)

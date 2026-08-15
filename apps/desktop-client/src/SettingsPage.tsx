@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import {
+  getClientInfo,
   getHostSettings,
   getHostStatus,
   probeDevice,
@@ -17,9 +18,16 @@ import {
   type Permission,
   type Settings,
 } from './api.js';
+import { RcMark } from './chrome';
 import { GRANTABLE_PERMISSIONS } from './labels.js';
+import {
+  loadPreferences,
+  resetPreferences,
+  savePreferences,
+  type DisplayPreferences,
+} from './displays';
 import { applyTheme, loadTheme, saveTheme, type ThemePreference } from './theme.js';
-import { Button, Card, TextField, Toggle, type Toast } from './ui';
+import { Button, TextField, Toggle, type Toast } from './ui';
 import UpdatesPane from './UpdatesPane';
 
 const MIN_PASSWORD_LENGTH = 12;
@@ -42,8 +50,10 @@ export function SettingsPage({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(loadTheme);
+  const [displays, setDisplays] = useState<DisplayPreferences>(loadPreferences);
   const [probeResult, setProbeResult] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
 
   useEffect(() => {
     getHostSettings()
@@ -56,6 +66,11 @@ export function SettingsPage({
       .catch(() => undefined);
     getHostStatus()
       .then(setStatus)
+      .catch(() => undefined);
+    getClientInfo()
+      .then((info) => {
+        setAppVersion(info.appVersion);
+      })
       .catch(() => undefined);
   }, [hostEpoch]);
 
@@ -127,14 +142,13 @@ export function SettingsPage({
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-col gap-5">
-      <Card>
-        <h2 className="mb-4 text-xl font-semibold tracking-tight">Remote Access</h2>
+    <div className="w-full max-w-[760px]">
+      <SettingsSection title="Remote Access">
         {settings !== null && (
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium">Allow incoming connections</p>
-              <p className="text-xs text-(--color-text-secondary)">
+          <div className="mb-4 flex items-start justify-between gap-6">
+            <div className="min-w-0">
+              <p className="text-sm">Allow incoming connections</p>
+              <p className="mt-0.5 text-[13px] text-(--color-text-secondary)">
                 Other machines can reach this one only while this is on.
               </p>
             </div>
@@ -161,7 +175,7 @@ export function SettingsPage({
           }
         />
         <fieldset className="mt-3">
-          <legend className="mb-2 text-xs font-medium text-(--color-text-secondary)">
+          <legend className="mb-2 text-[13px] font-medium text-(--color-text-secondary)">
             An unattended connection may
           </legend>
           <div className="flex flex-col gap-1.5">
@@ -194,21 +208,24 @@ export function SettingsPage({
             Save password
           </Button>
         </div>
-      </Card>
+      </SettingsSection>
 
-      <Card>
-        <h2 className="mb-3 text-xl font-semibold tracking-tight">Security</h2>
-        <p className="mb-3 text-sm text-(--color-text-secondary)">
-          Administrator is never granted from the Accept dialog. It is granted only from My Devices,
-          after a confirmation that names the device and the privileges.
-        </p>
-        <Button variant="default" onClick={onViewDevices}>
-          Manage trusted devices
-        </Button>
-      </Card>
+      <SettingsSection title="Security">
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <p className="text-sm">Trusted devices</p>
+            <p className="mt-0.5 text-[13px] text-(--color-text-secondary)">
+              Administrator is never granted from the Accept dialog. It is granted only from My
+              Devices, after a confirmation that names the device and the privileges.
+            </p>
+          </div>
+          <Button variant="default" onClick={onViewDevices}>
+            Manage trusted devices
+          </Button>
+        </div>
+      </SettingsSection>
 
-      <Card>
-        <h2 className="mb-4 text-xl font-semibold tracking-tight">Network</h2>
+      <SettingsSection title="Network">
         <dl className="mb-4 flex flex-col gap-2 text-sm">
           <div className="flex gap-3">
             <dt className="w-28 shrink-0 text-(--color-text-secondary)">Listen port</dt>
@@ -229,16 +246,90 @@ export function SettingsPage({
             {probeResult}
           </p>
         )}
-        <div className="mt-5 border-t border-(--color-border) pt-4">
+        <div className="mt-5">
           <UpdatesPane onToast={onToast} />
         </div>
-      </Card>
+      </SettingsSection>
 
-      <Card>
-        <h2 className="mb-3 text-xl font-semibold tracking-tight">Appearance</h2>
-        <fieldset>
-          <legend className="mb-2 text-sm text-(--color-text-secondary)">Theme</legend>
-          <div className="inline-flex rounded-xl border border-(--color-border) bg-(--color-page) p-1">
+      <SettingsSection title="Multi-display">
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <p className="text-sm">Moving between displays</p>
+            <p className="mt-0.5 text-[13px] text-(--color-text-secondary)">
+              What happens when the pointer reaches the edge of a remote display and
+              another one is beyond it.
+            </p>
+          </div>
+          <fieldset>
+            <legend className="sr-only">Moving between displays</legend>
+            <div className="inline-flex rounded-[4px] border border-(--color-border) bg-(--color-page) p-0.5">
+              {(
+                [
+                  ['ask', 'Ask'],
+                  ['automatic', 'Switch'],
+                  ['never', 'Never'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={displays.switchMode === value}
+                  className={
+                    'rounded-[3px] px-3 py-1.5 text-sm font-medium transition-colors ' +
+                    (displays.switchMode === value
+                      ? 'bg-(--color-card) text-(--color-text)'
+                      : 'text-(--color-text-secondary) hover:text-(--color-text)')
+                  }
+                  onClick={() => {
+                    const next: DisplayPreferences = {
+                      ...displays,
+                      switchMode: value,
+                    };
+                    setDisplays(next);
+                    savePreferences(next);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+        </div>
+
+        <div className="mt-4 flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <p className="text-sm">Saved choice</p>
+            <p className="mt-0.5 text-[13px] text-(--color-text-secondary)">
+              {displays.switchMode === 'ask'
+                ? 'Nothing saved: you will be asked the first time you reach an edge.'
+                : 'Clearing this makes the session ask again the next time you reach an edge.'}
+            </p>
+          </div>
+          <Button
+            variant="default"
+            disabled={displays.switchMode === 'ask'}
+            onClick={() => {
+              setDisplays(resetPreferences());
+              onToast({ kind: 'success', message: 'Display switching will ask again.' });
+            }}
+          >
+            Reset
+          </Button>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="Appearance">
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <p className="text-sm">Theme</p>
+            <p className="mt-0.5 text-[13px] text-(--color-text-secondary)">
+              Dark is the default. Light and system follow this window.
+            </p>
+          </div>
+          <fieldset>
+          <legend className="sr-only">Theme</legend>
+          <div className="inline-flex rounded-[4px] border border-(--color-border) bg-(--color-page) p-0.5">
             {(
               [
                 ['light', 'Light'],
@@ -252,9 +343,9 @@ export function SettingsPage({
                 role="radio"
                 aria-checked={theme === value}
                 className={
-                  'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ' +
+                  'rounded-[3px] px-3 py-1.5 text-sm font-medium transition-colors ' +
                   (theme === value
-                    ? 'bg-(--color-card) text-(--color-text) shadow-sm'
+                    ? 'bg-(--color-card) text-(--color-text)'
                     : 'text-(--color-text-secondary) hover:text-(--color-text)')
                 }
                 onClick={() => {
@@ -266,7 +357,37 @@ export function SettingsPage({
             ))}
           </div>
         </fieldset>
-      </Card>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="About" last>
+        <div className="flex items-center gap-2.5">
+          <RcMark size={21} />
+          <div>
+            <p className="text-[15px] leading-none font-semibold tracking-[-0.03em]">RC</p>
+            <p className="mt-1.5 text-[13px] text-(--color-text-secondary)">
+              Version {appVersion ?? '—'}
+            </p>
+          </div>
+        </div>
+      </SettingsSection>
     </div>
+  );
+}
+
+function SettingsSection({
+  title,
+  last = false,
+  children,
+}: {
+  readonly title: string;
+  readonly last?: boolean | undefined;
+  readonly children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <section className={last ? 'py-4' : 'border-b border-(--color-border) py-4'}>
+      <h2 className="mb-3 text-[17px] font-medium">{title}</h2>
+      {children}
+    </section>
   );
 }

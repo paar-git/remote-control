@@ -333,6 +333,12 @@ pub enum InputEvent {
         x: f32,
         /// Vertical position, 0.0–1.0.
         y: f32,
+        /// Which display the position is relative to.
+        ///
+        /// Carried per event rather than held as connection state: a viewer that
+        /// switches display must not be able to land one stale sample on the old
+        /// monitor, and a stateless event cannot be misordered against a mode change.
+        display: u8,
         /// Ordering counter, echoed in the applied watermark.
         seq: u32,
     },
@@ -375,6 +381,11 @@ pub enum InputEvent {
         /// Correlates the acknowledgement.
         seq: u32,
     },
+    /// Ask the host to report its current display arrangement.
+    ListDisplays {
+        /// Correlates the reply.
+        seq: u32,
+    },
     /// A semantic action, to be rendered in the host's own native chord.
     Intent {
         /// What the operator meant.
@@ -403,6 +414,7 @@ impl InputEvent {
             | Self::MouseUp { seq, .. }
             | Self::KeyDown { seq, .. }
             | Self::KeyUp { seq, .. }
+            | Self::ListDisplays { seq }
             | Self::Intent { seq, .. } => seq,
         }
     }
@@ -429,6 +441,29 @@ pub enum InputAck {
     Applied {
         /// Highest applied sequence.
         watermark: u32,
+    },
+}
+
+/// Host → controller messages on the input channel.
+///
+/// Acknowledgements and the display arrangement share this channel because they
+/// describe the same thing: where input goes and what it lands on. Keeping them on one
+/// ordered stream means a viewer can never apply a coordinate against a topology it has
+/// not yet been told about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InputMessage {
+    /// The outcome of one event.
+    Ack(InputAck),
+    /// The host's displays, sent on request and again whenever they change.
+    ///
+    /// Unsolicited delivery is the point: a monitor plugged in, unplugged, rearranged
+    /// or rescaled while a session is live changes where every subsequent coordinate
+    /// lands, and a viewer that had to poll would aim at a stale layout in between.
+    Displays {
+        /// Every display, indexed left to right then top to bottom.
+        displays: Vec<crate::desktop::DisplayInfo>,
     },
 }
 
@@ -507,7 +542,7 @@ mod tests {
 
     #[test]
     fn motion_is_unacknowledged_and_discrete_actions_are_not() {
-        assert!(!InputEvent::MouseMove { x: 0.5, y: 0.5, seq: 1 }.is_acknowledged());
+        assert!(!InputEvent::MouseMove { x: 0.5, y: 0.5, display: 0, seq: 1 }.is_acknowledged());
         assert!(!InputEvent::Scroll { delta_x: 0.0, delta_y: 1.0, seq: 2 }.is_acknowledged());
         assert!(InputEvent::MouseDown { button: MouseButton::Left, seq: 3 }.is_acknowledged());
         assert!(InputEvent::Intent { intent: Intent::Copy, seq: 4 }.is_acknowledged());
@@ -519,7 +554,7 @@ mod tests {
 
     #[test]
     fn every_event_reports_its_sequence() {
-        assert_eq!(InputEvent::MouseMove { x: 0.0, y: 0.0, seq: 7 }.seq(), 7);
+        assert_eq!(InputEvent::MouseMove { x: 0.0, y: 0.0, display: 0, seq: 7 }.seq(), 7);
         assert_eq!(InputEvent::Intent { intent: Intent::Paste, seq: 9 }.seq(), 9);
     }
 
@@ -527,14 +562,14 @@ mod tests {
     fn input_events_stay_small_on_the_wire() {
         // The input channel ceiling is 4 KiB; flooding must be bounded by the rate
         // limiter rather than by frame size.
-        let ev = InputEvent::MouseMove { x: 0.5, y: 0.25, seq: 1 };
+        let ev = InputEvent::MouseMove { x: 0.5, y: 0.25, display: 0, seq: 1 };
         assert!(postcard::to_stdvec(&ev).unwrap().len() < 32);
     }
 
     #[test]
     fn input_events_roundtrip() {
         let events = [
-            InputEvent::MouseMove { x: 0.0, y: 1.0, seq: 1 },
+            InputEvent::MouseMove { x: 0.0, y: 1.0, display: 0, seq: 1 },
             InputEvent::MouseDown { button: MouseButton::Right, seq: 2 },
             InputEvent::Scroll { delta_x: -1.5, delta_y: 3.0, seq: 3 },
             InputEvent::KeyDown { key: PhysicalKey::KeyA, repeat: true, seq: 4 },
@@ -558,6 +593,62 @@ mod tests {
             let bytes = postcard::to_stdvec(&ack).unwrap();
             assert_eq!(postcard::from_bytes::<InputAck>(&bytes).unwrap(), ack);
         }
+    }
+
+    #[test]
+    fn mouse_move_carries_its_display() {
+        let ev = InputEvent::MouseMove { x: 0.5, y: 0.5, display: 2, seq: 1 };
+        let bytes = postcard::to_stdvec(&ev).unwrap();
+        assert_eq!(postcard::from_bytes::<InputEvent>(&bytes).unwrap(), ev);
+    }
+
+    #[test]
+    fn list_displays_is_acknowledged() {
+        // It expects a reply, so it must not be treated as fire-and-forget.
+        assert!(InputEvent::ListDisplays { seq: 3 }.is_acknowledged());
+        assert_eq!(InputEvent::ListDisplays { seq: 3 }.seq(), 3);
+    }
+
+    #[test]
+    fn the_input_channel_carries_acks_and_topology() {
+        let display = crate::desktop::DisplayInfo {
+            index: 0,
+            name: "Built-in".to_owned(),
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+            origin_x: 0,
+            origin_y: 0,
+            primary: true,
+            refresh_hz: Some(60),
+        };
+        for message in [
+            InputMessage::Ack(InputAck::Ok { seq: 1 }),
+            InputMessage::Displays { displays: vec![display] },
+        ] {
+            let bytes = postcard::to_stdvec(&message).unwrap();
+            assert_eq!(postcard::from_bytes::<InputMessage>(&bytes).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn a_realistic_display_list_fits_the_input_channel() {
+        // The input channel ceiling is 4 KiB and topology shares it.
+        let displays: Vec<_> = (0..8)
+            .map(|index| crate::desktop::DisplayInfo {
+                index,
+                name: "DELL UltraSharp U2720Q (DisplayPort)".to_owned(),
+                width: 3840,
+                height: 2160,
+                scale_factor: 2.0,
+                origin_x: i32::from(index) * 3840,
+                origin_y: 0,
+                primary: index == 0,
+                refresh_hz: Some(60),
+            })
+            .collect();
+        let message = InputMessage::Displays { displays };
+        assert!(postcard::to_stdvec(&message).unwrap().len() < 4096);
     }
 
     #[test]

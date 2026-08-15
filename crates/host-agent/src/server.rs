@@ -746,7 +746,10 @@ impl AgentServer {
             process_management: self.config.features.process_management,
             clipboard: self.config.features.clipboard_sync,
             wake_on_lan: false,
-            display_count: 0,
+            // Reported rather than hardcoded, so a client can tell a single-monitor
+            // host from a multi-monitor one before opening a session.
+            display_count: u8::try_from(rc_input::backend::displays::enumerate().len())
+                .unwrap_or(u8::MAX),
         }
     }
 
