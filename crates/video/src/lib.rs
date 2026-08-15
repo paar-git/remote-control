@@ -15,6 +15,7 @@
 
 pub mod capture;
 pub mod diff;
+pub mod encode;
 pub mod tile;
 
 /// Anything that can go wrong capturing or coding a frame.
