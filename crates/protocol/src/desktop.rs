@@ -35,8 +35,13 @@ pub struct DisplayInfo {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum VideoCodec {
-    /// Raw BGRA, only usable on a fast LAN. Always supported as the last-resort path.
-    RawBgra,
+    /// Raw RGBA, only usable on a fast LAN. Always supported as the last-resort path.
+    ///
+    /// RGBA rather than BGRA because that is what both ends already speak: the capture
+    /// backend produces it and the browser's `putImageData` consumes it. Naming the
+    /// variant for a byte order neither side uses would invite a pointless swizzle of
+    /// an 8 MiB buffer, twice per frame.
+    RawRgba,
     /// Per-tile lossless compression. Software-only fallback with no external deps.
     TiledZstd,
     /// H.264 / AVC.
@@ -173,6 +178,13 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
     /// Dirty rectangles this frame updates. Empty means the whole frame.
     pub damage: Vec<Rect>,
+    /// Frames still to come for this refresh, or zero when it is complete.
+    ///
+    /// A full-screen refresh can exceed [`crate::limits::MAX_VIDEO_FRAME`] — raw RGBA
+    /// at 4K is 31.6 MiB against a 16 MiB ceiling — so it is emitted as several frames,
+    /// each carrying a contiguous slice of tiles. The client applies each as it lands
+    /// and knows the image is whole when this reaches zero.
+    pub refresh_remaining: u16,
 }
 
 /// An axis-aligned rectangle in physical pixels.
@@ -195,7 +207,45 @@ mod tests {
     #[test]
     fn raw_fallback_codec_always_exists() {
         // Guarantees a working path even with no hardware or third-party encoder.
-        let codecs = [VideoCodec::RawBgra, VideoCodec::TiledZstd];
-        assert!(codecs.contains(&VideoCodec::RawBgra));
+        let codecs = [VideoCodec::RawRgba, VideoCodec::TiledZstd];
+        assert!(codecs.contains(&VideoCodec::RawRgba));
+    }
+
+    #[test]
+    fn a_split_refresh_says_how_much_is_still_coming() {
+        // A full refresh too large for one frame arrives as several. The client has to
+        // know when it holds a complete image, or it will present a half-drawn screen
+        // and the operator will read it as a rendering bug.
+        let last = VideoFrame {
+            sequence: 7,
+            captured_at_us: 1_000,
+            keyframe: true,
+            data: vec![1, 2, 3],
+            damage: vec![Rect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            }],
+            refresh_remaining: 0,
+        };
+        assert_eq!(
+            last.refresh_remaining, 0,
+            "zero means the refresh is complete"
+        );
+
+        let encoded = postcard::to_allocvec(&last).expect("encode");
+        let decoded: VideoFrame = postcard::from_bytes(&encoded).expect("decode");
+        assert_eq!(decoded, last);
+    }
+
+    #[test]
+    fn the_raw_codec_is_named_for_the_byte_order_it_actually_carries() {
+        // Capture yields RGBA and putImageData consumes RGBA. A variant named for BGRA
+        // would invite a swizzle that no layer in this pipeline needs.
+        let codec = VideoCodec::RawRgba;
+        let encoded = postcard::to_allocvec(&codec).expect("encode");
+        let decoded: VideoCodec = postcard::from_bytes(&encoded).expect("decode");
+        assert_eq!(decoded, VideoCodec::RawRgba);
     }
 }
