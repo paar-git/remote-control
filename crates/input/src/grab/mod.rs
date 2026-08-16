@@ -31,7 +31,7 @@
 //! so it lives here as plain data and is tested everywhere. The taking itself is behind
 //! the `grab` feature, for the same reason injection is behind `inject`.
 
-use rc_protocol::{Modifiers, PhysicalKey};
+use rc_protocol::{Intent, Modifiers, PhysicalKey};
 
 use crate::intent::{Chord, HostOs};
 
@@ -62,7 +62,7 @@ pub fn reserved_by(chord: Chord, os: HostOs) -> Option<Reserved> {
     if is_secure_attention(chord, os) {
         return Some(Reserved::SecureAttention);
     }
-    is_window_manager(chord, os).then_some(Reserved::WindowManager)
+    window_manager_intent(chord, os).map(|_| Reserved::WindowManager)
 }
 
 /// The secure attention sequence, which no hook may take.
@@ -79,30 +79,49 @@ fn is_secure_attention(chord: Chord, os: HostOs) -> bool {
     }
 }
 
-/// Chords the local desktop claims, which a hook can legitimately take back.
-fn is_window_manager(chord: Chord, os: HostOs) -> bool {
+/// Chords the local desktop claims *and* this build can forward, with the intent each
+/// one means.
+///
+/// The two halves are deliberately one function. A chord that is grabbed but has no
+/// intent to send would be strictly worse than not grabbing it: the operator's own
+/// desktop would not act on it and neither would the remote one, so the keystroke would
+/// simply vanish. That is why the bare Windows key and `Ctrl+Esc` are absent — they open
+/// a local menu, and this build has no intent meaning "open the host's menu" to send in
+/// exchange.
+fn window_manager_intent(chord: Chord, os: HostOs) -> Option<Intent> {
     let meta = chord.mods.contains(Modifiers::META);
     let alt = chord.mods.contains(Modifiers::ALT);
-    let control = chord.mods.contains(Modifiers::CONTROL);
 
     match os {
-        HostOs::Windows | HostOs::Linux => {
-            // Alt+Tab and Alt+Shift+Tab switch windows; Alt+Esc cycles them; Ctrl+Esc
-            // opens the menu. Shift is not tested: it only reverses the direction, and
-            // the reversed form is claimed just as firmly.
-            (alt && matches!(chord.key, PhysicalKey::Tab | PhysicalKey::Escape))
-                || (control && chord.key == PhysicalKey::Escape)
-                // Anything with the Windows or Super key is the desktop's by
-                // convention, including the bare press that opens the menu.
-                || meta
-                || matches!(chord.key, PhysicalKey::MetaLeft | PhysicalKey::MetaRight)
-        }
-        HostOs::MacOs => {
-            // Cmd+Tab switches applications; Cmd+Space opens Spotlight. Both are taken
-            // by the window server before any application sees them.
-            meta && matches!(chord.key, PhysicalKey::Tab | PhysicalKey::Space)
-        }
+        HostOs::Windows | HostOs::Linux => match chord.key {
+            // Alt+Tab switches windows and Alt+Esc cycles them. Shift is not tested:
+            // it only reverses the direction, and the reversed form is claimed just as
+            // firmly by the desktop.
+            PhysicalKey::Tab | PhysicalKey::Escape if alt => Some(Intent::SwitchApp),
+            PhysicalKey::KeyD if meta => Some(Intent::ShowDesktop),
+            PhysicalKey::KeyL if meta => Some(Intent::LockScreen),
+            _ => None,
+        },
+        HostOs::MacOs => match chord.key {
+            // macOS switches applications with Command, not Alt.
+            PhysicalKey::Tab if meta => Some(Intent::SwitchApp),
+            _ => None,
+        },
     }
+}
+
+/// The intent a grabbed chord should be forwarded as.
+///
+/// `None` for anything not worth grabbing, which is the same set: see
+/// [`window_manager_intent`].
+#[must_use]
+pub fn grabbed_intent(chord: Chord, os: HostOs) -> Option<Intent> {
+    // A chord the platform will not surrender is not grabbed, so it has no intent here
+    // either, however much it looks like one.
+    if is_secure_attention(chord, os) {
+        return None;
+    }
+    window_manager_intent(chord, os)
 }
 
 #[cfg(test)]
@@ -149,14 +168,77 @@ mod tests {
     }
 
     #[test]
-    fn the_windows_key_belongs_to_the_desktop_even_pressed_alone() {
-        // A bare Meta press opens the local menu, so it never reaches the app either.
+    fn a_chord_with_nothing_to_send_in_exchange_is_left_alone() {
+        // A bare Windows key opens the local menu, and this build has no intent meaning
+        // "open the host's menu". Grabbing it would be strictly worse than not: the
+        // operator's own desktop would not act on it and neither would the remote one,
+        // so the keystroke would simply vanish.
         assert_eq!(
             reserved_by(
                 chord(PhysicalKey::MetaLeft, Modifiers::NONE),
                 HostOs::Windows
             ),
-            Some(Reserved::WindowManager)
+            None
+        );
+        assert_eq!(
+            reserved_by(
+                chord(PhysicalKey::Escape, Modifiers::CONTROL),
+                HostOs::Windows
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn everything_grabbed_has_an_intent_to_forward() {
+        // The invariant the whole policy rests on. A grabbed chord with no intent is a
+        // swallowed keystroke that reaches neither machine.
+        let candidates = [
+            (PhysicalKey::Tab, Modifiers::ALT),
+            (PhysicalKey::Tab, Modifiers::ALT.with(Modifiers::SHIFT)),
+            (PhysicalKey::Escape, Modifiers::ALT),
+            (PhysicalKey::KeyD, Modifiers::META),
+            (PhysicalKey::KeyL, Modifiers::META),
+            (PhysicalKey::Tab, Modifiers::META),
+            (PhysicalKey::MetaLeft, Modifiers::NONE),
+            (PhysicalKey::KeyA, Modifiers::NONE),
+            (PhysicalKey::Delete, Modifiers::CONTROL.with(Modifiers::ALT)),
+        ];
+
+        for os in [HostOs::Windows, HostOs::MacOs, HostOs::Linux] {
+            for (key, mods) in candidates {
+                let c = chord(key, mods);
+                if reserved_by(c, os) == Some(Reserved::WindowManager) {
+                    assert!(
+                        grabbed_intent(c, os).is_some(),
+                        "{key:?}+{mods:?} is grabbed on {os:?} with nothing to send"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alt_tab_is_forwarded_as_switch_app_so_the_host_spells_it_itself() {
+        // The point of the intent layer: a Windows operator's Alt+Tab arrives on a
+        // macOS host as Cmd+Tab, because the host renders the meaning in its own chord.
+        assert_eq!(
+            grabbed_intent(chord(PhysicalKey::Tab, Modifiers::ALT), HostOs::Windows),
+            Some(Intent::SwitchApp)
+        );
+        assert_eq!(
+            grabbed_intent(chord(PhysicalKey::Tab, Modifiers::META), HostOs::MacOs),
+            Some(Intent::SwitchApp)
+        );
+    }
+
+    #[test]
+    fn the_secure_attention_sequence_has_no_intent_to_forward() {
+        // It is never grabbed, so it must never look forwardable either.
+        let mods = Modifiers::CONTROL.with(Modifiers::ALT);
+        assert_eq!(
+            grabbed_intent(chord(PhysicalKey::Delete, mods), HostOs::Windows),
+            None
         );
     }
 
@@ -175,10 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_is_claimed_on_macos() {
+    fn show_desktop_and_lock_are_claimed_where_they_map_to_an_intent() {
         assert_eq!(
-            reserved_by(chord(PhysicalKey::Space, Modifiers::META), HostOs::MacOs),
-            Some(Reserved::WindowManager)
+            grabbed_intent(chord(PhysicalKey::KeyD, Modifiers::META), HostOs::Windows),
+            Some(Intent::ShowDesktop)
+        );
+        assert_eq!(
+            grabbed_intent(chord(PhysicalKey::KeyL, Modifiers::META), HostOs::Windows),
+            Some(Intent::LockScreen)
         );
     }
 

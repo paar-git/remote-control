@@ -38,6 +38,7 @@ import {
   listenInputAck,
   listenInputApplied,
   sendKey,
+  setKeyGrab,
   sendPointerButton,
   sendPointerMove,
   sendScroll,
@@ -298,6 +299,19 @@ export function VideoSurface({
       // it is not worth telling the operator about.
       .catch(() => undefined);
   }, [sharingClipboard]);
+
+  // Ask for the operator's own Alt+Tab only while this surface is both focused and
+  // forwarding. Losing either hands it straight back — a session that held it while the
+  // operator was working on their own machine would be a serious bug, so the release
+  // path runs on every change rather than only on teardown.
+  useEffect(() => {
+    void setKeyGrab(focused, active).catch(() => undefined);
+
+    return () => {
+      // Unmount is the exit no focus event reports.
+      void setKeyGrab(false, false).catch(() => undefined);
+    };
+  }, [focused, active]);
 
   // `wheel` is attached natively rather than through React, which registers it passively
   // at the root: a passive listener cannot `preventDefault`, so the operator's own page

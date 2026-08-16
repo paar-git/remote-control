@@ -29,6 +29,7 @@ vi.mock('./inputApi.js', async (importOriginal) => {
     sendScroll: vi.fn(() => Promise.resolve(null)),
     listenInputAck: vi.fn(() => Promise.resolve(() => undefined)),
     listenInputApplied: vi.fn(() => Promise.resolve(() => undefined)),
+    setKeyGrab: vi.fn(() => Promise.resolve(false)),
   };
 });
 
@@ -461,5 +462,86 @@ describe('VideoSurface clipboard', () => {
     expect(videoApi.listenClipboard).not.toHaveBeenCalled();
     expect(navigator.clipboard.readText).not.toHaveBeenCalled();
     expect(videoApi.sendClipboard).not.toHaveBeenCalled();
+  });
+});
+
+describe('VideoSurface desktop shortcut grab', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.startStream).mockResolvedValue(STARTED);
+    vi.mocked(videoApi.listenStreamEnded).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.listenInputAck).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.listenInputApplied).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.setKeyGrab).mockResolvedValue(true);
+  });
+
+  it('asks for the local Alt+Tab only once focused and forwarding', async () => {
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        sharingClipboard={false}
+        onPointerSample={() => null}
+      />,
+    );
+    const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
+    await waitFor(() => {
+      expect(inputApi.setKeyGrab).toHaveBeenCalledWith(false, true);
+    });
+
+    canvas.focus();
+
+    await waitFor(() => {
+      expect(inputApi.setKeyGrab).toHaveBeenCalledWith(true, true);
+    });
+  });
+
+  it('hands the shortcuts back the moment focus is lost', async () => {
+    // Holding the operator's Alt+Tab while they work on their own machine would be a
+    // serious bug, so the release runs on every change rather than only on teardown.
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        sharingClipboard={false}
+        onPointerSample={() => null}
+      />,
+    );
+    const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
+    canvas.focus();
+    await waitFor(() => {
+      expect(inputApi.setKeyGrab).toHaveBeenCalledWith(true, true);
+    });
+    vi.mocked(inputApi.setKeyGrab).mockClear();
+
+    canvas.blur();
+
+    await waitFor(() => {
+      expect(inputApi.setKeyGrab).toHaveBeenCalledWith(false, true);
+    });
+  });
+
+  it('never asks for a grab in a session that forwards no input', async () => {
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing={false}
+        passthrough={false}
+        sharingClipboard={false}
+        onPointerSample={() => null}
+      />,
+    );
+    const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
+    canvas.focus();
+
+    await waitFor(() => {
+      expect(inputApi.setKeyGrab).toHaveBeenCalled();
+    });
+    expect(inputApi.setKeyGrab).not.toHaveBeenCalledWith(expect.anything(), true);
   });
 });

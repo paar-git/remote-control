@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use rc_input::grab::{GrabGuard, KeyGrab, grabbed_intent, should_grab};
 use rc_input::intent::{Chord, HostOs, detect};
 use rc_protocol::{
     InputAck, InputEvent, InputMessage, Intent, Modifiers, MouseButton, PhysicalKey,
@@ -264,6 +265,91 @@ pub async fn input_key(
     }
 
     Ok(KeySent { as_intent })
+}
+
+/// Whether the operator's own desktop shortcuts are being taken for the remote machine.
+///
+/// Held here rather than in the webview because the grab is a process-wide OS hook, and
+/// because it must be released even on paths the webview never hears about — see
+/// [`GrabGuard`].
+static KEY_GRAB: std::sync::Mutex<Option<GrabGuard<Box<dyn KeyGrab + Send>>>> =
+    std::sync::Mutex::new(None);
+
+/// Take the local desktop's reserved chords, or hand them back.
+///
+/// `Alt+Tab` is the one that matters: the operator's own window manager acts on it
+/// before this app sees it, so without a grab it switches their local windows and the
+/// remote machine never hears about it.
+///
+/// Both conditions are required and neither implies the other. An unfocused session must
+/// not hold the operator's `Alt+Tab`, and a session forwarding no input has no use for
+/// it. The webview reports both; this decides.
+///
+/// # Errors
+/// A string safe to show the operator when the platform has no such facility, or refused
+/// to provide it.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub async fn input_set_grab(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    surface_focused: bool,
+    forwarding_input: bool,
+) -> Result<bool, String> {
+    let wanted = should_grab(surface_focused, forwarding_input);
+    let manager = connection(&state)?;
+
+    let mut slot = KEY_GRAB.lock().map_err(|_| "the key grab is unusable")?;
+
+    if slot.is_none() {
+        if !wanted {
+            return Ok(false);
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let grab = rc_keygrab::new_grab(sender).map_err(|err| err.to_string())?;
+        spawn_grab_forwarder(app, manager, receiver);
+        *slot = Some(GrabGuard::new(grab));
+    }
+
+    let guard = slot.as_mut().ok_or("the key grab is unusable")?;
+    guard.set(wanted).map_err(|err| err.to_string())?;
+    Ok(guard.engaged())
+}
+
+/// Forward chords the grab caught to the host, as the intent each one means.
+///
+/// An intent rather than the literal keys, because the two machines need not spell the
+/// action the same way: a Windows operator's `Alt+Tab` should switch applications on a
+/// macOS host, where that is `Cmd+Tab`.
+fn spawn_grab_forwarder(
+    app: tauri::AppHandle,
+    manager: Arc<ConnectionManager>,
+    receiver: std::sync::mpsc::Receiver<Chord>,
+) {
+    // A blocking thread rather than a task: the hook's channel is a std receiver, and
+    // parking a Tokio worker on it would take one out of the runtime for the session.
+    std::thread::spawn(move || {
+        let os = HostOs::current().unwrap_or(HostOs::Windows);
+        while let Ok(chord) = receiver.recv() {
+            // Every grabbed chord has an intent by construction; see
+            // `rc_input::grab::grabbed_intent`.
+            let Some(intent) = grabbed_intent(chord, os) else {
+                continue;
+            };
+            let event = InputEvent::Intent {
+                intent,
+                seq: manager.next_input_seq(),
+            };
+            let manager = Arc::clone(&manager);
+            let sink = input_event_sink(app.clone(), &manager);
+            // The hook thread must never block, so delivery is handed to the runtime.
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = manager.send_input(&event, sink).await {
+                    tracing::debug!(%err, "a grabbed chord could not be forwarded");
+                }
+            });
+        }
+    });
 }
 
 /// Parse a wire button name (`"left"`, `"right"`, …) into a [`MouseButton`].

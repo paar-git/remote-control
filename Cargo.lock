@@ -4301,6 +4301,7 @@ dependencies = [
  "rc-file-transfer",
  "rc-host-agent",
  "rc-input",
+ "rc-keygrab",
  "rc-platform",
  "rc-protocol",
  "rc-security",

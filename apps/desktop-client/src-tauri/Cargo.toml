@@ -26,6 +26,7 @@ rc-host-agent = { workspace = true }
 # injects input locally.
 rc-input = { workspace = true }
 rc-clipboard = { workspace = true }
+rc-keygrab = { workspace = true }
 rc-platform = { workspace = true }
 rc-protocol = { workspace = true }
 rc-security = { workspace = true }

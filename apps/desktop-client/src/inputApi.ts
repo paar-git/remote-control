@@ -130,3 +130,18 @@ export async function listenInputApplied(
     if (parsed.success) handler(parsed.data);
   });
 }
+
+/**
+ * Take the operator's own desktop shortcuts, or hand them back.
+ *
+ * `Alt+Tab` is the one that matters: the operator's window manager acts on it before
+ * this app sees it, so without a grab it switches their local windows and the remote
+ * machine never hears about it.
+ *
+ * Returns whether a grab is actually held. A platform with no backend refuses rather
+ * than quietly taking nothing — an operator told the grab is on, whose Alt+Tab still
+ * switches their local windows, would reasonably conclude the session was broken.
+ */
+export function setKeyGrab(surfaceFocused: boolean, forwardingInput: boolean): Promise<boolean> {
+  return call('input_set_grab', z.boolean(), { surfaceFocused, forwardingInput });
+}

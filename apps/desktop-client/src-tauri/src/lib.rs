@@ -378,6 +378,7 @@ pub fn run() {
             input_commands::input_pointer_button,
             input_commands::input_scroll,
             input_commands::input_key,
+            input_commands::input_set_grab,
         ])
         .run(tauri::generate_context!());
 

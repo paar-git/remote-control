@@ -41,6 +41,25 @@ pub trait KeyGrab {
     fn engaged(&self) -> bool;
 }
 
+/// So a boxed backend chosen at runtime is still a [`KeyGrab`].
+///
+/// Which platform hook to use is only known at runtime, so callers hold
+/// `Box<dyn KeyGrab + Send>`; without this they could not put one in a [`GrabGuard`],
+/// which is the type that guarantees the release.
+impl<G: KeyGrab + ?Sized> KeyGrab for Box<G> {
+    fn engage(&mut self) -> Result<(), GrabError> {
+        (**self).engage()
+    }
+
+    fn release(&mut self) {
+        (**self).release();
+    }
+
+    fn engaged(&self) -> bool {
+        (**self).engaged()
+    }
+}
+
 /// What should happen to a chord the operator pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
