@@ -388,6 +388,21 @@ export function VideoSurface({
           ? { message: 'Shortcuts are sent literally', urgent: false }
           : null;
 
+  // What the operator is invited to do, before they have done it.
+  //
+  // Capture only begins on focus, and until this existed the only cue was an
+  // `aria-label` — invisible to anyone not using a screen reader. Someone with control
+  // granted would move the mouse over the remote screen, see nothing happen, and
+  // reasonably conclude control had never been granted at all.
+  const invitation: string | null =
+    error !== null
+      ? null
+      : capturing
+        ? focused
+          ? null
+          : 'Click to control'
+        : 'View only';
+
   if (error !== null) {
     return (
       <div
@@ -403,8 +418,8 @@ export function VideoSurface({
     <div
       className={
         fitted
-          ? 'flex h-full w-full items-center justify-center overflow-hidden'
-          : 'h-full w-full overflow-auto'
+          ? 'relative flex h-full w-full items-center justify-center overflow-hidden'
+          : 'relative h-full w-full overflow-auto'
       }
     >
       <canvas
@@ -451,6 +466,19 @@ export function VideoSurface({
           .filter(Boolean)
           .join(' ')}
       />
+
+      {invitation !== null && (
+        <p
+          className={
+            'pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 ' +
+            '-translate-y-1/2 rounded-lg border border-(--color-border) ' +
+            'bg-(--color-card)/90 px-3 py-1.5 text-xs text-(--color-text-secondary) ' +
+            'shadow-lg'
+          }
+        >
+          {invitation}
+        </p>
+      )}
 
       {/* One status line, most urgent wins. An operator whose input is being rejected
           does not also need to be told how it was encoded, and one whose host has

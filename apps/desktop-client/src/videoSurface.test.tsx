@@ -547,3 +547,74 @@ describe('VideoSurface desktop shortcut grab', () => {
     expect(inputApi.setKeyGrab).not.toHaveBeenCalledWith(expect.anything(), true);
   });
 });
+
+describe('VideoSurface control affordance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.startStream).mockResolvedValue(STARTED);
+    vi.mocked(videoApi.listenStreamEnded).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.listenInputAck).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.listenInputApplied).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.setKeyGrab).mockResolvedValue(false);
+  });
+
+  it('says how to take control before the operator has clicked', async () => {
+    // Capture only starts on focus, and the only cue was an aria-label. A sighted
+    // operator would move the mouse over the remote screen, see nothing happen, and
+    // reasonably conclude control was never granted.
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        sharingClipboard={false}
+        onPointerSample={() => null}
+      />,
+    );
+    await screen.findByTestId('video-surface');
+
+    expect(await screen.findByText(/click to control/i)).toBeInTheDocument();
+  });
+
+  it('drops the hint once control is actually live', async () => {
+    // Leaving it up would cover the screen the operator is trying to work on.
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        sharingClipboard={false}
+        onPointerSample={() => null}
+      />,
+    );
+    const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
+    await screen.findByText(/click to control/i);
+
+    canvas.focus();
+
+    await waitFor(() => {
+      expect(screen.queryByText(/click to control/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it('says the session is view-only rather than inviting a click that does nothing', async () => {
+    // Without control_input there is nothing to click into, and "click to control"
+    // would be a lie. The honest thing is to name why the screen does not respond.
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing={false}
+        passthrough={false}
+        sharingClipboard={false}
+        onPointerSample={() => null}
+      />,
+    );
+    await screen.findByTestId('video-surface');
+
+    expect(await screen.findByText(/view only/i)).toBeInTheDocument();
+    expect(screen.queryByText(/click to control/i)).not.toBeInTheDocument();
+  });
+});
