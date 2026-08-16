@@ -4,13 +4,20 @@ Private remote access between machines **you own**. You type an address, the per
 the other machine clicks Accept, and you are connected. No account, no sign-in, no
 third-party cloud in the path.
 
-> **Status: the access model is built; the remote display is not.** Two machines can
-> find each other by address, admit each other by a trusted identity, an unattended
-> password, or a human clicking Accept, and hold a session with file transfer and system
-> monitoring over it. The window is four categories: Remote Control, My Devices,
-> Sessions and Settings. There is no screen capture and no input injection yet, and the
-> session screen says so rather than showing an empty frame. See
-> [`PROGRESS.md`](PROGRESS.md) for exactly what works today.
+> **Status: you can see the remote screen, but not yet drive it.** Two machines can
+> find each other by address and admit each other in one of four ways — incoming
+> access being on, then a trusted identity, an unattended password, or a human
+> clicking Accept — and hold a session carrying the remote display, file transfer and
+> system monitoring. The window is four categories: Remote Control, My Devices,
+> Sessions and Settings.
+>
+> The display is lossless and sends only the tiles that changed, so a still desktop
+> costs nothing. What is missing is the controlling half of input: the translation
+> layer that turns a shortcut into whatever the remote OS calls it is complete and
+> tested, but nothing on the viewer captures a keystroke and puts it on the wire yet.
+> Screen capture is verified on Windows; macOS and Linux compile and are tested in CI
+> but have never captured a frame. See [`PROGRESS.md`](PROGRESS.md) for exactly what
+> works today.
 
 ## Design in one paragraph
 
@@ -19,8 +26,9 @@ ones, and the same binary does both — there is no separate agent to install an
 client to pair with it. Two machines authenticate each other with mutually-authenticated
 TLS 1.3 over QUIC using self-signed certificates, and then, because completing TLS
 proves only *which key* is on the other end, the machine being connected to makes a
-separate admission decision: a trusted device identity, an unattended password its
-owner set, or a person clicking Accept. Persistent access is anchored on that identity,
+separate admission decision. Incoming access must be on, and then a trusted device
+identity, an unattended password its owner set, or a person clicking Accept, can
+open the door. Persistent access is anchored on that identity,
 so a device reached at a new address keeps its grant and a renewed certificate is not
 an identity change. What that session may then do is fixed at admission and re-checked
 on every single request.
@@ -40,11 +48,12 @@ on every single request.
 │  ├─ platform/                OS abstraction: paths, host facts, addresses
 │  ├─ monitoring/              System metrics collection
 │  ├─ file-transfer/           Chunked, resumable transfers
+│  ├─ input/                   Physical keys, per-OS shortcut translation, displays
+│  ├─ video/                   Screen capture, tile differencing, encode and decode
 │  ├─ updater/                 Signed release manifests and installation
 │  └─ host-agent/              The admission decision, and a standalone service
 ├─ packages/
 │  └─ shared-types/            Zod mirror of the protocol
-├─ installers/                 Windows and Linux packaging
 ├─ docs/                       Access model, threat model, protocol
 └─ scripts/                    Verification and development helpers
 ```
@@ -59,7 +68,7 @@ unattended device or an unattended password admits it.
 
 | Tool | Version used | Notes |
 |---|---|---|
-| Rust | 1.96 (edition 2024) | `rustup` installs the pinned toolchain automatically |
+| Rust | 1.90 (edition 2024) | `rust-version` in `Cargo.toml`; `rustup` installs the pinned toolchain automatically |
 | Node | ≥ 20.19 | 24.x verified |
 | pnpm | 11.x | `packageManager` field pins it |
 | MSVC Build Tools | 2022 | Windows only, for linking |
@@ -128,7 +137,7 @@ The rules the codebase is built to, each enforced by tests:
   decided once and trusted forever is the failure this design exists to prevent.
 - **Accepting with nothing ticked is a refusal**, decided in one place that every
   admission path funnels through.
-- **A pinned machine presenting a different certificate is refused outright**, never
+- **A pinned machine presenting a different identity is refused outright**, never
   handed to the Accept dialog — an identity change must not be reachable by a routine
   click.
 - **Nothing off the wire is trusted.** Frames are rejected on the header alone if they
@@ -144,7 +153,7 @@ The rules the codebase is built to, each enforced by tests:
 
 | Document | Covers |
 |---|---|
-| [`docs/access-model.md`](docs/access-model.md) | The three ways in, the ordering, the oracle properties, what a session may do |
+| [`docs/access-model.md`](docs/access-model.md) | The four ways in, the ordering, the oracle properties, what a session may do |
 | [`docs/threat-model.md`](docs/threat-model.md) | Assets, boundaries, adversaries, what got weaker and why |
 | [`docs/network-protocol.md`](docs/network-protocol.md) | QUIC, mutual TLS, the two-leg handshake, channels, ports |
 | [`docs/reconnection.md`](docs/reconnection.md) | What is retried, what is never retried, and why |

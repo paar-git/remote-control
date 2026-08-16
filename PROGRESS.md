@@ -15,9 +15,10 @@ that has been abandoned describes the plan, not the product.
 The connection runs over QUIC with mutually-authenticated TLS 1.3, and completing that
 handshake admits nothing on its own — the machine being connected to then decides.
 
-**The admission decision is real and is enforced.** A trusted device identity, an
-unattended password, or a person clicking Accept, checked in that order. Trust is
-keyed on the identity the peer proved through TLS, not the address it was typed at.
+**The admission decision is real and is enforced.** Incoming access must be on,
+then a trusted device identity, an unattended password, or a person clicking
+Accept, checked in that order. Trust is keyed on the identity the peer proved
+through TLS, not the address it was typed at.
 A stranger answering at a trusted device's address is refused as `IdentityChanged`
 rather than prompted. A wrong password is a refusal rather than a fallback to the
 dialog. Accepting with no permissions ticked is a refusal. See
@@ -33,24 +34,54 @@ sections, not more navigation.
 session, and re-checked on every request rather than once at connect. Both machines
 enforce it; the one being controlled is the authority.
 
-**Over a live session:** file browsing and chunked, resumable transfer in both
-directions, and live system metrics. Both are gated on the permission that covers them,
-and a tool whose permission was withheld is absent from the interface rather than
-present and failing.
+**Over a live session:** the remote screen, file browsing and chunked, resumable
+transfer in both directions, and live system metrics. Each is gated on the permission
+that covers it, and a tool whose permission was withheld is absent from the interface
+rather than present and failing.
+
+**The remote screen arrives losslessly.** The host tiles each frame at 64×64, hashes
+every tile, and sends only the ones that changed, compressed with zstd — so a still
+desktop costs nothing and a moving one costs what actually moved. Lossless is a
+deliberate choice rather than a stopgap: this stream carries terminals and log output,
+where compression artifacts on small text are the failure that matters, not bandwidth.
+Encode and decode are covered by a property test asserting the picture comes back
+byte-for-byte identical.
+
+A refresh too large for one frame is split across several and reassembled, because a 4K
+screen exceeds the channel's frame ceiling before a single pixel of overhead. Damage is
+computed from the frames themselves rather than asked of the operating system, which is
+why all three platforms behave identically. A dropped frame is noticed by its sequence
+gap and repaired by requesting a keyframe, rather than leaving a permanently wrong
+picture for a human to spot.
+
+**Watching a screen is its own permission.** Not implied by being allowed to move the
+pointer, and not granted by unattended access that was given for something else.
 
 **The application updates itself** from a signed release manifest, verifying a SHA-256
 checksum before anything is installed and never installing without confirmation.
 
 ## What does not work yet
 
-**There is no remote display.** No screen capture, no input injection. The session
-screen says so in a sentence rather than rendering an empty frame that would look like a
-picture that had not loaded yet. `control_input` exists as a permission and is granted
-and enforced, but nothing consumes it yet.
+**The remote screen cannot be driven.** It can now be *seen*: the host captures a
+display, sends only the tiles that changed, and the viewer paints them onto a canvas.
+What is missing is the other half — nothing on the controlling side captures a keystroke
+or a pointer movement and puts it on the wire. The input layer beneath that gap is
+complete and tested, including the per-OS shortcut translation, but it has no
+controller-side producer, so `control_input` is still granted and enforced with nothing
+consuming it.
+
+Also absent from the video path: H.264 and every other lossy codec (the variants exist
+and negotiation refuses them), clipboard sync, adaptive quality, and viewing more than
+one display at a time. `QualityPreset` is accepted and reported back but changes nothing,
+because the only codecs implemented are lossless.
+
+**Screen capture is verified on Windows only.** macOS and Linux compile and are covered
+by CI, but no frame has ever been captured on either. Wayland is refused outright rather
+than returning black frames.
 
 **Cross-machine use has not been confirmed by hand.** Everything below is verified by
-automated tests, including nine cases driven against the real `rc-agent` binary in its
-own process. A run between two *physical* machines on a real network has not been
+automated tests, including twelve cases driven against the real `rc-agent` binary in
+its own process. A run between two *physical* machines on a real network has not been
 recorded.
 
 ## Deleted, and why the test count fell
@@ -62,7 +93,7 @@ history and it is the reason the Rust suite is smaller than it was:
 |---|---|
 | Pairing protocol | Replaced by the Accept dialog. It was the single largest obstacle to the product being usable. |
 | Owner account and login | There is no account. The desktop session lock is the boundary. |
-| Role hierarchy | Reduced to three permissions with no roles above them. |
+| Role hierarchy | Reduced to four permissions with no roles above them. |
 | Coordination server | Nothing routed through it; machines are reached by address. |
 | mDNS discovery | Announced the application to the whole network to save reading an address off a screen. |
 | Privileged helper | Service and power control went with it. |
@@ -76,7 +107,7 @@ most heavily tested subsystem in the tree.
 This is a smaller product, not a less tested one. Read the number as deletion rather
 than decay.
 
-**TypeScript tests: 129 → 256**, because the interface was rewritten rather than
+**TypeScript tests: 129 → 265**, because the interface was rewritten rather than
 removed, then rebuilt around four categories.
 
 ## Verification
@@ -88,7 +119,7 @@ Run against the current tree. Reproduce with `pnpm verify`.
 | `cargo test --workspace` | **662 passed**, 0 failed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean, exit 0 |
 | `cargo fmt --all --check` | clean |
-| `pnpm -r test:run` | **256 passed**, 0 failed (205 desktop + 51 shared-types) |
+| `pnpm -r test:run` | **265 passed**, 0 failed (214 desktop + 51 shared-types) |
 | `pnpm -r typecheck` | clean |
 | `pnpm run lint` | clean |
 | `pnpm run format:check` | clean |
@@ -118,13 +149,14 @@ Not a list of everything, but the ones that pin a property rather than a behavio
 - **The two address parsers agree.** `address.ts` re-implements `PeerAddress::from_str`
   so a typo is reported under the field instead of arriving as a timeout;
   `crates/transport/tests/address_cross_check.rs` is the table both must satisfy.
-- **The access model, against the real binary.** Nine cases in
+- **The access model, against the real binary.** Twelve cases in
   `crates/host-agent/tests/access_e2e.rs` spawn `rc-agent` as its own process with a
-  seeded database and drive a real client at it over QUIC: dismissal, not-accepting,
-  wrong password, a stranger at a trusted address, a correct password, a trusted
-  identity admitted without a prompt, a withheld permission refused per request, a
-  grant surviving a restart, a revoked device refused after restart, and a second
-  device unable to reuse the first's grant.
+  seeded database and drive a real client at it over QUIC: dismissal, a refusal
+  never retried, not-accepting, wrong password, a stranger at a trusted address, a
+  correct password, a trusted identity admitted without a prompt, a withheld
+  permission refused per request, a grant surviving a restart, a revoked device
+  refused after restart, a suspended device refused while keeping its settings,
+  and a second device unable to reuse the first's grant.
 
 ## Known loose ends
 
