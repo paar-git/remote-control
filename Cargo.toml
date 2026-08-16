@@ -23,7 +23,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 authors = ["Remote Control maintainers"]
-repository = "https://example.invalid/remote-control"
+repository = "https://github.com/realpargitDEV/remote-control"
 
 [workspace.dependencies]
 # --- local crates ---
