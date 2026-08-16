@@ -478,6 +478,27 @@ impl<S: CaptureSource> VideoService<S> {
     }
 }
 
+/// The capture source this build uses.
+///
+/// # Errors
+/// If no display server is reachable, or this build has no capture backend.
+#[cfg(feature = "inject")]
+pub fn new_source() -> rc_video::Result<rc_video::capture::xcap_source::XcapSource> {
+    rc_video::capture::xcap_source::XcapSource::new()
+}
+
+/// The capture source this build uses.
+///
+/// # Errors
+/// Always: a build without the capture backend cannot serve video, and says so rather
+/// than serving black frames.
+#[cfg(not(feature = "inject"))]
+pub fn new_source() -> rc_video::Result<rc_video::capture::mock::MockSource> {
+    Err(rc_video::VideoError::Unsupported(
+        "this build has no capture backend",
+    ))
+}
+
 /// Clamp a client's requested ceiling into `1..=60` and turn it into a tick period.
 fn fps_interval(max_fps: u8) -> Duration {
     let fps = max_fps.clamp(1, 60);

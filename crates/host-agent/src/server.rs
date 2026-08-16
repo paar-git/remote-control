@@ -710,7 +710,28 @@ impl AgentServer {
                             }
                         }
                     }
-                    other => {
+                    rc_protocol::Channel::Video => {
+                        // The source is built per channel for the same reason as the
+                        // input sink: a host that cannot capture reports that fact to
+                        // this client rather than failing at startup for every client.
+                        match crate::video_service::new_source() {
+                            Ok(source) => {
+                                let service = crate::video_service::VideoService::new(
+                                    writer,
+                                    session,
+                                    source,
+                                    server.config.features.remote_desktop,
+                                );
+                                tokio::spawn(async move {
+                                    service.run(&mut reader).await;
+                                });
+                            }
+                            Err(err) => {
+                                tracing::warn!(%err, "video channel opened on a host that cannot capture");
+                            }
+                        }
+                    }
+                    other @ rc_protocol::Channel::Control => {
                         // A channel this build does not serve is closed rather than left
                         // open: a client waiting on a stream nobody reads would appear
                         // to hang, which is worse than a clear end.
