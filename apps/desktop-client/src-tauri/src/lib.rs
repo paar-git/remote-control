@@ -20,6 +20,7 @@ mod host_events;
 mod session_commands;
 mod trust_commands;
 mod update_commands;
+mod video_commands;
 
 use std::sync::Arc;
 
@@ -238,12 +239,34 @@ async fn initialise() -> Arc<AppState> {
         ))
     });
 
+    let host_runtime = Arc::new(host::HostRuntime::new(host::TauriPrompt::new()));
+    if let (Some(identity), Some(db)) = (identity.as_ref(), database.as_ref()) {
+        match rc_storage::SettingsRepository::new(db).load().await {
+            Ok(settings) if settings.accepting => {
+                if let Err(err) = host_runtime
+                    .start(Arc::clone(identity), db, settings.listen_port)
+                    .await
+                {
+                    tracing::error!(
+                        %err,
+                        port = settings.listen_port,
+                        "could not start accepting connections on launch"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::error!(%err, "could not load host settings on launch");
+            }
+        }
+    }
+
     Arc::new(AppState {
         host,
         paths: paths.clone(),
         database,
         identity,
-        host_runtime: Arc::new(host::HostRuntime::new(host::TauriPrompt::new())),
+        host_runtime,
         connection,
         clock,
         updater: update_commands::UpdateRuntime::new(paths.data_dir()),
@@ -345,6 +368,10 @@ pub fn run() {
             update_commands::resume_update_download,
             update_commands::cancel_update_download,
             update_commands::install_update,
+            video_commands::video_list_displays,
+            video_commands::video_start_stream,
+            video_commands::video_stop_stream,
+            video_commands::video_request_keyframe,
         ])
         .run(tauri::generate_context!());
 

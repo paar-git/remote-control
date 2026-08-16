@@ -28,6 +28,7 @@ rc-storage = { workspace = true }
 rc-transport = { workspace = true }
 rc-file-transfer = { workspace = true }
 rc-updater = { workspace = true }
+rc-video = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 quinn = { workspace = true }

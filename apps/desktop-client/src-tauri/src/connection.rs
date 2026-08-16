@@ -43,6 +43,7 @@ use rc_protocol::control::{
     Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
     ControlResult, DeviceDescriptor, Disconnect, DisconnectReason, WireRefusal,
 };
+use rc_protocol::desktop::{DesktopAgentMessage, DesktopClientMessage, DisplayInfo};
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
 use rc_protocol::system::MetricsAgentMessage;
 use rc_protocol::{RequestId, SessionId};
@@ -128,6 +129,8 @@ pub enum ConnectionState {
         /// to offer; the authority is still the other machine, which re-checks on every
         /// request.
         permissions: Vec<String>,
+        /// The name the other machine reported, for the session toolbar.
+        device_name: String,
     },
     /// A disconnect is in progress.
     Disconnecting,
@@ -270,6 +273,8 @@ pub struct Target {
     /// Not logged and not stored. It is sent inside the already-authenticated TLS
     /// exchange and dropped when the attempt ends.
     pub unattended_password: Option<String>,
+    /// Identity previously seen at this address, if any.
+    pub pinned_identity: Option<rc_security::Fingerprint>,
 }
 
 impl Target {
@@ -279,6 +284,7 @@ impl Target {
         Self {
             address,
             unattended_password: None,
+            pinned_identity: None,
         }
     }
 }
@@ -290,6 +296,8 @@ struct ActiveConnection {
     reader: ChannelReader,
     session_id: SessionId,
     address: SocketAddr,
+    /// Kept so the QUIC endpoint outlives the connection.
+    _connector: ClientConnector,
 }
 
 /// Owns at most one connection to one server.
@@ -309,6 +317,14 @@ pub struct ConnectionManager {
     /// nothing until a subscription exists, so an open channel with nobody watching
     /// costs a parked task and no load on the server.
     metrics: Mutex<Option<ChannelWriter>>,
+    /// The write half of the video channel, while a stream is running.
+    ///
+    /// Held so [`ConnectionManager::video_stop_stream`] and
+    /// [`ConnectionManager::video_request_keyframe`] can reach it, and so the frame
+    /// reader task started by [`ConnectionManager::video_start_stream`] can ask for a
+    /// keyframe itself when the decoder falls behind. `Arc` because both this struct
+    /// and that task hold it at once.
+    video: Mutex<Option<Arc<Mutex<ChannelWriter>>>>,
     /// Who answered, once a connection is established.
     ///
     /// Arrives on `SessionAuthorization::Granted`, so it exists only for an admitted
@@ -316,6 +332,10 @@ pub struct ConnectionManager {
     /// side has nothing to record. Used for the name shown in the session and written
     /// to the recent list.
     peer: Mutex<Option<DeviceDescriptor>>,
+    /// Identity extracted from the certificate presented on the last admitted session.
+    peer_identity: Mutex<Option<rc_security::Fingerprint>>,
+    /// Row in `session_history` for the current outgoing session, if one was written.
+    outgoing_history_id: Mutex<Option<i64>>,
     /// What the agent granted this session, and therefore what this client may ask of
     /// it.
     ///
@@ -349,10 +369,13 @@ impl ConnectionManager {
             capabilities,
             state: std::sync::Mutex::new(ConnectionState::Offline),
             peer: Mutex::new(None),
+            peer_identity: Mutex::new(None),
+            outgoing_history_id: Mutex::new(None),
             granted: std::sync::Mutex::new(PermissionSet::NONE),
             active: Mutex::new(None),
             files: Mutex::new(None),
             metrics: Mutex::new(None),
+            video: Mutex::new(None),
             intentional_disconnect: std::sync::atomic::AtomicBool::new(false),
             backoff: BackoffPolicy::default(),
         }
@@ -376,6 +399,51 @@ impl ConnectionManager {
     /// Who answered on the live connection, if one is up.
     pub async fn peer(&self) -> Option<DeviceDescriptor> {
         self.peer.lock().await.clone()
+    }
+
+    /// Identity the last admitted peer proved, if one was observed.
+    pub async fn peer_identity(&self) -> Option<rc_security::Fingerprint> {
+        *self.peer_identity.lock().await
+    }
+
+    /// Remember the history row for this outgoing session.
+    pub async fn set_outgoing_history_id(&self, id: i64) {
+        *self.outgoing_history_id.lock().await = Some(id);
+    }
+
+    /// Take the history row so it can be finished exactly once.
+    pub async fn take_outgoing_history_id(&self) -> Option<i64> {
+        self.outgoing_history_id.lock().await.take()
+    }
+
+    /// Wait until the live QUIC connection ends, if one is up.
+    pub async fn wait_until_closed(&self) {
+        let connection = {
+            let guard = self.active.lock().await;
+            guard.as_ref().map(|active| active.connection.clone())
+        };
+        if let Some(connection) = connection {
+            connection.closed().await;
+        }
+    }
+
+    /// Wait for the live QUIC connection to end, then reconnect unless the operator
+    /// disconnected on purpose. After a successful reconnect, watch the new link too —
+    /// a one-shot watch would leave the next drop sitting as "connected" forever.
+    pub fn watch_for_loss(self: &Arc<Self>, target: Target) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                this.wait_until_closed().await;
+                if this.was_intentional() {
+                    return;
+                }
+                if let Err(err) = this.reconnect(&target).await {
+                    tracing::warn!(%err, "automatic reconnect ended");
+                    return;
+                }
+            }
+        });
     }
 
     /// What the connected agent granted this session.
@@ -479,12 +547,10 @@ impl ConnectionManager {
         target: &Target,
         address: SocketAddr,
     ) -> Result<SessionId, TransportError> {
-        // Trust-on-first-use, because there is nothing to pin against: this build has
-        // no saved-device record, and the machine being dialled has not been seen
-        // before. Admission is decided by the machine on the other end, after TLS, by
-        // its user — which is the whole design. TLS here establishes *which key* is
-        // there, not that it may have a session.
-        let (connector, _observed) =
+        // TLS still uses trust-on-first-use so a certificate renewal is not a
+        // mismatch. The identity extracted from that certificate is compared below
+        // against any pin recorded for this address.
+        let (connector, observed) =
             ClientConnector::new(&self.identity, PinPolicy::TrustOnFirstUse)?;
 
         let connection = tokio::time::timeout(
@@ -513,6 +579,18 @@ impl ConnectionManager {
         .await?;
 
         let session_id = ack.session_id;
+
+        if let Some(certificate) = observed.get() {
+            let identity = rc_security::identity_fingerprint_of_certificate(&certificate.der)
+                .map_err(|_| TransportError::FingerprintMismatch)?;
+            if let Some(pinned) = target.pinned_identity
+                && !pinned.ct_eq(&identity)
+            {
+                return Err(TransportError::FingerprintMismatch);
+            }
+            *self.peer_identity.lock().await = Some(identity);
+        }
+
         // Set after `set_state`, which clears it for every state but `Connected`.
         self.set_state(ConnectionState::Connected {
             session_id: session_id.to_canonical_string(),
@@ -522,6 +600,7 @@ impl ConnectionManager {
                 .iter()
                 .map(|p| p.name().to_owned())
                 .collect(),
+            device_name: ack.descriptor.display_name.clone(),
         });
         self.set_granted(ack.permissions);
         *self.peer.lock().await = Some(ack.descriptor.clone());
@@ -530,10 +609,6 @@ impl ConnectionManager {
             machine = %ack.descriptor.display_name,
             "the other machine admitted this session"
         );
-
-        // The connector is held by the active connection: dropping it would close the
-        // endpoint underneath the connection that was just established.
-        std::mem::forget(connector);
 
         // Any channels belonged to a previous connection.
         *self.files.lock().await = None;
@@ -544,6 +619,7 @@ impl ConnectionManager {
             reader,
             session_id,
             address,
+            _connector: connector,
         });
 
         tracing::info!(%address, %session_id, "connected");
@@ -785,6 +861,131 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// Ask the agent to list its capturable displays.
+    ///
+    /// A fresh channel, used once and dropped: display enumeration happens before a
+    /// stream exists, so there is nothing yet worth keeping open.
+    ///
+    /// # Errors
+    /// The connection is gone, or the agent answered with something other than a
+    /// listing.
+    pub async fn video_list_displays(&self) -> Result<Vec<DisplayInfo>, TransportError> {
+        let (mut writer, mut reader) = self.open_video_channel().await?;
+        writer.send(&DesktopClientMessage::ListDisplays).await?;
+
+        match Self::next_video_message(&mut reader).await? {
+            DesktopAgentMessage::Displays(displays) => Ok(displays),
+            DesktopAgentMessage::Error { message, .. } => {
+                Err(TransportError::Closed { reason: message })
+            }
+            _ => Err(TransportError::Closed {
+                reason: "the agent did not answer with a display list".to_owned(),
+            }),
+        }
+    }
+
+    /// Open the video channel and ask the agent to start streaming.
+    ///
+    /// The write half is kept on `self.video` so [`Self::video_stop_stream`] and
+    /// [`Self::video_request_keyframe`] can reach it later, and so the caller can hand
+    /// its own clone to the task that reads frames — that task asks for a keyframe on
+    /// its own when the decoder falls behind, without a round trip back through here.
+    ///
+    /// # Errors
+    /// The connection is gone, the agent refused, or it answered with something other
+    /// than `StreamStarted`.
+    pub async fn video_start_stream(
+        &self,
+        request: &DesktopClientMessage,
+    ) -> Result<
+        (
+            DesktopAgentMessage,
+            Arc<Mutex<ChannelWriter>>,
+            ChannelReader,
+        ),
+        TransportError,
+    > {
+        let (mut writer, mut reader) = self.open_video_channel().await?;
+        writer.send(request).await?;
+
+        let reply = Self::next_video_message(&mut reader).await?;
+        if let DesktopAgentMessage::Error { message, .. } = reply {
+            *self.video.lock().await = None;
+            return Err(TransportError::Closed { reason: message });
+        }
+        if !matches!(reply, DesktopAgentMessage::StreamStarted { .. }) {
+            *self.video.lock().await = None;
+            return Err(TransportError::Closed {
+                reason: "the agent did not answer with StreamStarted".to_owned(),
+            });
+        }
+
+        let writer = Arc::new(Mutex::new(writer));
+        *self.video.lock().await = Some(Arc::clone(&writer));
+        Ok((reply, writer, reader))
+    }
+
+    /// Tell the agent to stop streaming.
+    ///
+    /// The write half is left in place rather than dropped: the reader task ends the
+    /// stream on its own once it sees `StreamStopped` or the channel close, and doing
+    /// it there keeps one place responsible for tearing the channel down.
+    ///
+    /// # Errors
+    /// The connection is gone, or nothing is streaming.
+    pub async fn video_stop_stream(&self) -> Result<(), TransportError> {
+        let writer = self.video_writer().await?;
+        let mut guard = writer.lock().await;
+        guard.send(&DesktopClientMessage::StopStream).await
+    }
+
+    /// Ask the agent for a fresh keyframe, e.g. after the decoder detects a gap.
+    ///
+    /// # Errors
+    /// The connection is gone, or nothing is streaming.
+    pub async fn video_request_keyframe(&self) -> Result<(), TransportError> {
+        let writer = self.video_writer().await?;
+        let mut guard = writer.lock().await;
+        guard.send(&DesktopClientMessage::RequestKeyframe).await
+    }
+
+    /// The video channel's write half, if a stream is open.
+    async fn video_writer(&self) -> Result<Arc<Mutex<ChannelWriter>>, TransportError> {
+        self.video
+            .lock()
+            .await
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(TransportError::Closed {
+                reason: "no video stream is running".to_owned(),
+            })
+    }
+
+    /// Open a fresh video channel on the active connection.
+    async fn open_video_channel(&self) -> Result<(ChannelWriter, ChannelReader), TransportError> {
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let channel =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Video).await?;
+        drop(guard);
+        Ok(channel)
+    }
+
+    /// Read one message off the video channel, mapping a closed stream to an error.
+    async fn next_video_message(
+        reader: &mut ChannelReader,
+    ) -> Result<DesktopAgentMessage, TransportError> {
+        reader
+            .next_message::<DesktopAgentMessage>()
+            .await?
+            .ok_or(TransportError::ConnectionLost {
+                reason: "the agent closed the video channel".to_owned(),
+            })
+    }
+
     /// Disconnect deliberately.
     ///
     /// Sets the flag that suppresses automatic reconnection. That is the entire point:
@@ -798,6 +999,7 @@ impl ConnectionManager {
         // fresh ones rather than writing into a dead stream.
         *self.files.lock().await = None;
         *self.metrics.lock().await = None;
+        *self.video.lock().await = None;
 
         if let Some(mut active) = self.active.lock().await.take() {
             // Best-effort: tell the agent why, so its audit trail records an intentional
@@ -1011,6 +1213,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_outgoing_history_id_is_taken_exactly_once() {
+        let manager = manager();
+        manager.set_outgoing_history_id(7).await;
+        assert_eq!(manager.take_outgoing_history_id().await, Some(7));
+        assert_eq!(manager.take_outgoing_history_id().await, None);
+    }
+
+    #[tokio::test]
     async fn connecting_again_re_arms_automatic_reconnect() {
         // After a deliberate disconnect and a deliberate reconnect, a later accidental
         // drop must be retried again.
@@ -1194,6 +1404,7 @@ mod tests {
                 session_id: "ses_x".to_owned(),
                 address: "10.0.0.1:1".to_owned(),
                 permissions: Vec::new(),
+                device_name: "pc".to_owned(),
             },
             ConnectionState::Disconnecting,
             ConnectionState::Reconnecting { attempt: 1 },
@@ -1231,6 +1442,7 @@ mod tests {
             session_id: SessionId::generate().to_canonical_string(),
             address: "10.0.0.1:47811".to_owned(),
             permissions: Vec::new(),
+            device_name: "pc".to_owned(),
         };
         let rendered = serde_json::to_string(&state).unwrap();
 
