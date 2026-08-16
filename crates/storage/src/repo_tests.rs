@@ -82,7 +82,7 @@ async fn a_recent_connection_cannot_hold_a_malformed_identity() {
 
 #[tokio::test]
 async fn a_trusted_device_cannot_hold_a_permission_bit_this_build_does_not_know() {
-    // Five permissions occupy bits 1-5. A row carrying bit 6 is not a grant with one
+    // Six permissions occupy bits 1-6. A row carrying bit 7 is not a grant with one
     // extra permission, it is a value this build cannot interpret, and `from_bits`
     // refuses it -- so the schema refuses to store one in the first place.
     let database = temp_database().await;
@@ -90,7 +90,7 @@ async fn a_trusted_device_cannot_hold_a_permission_bit_this_build_does_not_know(
     let err = sqlx::query(
         "INSERT INTO trusted_devices
              (identity_fingerprint, device_id, display_name, os_family, added_ms, permissions)
-         VALUES (?, 'dev', 'Box', 'linux', 1, 32)",
+         VALUES (?, 'dev', 'Box', 'linux', 1, 64)",
     )
     .bind("a".repeat(64))
     .execute(database.pool())

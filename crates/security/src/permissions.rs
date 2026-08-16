@@ -1,12 +1,12 @@
 //! What a session is allowed to do.
 //!
-//! Five permissions. Four are chosen by a human on the Accept dialog or pre-selected
-//! for unattended access. The fifth, [`Permission::Administer`], is never reachable
+//! Six permissions. Five are chosen by a human on the Accept dialog or pre-selected
+//! for unattended access. The sixth, [`Permission::Administer`], is never reachable
 //! from that dialog at all — it is granted only from a trusted device's own settings,
 //! behind a confirmation that names the device.
 //!
 //! There are no roles: a role is an indirection that only pays for itself when there are
-//! many permissions and many kinds of user, and this product has five of one and one of
+//! many permissions and many kinds of user, and this product has six of one and one of
 //! the other.
 //!
 //! A permission is granted for the lifetime of a session and cannot be escalated
@@ -37,6 +37,17 @@ pub enum Permission {
     TransferFiles,
     /// Read CPU, memory, disk and network readings.
     ViewMetrics,
+    /// Share clipboard text between the two machines.
+    ///
+    /// Its own grant for the same reason [`Self::ViewScreen`] is. A clipboard is not a
+    /// side effect of driving a machine: it carries whatever its owner last copied,
+    /// which is routinely a password, a private key or a customer record that was never
+    /// on screen and never in a file anyone browsed. Being allowed to type on a machine
+    /// says nothing about being allowed to read what its owner copied ten minutes ago.
+    ///
+    /// It matters most for unattended access, where the clipboard keeps changing with
+    /// nobody present to notice what left the machine.
+    Clipboard,
     /// Read and change this machine's trusted devices and their permissions.
     ///
     /// Deliberately separate from the other three, and from unattended access. A device
@@ -53,11 +64,12 @@ impl Permission {
     /// Presentation order, not storage order: seeing the screen comes first because it
     /// is what a remote-desktop session is for, while the bit each permission occupies
     /// is fixed by what is already on disk. See [`Self::bit`].
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ViewScreen,
         Self::ControlInput,
         Self::TransferFiles,
         Self::ViewMetrics,
+        Self::Clipboard,
         Self::Administer,
     ];
 
@@ -69,6 +81,7 @@ impl Permission {
             Self::ControlInput => "control_input",
             Self::TransferFiles => "transfer_files",
             Self::ViewMetrics => "view_metrics",
+            Self::Clipboard => "clipboard",
             Self::Administer => "administer",
         }
     }
@@ -85,6 +98,7 @@ impl Permission {
             Self::ViewMetrics => 0b0000_0100,
             Self::Administer => 0b0000_1000,
             Self::ViewScreen => 0b0001_0000,
+            Self::Clipboard => 0b0010_0000,
         }
     }
 }
@@ -99,7 +113,7 @@ pub struct PermissionSet(u8);
 
 impl PermissionSet {
     /// Every bit that any known permission uses.
-    const KNOWN: u8 = 0b0001_1111;
+    const KNOWN: u8 = 0b0011_1111;
 
     /// Grants nothing. What a connection holds before a human has decided.
     pub const NONE: Self = Self(0);
@@ -194,11 +208,43 @@ mod tests {
         assert_eq!(Permission::ViewMetrics.bit(), 0b0000_0100);
         assert_eq!(Permission::Administer.bit(), 0b0000_1000);
         assert_eq!(Permission::ViewScreen.bit(), 0b0001_0000);
+        assert_eq!(Permission::Clipboard.bit(), 0b0010_0000);
 
         // A row written before this permission existed still loads, and reads as not
         // granting it — closed, not open.
         let stored = PermissionSet::from_bits(0b0000_1111).expect("every old bit is known");
         assert!(!stored.contains(Permission::ViewScreen));
+        assert!(stored.contains(Permission::ControlInput));
+    }
+
+    #[test]
+    fn reading_a_clipboard_is_its_own_grant() {
+        // A clipboard carries whatever its owner last copied — routinely a password or
+        // a private key that was never on screen and never in a browsable file. Being
+        // trusted to type on a machine says nothing about being trusted to read that.
+        for permission in [
+            Permission::ControlInput,
+            Permission::ViewScreen,
+            Permission::TransferFiles,
+            Permission::ViewMetrics,
+        ] {
+            assert!(
+                !PermissionSet::NONE
+                    .with(permission)
+                    .contains(Permission::Clipboard),
+                "{} must not imply clipboard",
+                permission.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_trust_row_written_before_clipboard_existed_does_not_grant_it() {
+        // Closed, not open: an unattended device trusted under the old build must not
+        // silently gain the clipboard when this build loads its stored row.
+        let stored = PermissionSet::from_bits(0b0001_1111).expect("every old bit is known");
+        assert!(!stored.contains(Permission::Clipboard));
+        assert!(stored.contains(Permission::ViewScreen));
         assert!(stored.contains(Permission::ControlInput));
     }
 
@@ -213,7 +259,7 @@ mod tests {
 
     #[test]
     fn all_grants_every_permission() {
-        assert_eq!(Permission::ALL.len(), 5);
+        assert_eq!(Permission::ALL.len(), 6);
         for permission in Permission::ALL {
             assert!(PermissionSet::ALL.contains(permission));
         }
@@ -272,6 +318,7 @@ mod tests {
         assert_eq!(Permission::TransferFiles.name(), "transfer_files");
         assert_eq!(Permission::ViewMetrics.name(), "view_metrics");
         assert_eq!(Permission::Administer.name(), "administer");
+        assert_eq!(Permission::Clipboard.name(), "clipboard");
     }
 
     #[test]
@@ -324,6 +371,10 @@ mod tests {
         // The first bit no permission has claimed. A row carrying it comes from a newer
         // build, and is refused rather than reinterpreted as a smaller set — see
         // `from_bits`.
-        assert_eq!(PermissionSet::from_bits(0b0010_0000), None);
+        assert_eq!(
+            PermissionSet::from_bits(0b0010_0000),
+            Some(PermissionSet::NONE.with(Permission::Clipboard))
+        );
+        assert_eq!(PermissionSet::from_bits(0b0100_0000), None);
     }
 }

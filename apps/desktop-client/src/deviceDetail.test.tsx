@@ -73,6 +73,7 @@ describe('DeviceDetail', () => {
       'Keyboard & Mouse',
       'File Transfer',
       'System Metrics',
+      'Clipboard Sharing',
     ]);
   });
 

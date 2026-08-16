@@ -99,7 +99,7 @@ describe('AcceptDialog', () => {
     for (const box of screen.getAllByRole('checkbox')) {
       expect(box).toBeChecked();
     }
-    expect(screen.getAllByRole('checkbox')).toHaveLength(4);
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5);
   });
 
   it('gives initial focus to Reject, so a stray Enter refuses', async () => {
@@ -146,10 +146,16 @@ describe('AcceptDialog', () => {
 
     await waitFor(() => {
       expect(granted()).toEqual(
-        expect.arrayContaining(['view_screen', 'control_input', 'transfer_files', 'view_metrics']),
+        expect.arrayContaining([
+          'view_screen',
+          'control_input',
+          'transfer_files',
+          'view_metrics',
+          'clipboard',
+        ]),
       );
     });
-    expect(granted()).toHaveLength(4);
+    expect(granted()).toHaveLength(5);
     expect(trust()).toBe('once');
   });
 
@@ -163,10 +169,10 @@ describe('AcceptDialog', () => {
 
     await waitFor(() => {
       expect(granted()).toEqual(
-        expect.arrayContaining(['view_screen', 'control_input', 'view_metrics']),
+        expect.arrayContaining(['view_screen', 'control_input', 'view_metrics', 'clipboard']),
       );
     });
-    expect(granted()).toHaveLength(3);
+    expect(granted()).toHaveLength(4);
     expect(granted()).not.toContain('transfer_files');
   });
 

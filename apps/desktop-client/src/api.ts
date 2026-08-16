@@ -63,9 +63,11 @@ export function getLocalIdentity(): Promise<LocalIdentity> {
  * nobody has written a control for.
  */
 export const permissionSchema = z.enum([
+  'view_screen',
   'control_input',
   'transfer_files',
   'view_metrics',
+  'clipboard',
   'administer',
 ]);
 export type Permission = z.infer<typeof permissionSchema>;
@@ -105,6 +107,7 @@ export const connectionStateSchema = z.discriminatedUnion('state', [
      * no separate call that could report a grant for a connection that has ended.
      */
     permissions: z.array(permissionSchema),
+    deviceName: z.string(),
   }),
   z.object({ state: z.literal('disconnecting') }),
   z.object({ state: z.literal('reconnecting'), attempt: z.number().int() }),
@@ -309,12 +312,12 @@ export type MetricsStopped = z.infer<typeof metricsStoppedSchema>;
  * hoped for.
  */
 export function subscribeMetrics(intervalMs: number): Promise<number> {
-  return call('subscribe_metrics', z.number().int().positive(), { input: { intervalMs } });
+  return call('subscribe_metrics', z.number().int().positive(), { intervalMs });
 }
 
 /** Ask the server to stop pushing readings. */
-export function unsubscribeMetrics(): Promise<void> {
-  return call('unsubscribe_metrics', z.void());
+export function unsubscribeMetrics(): Promise<null> {
+  return call('unsubscribe_metrics', z.null());
 }
 
 /**
