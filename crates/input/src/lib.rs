@@ -29,6 +29,7 @@
 
 pub mod backend;
 pub mod display;
+pub mod grab;
 pub mod intent;
 pub mod session;
 

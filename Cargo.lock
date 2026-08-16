@@ -4386,6 +4386,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc-keygrab"
+version = "0.2.0"
+dependencies = [
+ "rc-input",
+ "rc-protocol",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "rc-monitoring"
 version = "0.2.0"
 dependencies = [
