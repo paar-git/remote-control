@@ -21,3 +21,26 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(() => Promise.resolve(() => undefined)),
 }));
+
+/**
+ * jsdom implements no Canvas API at all — not even the plain-data `ImageData`
+ * constructor, which does not touch a canvas itself. The video pipeline's tests
+ * construct one to hand to `putImageData`, so a minimal stand-in is provided here
+ * rather than in each test file.
+ */
+if (typeof globalThis.ImageData === 'undefined') {
+  class ImageDataPolyfill {
+    readonly data: Uint8ClampedArray;
+    readonly width: number;
+    readonly height: number;
+
+    constructor(data: Uint8ClampedArray, width: number, height?: number) {
+      this.data = data;
+      this.width = width;
+      this.height = height ?? data.length / (4 * width);
+    }
+  }
+
+  // @ts-expect-error -- a minimal stand-in, not a full `ImageData` implementation.
+  globalThis.ImageData = ImageDataPolyfill;
+}
