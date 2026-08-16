@@ -83,7 +83,12 @@ jobs:
             librsvg2-dev \
             patchelf \
             libpipewire-0.3-dev \
-            libclang-dev
+            libclang-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libxcb1-dev \
+            libwayland-dev \
+            libdrm-dev
 
       - name: Check formatting
         if: runner.os == 'Linux'
