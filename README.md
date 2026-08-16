@@ -24,8 +24,9 @@ third-party cloud in the path.
 > on screen.
 >
 > `Alt+Tab` and its kin are taken back from the operator's own desktop and forwarded as
-> the action they mean, but that hook exists for Windows only and has never run on a real
-> desktop. `Ctrl+Alt+Del` cannot be forwarded at all and says so. No lossy codec exists.
+> the action they mean, on Windows, macOS and X11 — though no backend has yet run on a
+> real desktop. `Ctrl+Alt+Del` cannot be forwarded at all and says so. No lossy codec
+> exists.
 > Screen capture is verified on Windows; macOS and Linux compile and are tested in CI but
 > have never captured a frame. See [`PROGRESS.md`](PROGRESS.md) for exactly what works
 > today.

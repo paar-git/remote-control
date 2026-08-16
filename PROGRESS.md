@@ -95,10 +95,13 @@ and its kin are intercepted by the *operator's* own OS before this app sees them
 low-level keyboard hook takes them back and forwards each as the intent it means —
 `SwitchApp`, `ShowDesktop`, `LockScreen`. The policy deciding which chords to take, when
 to hold the grab, and what to do with one that was caught is pure and tested on every
-platform. The hook itself exists for **Windows only**, compiles, and has never been
-installed on a running desktop. macOS and Linux report `Unsupported` rather than taking
-nothing quietly: macOS needs a `CGEventTap` with the Accessibility grant, X11 needs
-`XGrabKey`, and Wayland has no portable equivalent at all.
+platform. All three backends are written — a `WH_KEYBOARD_LL` hook on Windows, a
+`CGEventTap` at the HID level on macOS, `GrabKey` per chord on X11 — and each lints
+clean for its own target. **None has been installed on a running desktop.** Only the
+Windows one can even be linked here; the other two type-check but need a cross-linker
+and an Apple SDK this machine does not have. Wayland has no portable equivalent at all:
+a session there gets whatever `XWayland` offers or a refusal, because a grab taken
+through `XWayland` does not cover native Wayland clients.
 
 **`Ctrl+Alt+Del` cannot be forwarded, and says so.** It is dispatched on the Secure
 Desktop, above every hook an ordinary process may install. It is named unreachable
@@ -159,10 +162,10 @@ Run against the current tree. Reproduce with `pnpm verify`.
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace` | **876 passed**, 0 failed |
+| `cargo test --workspace` | **875 passed**, 0 failed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean, exit 0 |
 | `cargo fmt --all --check` | clean |
-| `pnpm -r test:run` | **388 passed**, 0 failed (337 desktop + 51 shared-types) |
+| `pnpm -r test:run` | **393 passed**, 0 failed (342 desktop + 51 shared-types) |
 | `pnpm -r typecheck` | clean |
 | `pnpm run lint` | clean |
 | `pnpm run format:check` | clean |
