@@ -19,6 +19,7 @@ pub mod metrics_service;
 pub mod server;
 pub mod sessions;
 pub mod trust_service;
+pub mod video_service;
 
 pub use access::{
     AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization,
