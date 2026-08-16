@@ -57,6 +57,9 @@ export function SessionScreen({
   const [fitted, setFitted] = useState(true);
   const live = isConnected(connection);
   const canViewScreen = permissions.includes('view_screen');
+  // Input is forwarded only where the other machine granted it. Capturing without the
+  // grant would send every keystroke to a host that answers each one with a refusal.
+  const canControl = permissions.includes('control_input');
 
   // Measured rather than assumed: this is the one number that says whether the link is
   // healthy, and it is cheap to obtain.
@@ -126,7 +129,7 @@ export function SessionScreen({
         {canViewScreen ? (
           // Display 0: this build does not yet offer a picker for which of the
           // agent's displays to show, so the primary one is what a session opens on.
-          <VideoSurface displayIndex={0} fitted={fitted} />
+          <VideoSurface displayIndex={0} fitted={fitted} capturing={canControl} />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <div className="max-w-md text-center">
