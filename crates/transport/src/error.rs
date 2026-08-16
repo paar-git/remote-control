@@ -2,14 +2,12 @@
 //!
 //! As with [`rc_security::SecurityError`], every message here is written on the
 //! assumption that it may be shown to an operator and written to a log. None carries a
-//! key, a token, a pairing code or a proof, and none echoes attacker-supplied input.
+//! key, a token, a password or a proof, and none echoes attacker-supplied input.
 //!
 //! Authentication failures are deliberately coarse. A peer that is refused learns that
-//! it was refused, not which check rejected it — the distinction between "unknown
-//! device", "revoked device" and "changed fingerprint" is recorded locally in the audit
-//! trail and never sent across the wire.
-
-use rc_protocol::DeviceId;
+//! it was refused and, at most, the coarse [`rc_protocol::control::WireRefusal`] the
+//! responder chose to disclose — never which check rejected it. The responder's own
+//! finer-grained reason (`rc_host_agent::RefusalReason`) stays in its local log.
 
 /// Result alias for transport operations.
 pub type Result<T> = std::result::Result<T, TransportError>;
@@ -44,13 +42,17 @@ pub enum TransportError {
     /// This is the loud one. It is never retried automatically and never silently
     /// re-trusted: it means either a misconfiguration or an active attacker.
     #[error(
-        "the device presented a different identity than the one you paired with; \
+        "the device presented a different identity than the one saved for it; \
          refusing to connect"
     )]
     FingerprintMismatch,
 
-    /// The peer is not a trusted device.
-    #[error("this device is not paired with the agent")]
+    /// The agent refused to admit this device.
+    ///
+    /// This is what every refused peer sees, and what the agent's audit trail records
+    /// for a refused connection, so the wording states the outcome and nothing about
+    /// which check produced it.
+    #[error("the agent did not admit this device")]
     NotTrusted,
 
     /// The peer's trust was revoked.
@@ -111,15 +113,47 @@ pub enum TransportError {
     #[error("the session is no longer valid; authenticate again")]
     SessionInvalid,
 
-    /// The agent is not accepting pairing right now.
-    #[error("the agent is not in pairing mode")]
-    PairingClosed,
+    /// The responder decided not to admit this session.
+    ///
+    /// Carries the coarse [`rc_protocol::control::WireRefusal`] the responder chose to
+    /// disclose. The responder's own finer-grained reason never crosses the wire — see
+    /// that type's documentation for why.
+    #[error("the other device refused the connection")]
+    SessionRefused {
+        /// Why, in terms safe to display.
+        reason: rc_protocol::control::WireRefusal,
+    },
+
+    /// A peer sent a permission bit this build does not recognise.
+    ///
+    /// Refused rather than masked to the bits this build does know: silently dropping
+    /// an unknown permission would make the same wire value mean something different on
+    /// either side of the connection.
+    #[error("the other device sent a permission set this build does not understand")]
+    UnknownPermissions,
 
     /// Too many connections or attempts from this source.
     #[error("too many attempts; try again in {retry_after_secs} seconds")]
     Throttled {
         /// How long to wait.
         retry_after_secs: u64,
+    },
+
+    /// The text the user typed is not an address this transport can dial.
+    ///
+    /// Distinct from [`Self::UnresolvableAddress`] because the two need different
+    /// remedies: this one means "you typed it wrong", the other means "that machine
+    /// could not be found". Collapsing them would leave the operator guessing which.
+    #[error("`{0}` is not a valid address")]
+    InvalidAddress(String),
+
+    /// The address is well formed but names nothing reachable.
+    #[error("`{address}` could not be found: {reason}")]
+    UnresolvableAddress {
+        /// The address as the user would recognise it.
+        address: String,
+        /// What the resolver said.
+        reason: String,
     },
 
     /// An I/O failure not covered by the cases above.
@@ -141,19 +175,35 @@ impl TransportError {
     pub const fn permits_auto_reconnect(&self) -> bool {
         match self {
             // Transient: the network went away, or the agent restarted.
+            //
+            // `UnresolvableAddress` belongs here, not with the permanent failures.
+            // Resolution is attempted fresh on every connection, so the same address
+            // can fail now and succeed in a minute: a machine that is asleep may have
+            // no record until it wakes, and a resolver outage heals without anyone
+            // touching the address. Both are the shape `Connect` already retries
+            // through. Filing it as permanent would mean a saved machine that went to
+            // sleep stops being reachable until the operator intervenes, even though
+            // nothing was mistyped and nothing is wrong.
             Self::ConnectionLost { .. }
             | Self::Connect { .. }
             | Self::HandshakeTimeout
+            | Self::UnresolvableAddress { .. }
             | Self::Io { .. } => true,
 
             // Requires a human, or indicates an attack. Never retried.
-            Self::FingerprintMismatch
+            //
+            // `InvalidAddress` is the address error that does belong here: the text
+            // does not change between attempts, so retrying reproduces the identical
+            // failure forever.
+            Self::InvalidAddress(_)
+            | Self::FingerprintMismatch
             | Self::NotTrusted
             | Self::Revoked
             | Self::IdentityProofRejected
             | Self::IncompatibleVersion
             | Self::SessionInvalid
-            | Self::PairingClosed
+            | Self::SessionRefused { .. }
+            | Self::UnknownPermissions
             | Self::Throttled { .. }
             | Self::Bind { .. }
             | Self::Configuration { .. }
@@ -175,51 +225,8 @@ impl TransportError {
                 | Self::Revoked
                 | Self::IdentityProofRejected
                 | Self::SessionInvalid
+                | Self::SessionRefused { .. }
         )
-    }
-}
-
-/// Why a peer was refused, for the **local** audit trail only.
-///
-/// The wire carries only a coarse rejection. This type exists so the agent can record
-/// precisely what happened without telling the peer, which would otherwise turn the
-/// handshake into an oracle for probing which device ids are known.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RejectionCause {
-    /// No trusted-device record matched the presented identity.
-    UnknownDevice,
-    /// A record matched but has been revoked.
-    RevokedDevice(DeviceId),
-    /// A record matched but the certificate fingerprint changed unexpectedly.
-    FingerprintChanged(DeviceId),
-    /// The peer could not prove possession of its identity key.
-    ProofRejected,
-    /// The peer offered an unusable protocol version.
-    VersionMismatch,
-}
-
-impl RejectionCause {
-    /// Stable name for the audit record.
-    #[must_use]
-    pub const fn name(&self) -> &'static str {
-        match self {
-            Self::UnknownDevice => "unknown_device",
-            Self::RevokedDevice(_) => "revoked_device",
-            Self::FingerprintChanged(_) => "fingerprint_changed",
-            Self::ProofRejected => "proof_rejected",
-            Self::VersionMismatch => "version_mismatch",
-        }
-    }
-
-    /// The single coarse error every rejected peer receives.
-    ///
-    /// Deliberately lossy: an unknown device and a revoked device are indistinguishable
-    /// to the peer, so the handshake cannot be used to enumerate which devices the agent
-    /// knows about.
-    #[must_use]
-    pub const fn wire_error(&self) -> TransportError {
-        TransportError::NotTrusted
     }
 }
 
@@ -255,6 +262,12 @@ mod tests {
             TransportError::Io {
                 reason: "reset".to_owned(),
             },
+            // Resolution runs again on every attempt, so a name that fails now can
+            // succeed in a minute — a sleeping machine, or a resolver that came back.
+            TransportError::UnresolvableAddress {
+                address: "work-laptop.local:7443".to_owned(),
+                reason: "no such host".to_owned(),
+            },
         ] {
             assert!(err.permits_auto_reconnect(), "{err:?} should reconnect");
             assert!(!err.is_security_rejection());
@@ -262,36 +275,12 @@ mod tests {
     }
 
     #[test]
-    fn every_rejection_cause_yields_the_same_wire_error() {
-        // Account-enumeration protection at the transport layer: the peer must not be
-        // able to tell "I was never paired" from "I was revoked".
-        let device = DeviceId::generate();
-        let causes = [
-            RejectionCause::UnknownDevice,
-            RejectionCause::RevokedDevice(device),
-            RejectionCause::FingerprintChanged(device),
-            RejectionCause::ProofRejected,
-        ];
-
-        let rendered: Vec<String> = causes.iter().map(|c| c.wire_error().to_string()).collect();
-        assert!(
-            rendered.windows(2).all(|w| w[0] == w[1]),
-            "rejections must be indistinguishable on the wire, got {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn rejection_causes_have_distinct_audit_names() {
-        let device = DeviceId::generate();
-        let names = [
-            RejectionCause::UnknownDevice.name(),
-            RejectionCause::RevokedDevice(device).name(),
-            RejectionCause::FingerprintChanged(device).name(),
-            RejectionCause::ProofRejected.name(),
-            RejectionCause::VersionMismatch.name(),
-        ];
-        let unique: std::collections::HashSet<_> = names.iter().collect();
-        assert_eq!(unique.len(), names.len(), "audit names must be distinct");
+    fn a_malformed_address_is_never_retried() {
+        // The text does not change between attempts, so retrying reproduces the
+        // identical failure forever. This is the one address error that is permanent.
+        let err = TransportError::InvalidAddress("https://192.168.1.77".to_owned());
+        assert!(!err.permits_auto_reconnect());
+        assert!(!err.is_security_rejection());
     }
 
     #[test]

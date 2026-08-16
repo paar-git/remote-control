@@ -1,4 +1,4 @@
-//! Owner-account password hashing with Argon2id.
+//! Unattended-access password hashing with Argon2id.
 //!
 //! # Parameter choice
 //!
@@ -15,7 +15,7 @@
 //!   buys less than raising `m` for the same wall-clock cost.
 //!
 //! Parameters are recorded *inside* the stored PHC string, so a stored hash always
-//! carries the settings it was made with. [`OwnerCredential::needs_rehash`] reports
+//! carries the settings it was made with. [`PasswordCredential::needs_rehash`] reports
 //! when a stored hash was made with weaker settings than current policy, letting the
 //! application transparently upgrade it on the next successful login.
 //!
@@ -107,23 +107,23 @@ impl Default for HashingPolicy {
     }
 }
 
-/// A stored owner credential: an Argon2id PHC string and nothing else.
+/// An optional unattended-access password: an Argon2id PHC string and nothing else.
 ///
 /// Deliberately implements neither [`serde::Serialize`] nor [`std::fmt::Display`], so
 /// it cannot be returned from a Tauri command or interpolated into a log line by
 /// accident. [`std::fmt::Debug`] redacts the hash.
 #[derive(Clone, PartialEq, Eq)]
-pub struct OwnerCredential {
+pub struct PasswordCredential {
     phc: String,
 }
 
-impl std::fmt::Debug for OwnerCredential {
+impl std::fmt::Debug for PasswordCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("OwnerCredential(<redacted>)")
+        f.write_str("PasswordCredential(<redacted>)")
     }
 }
 
-impl OwnerCredential {
+impl PasswordCredential {
     /// Hash `password` under `policy`.
     ///
     /// # Errors
@@ -278,8 +278,8 @@ mod tests {
     const GOOD: &str = "correct horse battery staple";
     const POLICY: HashingPolicy = HashingPolicy::FAST_FOR_TESTS;
 
-    fn credential() -> OwnerCredential {
-        OwnerCredential::create(GOOD, POLICY, &OsRandom).unwrap()
+    fn credential() -> PasswordCredential {
+        PasswordCredential::create(GOOD, POLICY, &OsRandom).unwrap()
     }
 
     #[test]
@@ -335,19 +335,19 @@ mod tests {
     #[test]
     fn debug_output_redacts_the_hash() {
         let rendered = format!("{:?}", credential());
-        assert_eq!(rendered, "OwnerCredential(<redacted>)");
+        assert_eq!(rendered, "PasswordCredential(<redacted>)");
         assert!(!rendered.contains("argon2"));
     }
 
     #[test]
     fn short_passwords_are_rejected_at_creation() {
-        let err = OwnerCredential::create("short", POLICY, &OsRandom).unwrap_err();
+        let err = PasswordCredential::create("short", POLICY, &OsRandom).unwrap_err();
         assert!(
             matches!(err, SecurityError::WeakPassword { .. }),
             "got {err:?}"
         );
         assert!(
-            OwnerCredential::create(&"a".repeat(MIN_PASSWORD_BYTES), POLICY, &OsRandom).is_ok()
+            PasswordCredential::create(&"a".repeat(MIN_PASSWORD_BYTES), POLICY, &OsRandom).is_ok()
         );
     }
 
@@ -355,7 +355,7 @@ mod tests {
     fn overlong_passwords_are_rejected_at_creation() {
         let long = "a".repeat(MAX_PASSWORD_BYTES + 1);
         assert!(matches!(
-            OwnerCredential::create(&long, POLICY, &OsRandom),
+            PasswordCredential::create(&long, POLICY, &OsRandom),
             Err(SecurityError::WeakPassword { .. })
         ));
     }
@@ -385,14 +385,15 @@ mod tests {
         let decomposed = "passworde\u{0301}-long-enough";
         assert_ne!(composed.as_bytes(), decomposed.as_bytes());
 
-        let credential = OwnerCredential::create(composed, POLICY, &OsRandom).unwrap();
+        let credential = PasswordCredential::create(composed, POLICY, &OsRandom).unwrap();
         credential.verify(composed).unwrap();
         assert!(credential.verify(decomposed).is_err());
     }
 
     #[test]
     fn leading_and_trailing_whitespace_is_significant() {
-        let credential = OwnerCredential::create(" padded password ", POLICY, &OsRandom).unwrap();
+        let credential =
+            PasswordCredential::create(" padded password ", POLICY, &OsRandom).unwrap();
         credential.verify(" padded password ").unwrap();
         assert!(credential.verify("padded password").is_err());
     }
@@ -404,20 +405,21 @@ mod tests {
             "пароль-достаточно-длинный",
             "🔐🔐🔐🔐🔐🔐",
         ] {
-            let credential = OwnerCredential::create(password, POLICY, &OsRandom).unwrap();
+            let credential = PasswordCredential::create(password, POLICY, &OsRandom).unwrap();
             credential.verify(password).unwrap();
         }
     }
 
     #[test]
     fn stored_parameters_are_readable() {
-        let credential = OwnerCredential::create(GOOD, POLICY, &OsRandom).unwrap();
+        let credential = PasswordCredential::create(GOOD, POLICY, &OsRandom).unwrap();
         assert_eq!(credential.policy().unwrap(), POLICY);
     }
 
     #[test]
     fn a_hash_made_with_weaker_parameters_is_flagged_for_upgrade() {
-        let weak = OwnerCredential::create(GOOD, HashingPolicy::FAST_FOR_TESTS, &OsRandom).unwrap();
+        let weak =
+            PasswordCredential::create(GOOD, HashingPolicy::FAST_FOR_TESTS, &OsRandom).unwrap();
         assert!(
             weak.needs_rehash(HashingPolicy::PRODUCTION),
             "a test-strength hash must be flagged against production policy"
@@ -426,7 +428,7 @@ mod tests {
 
     #[test]
     fn a_hash_at_current_strength_is_not_flagged() {
-        let current = OwnerCredential::create(GOOD, POLICY, &OsRandom).unwrap();
+        let current = PasswordCredential::create(GOOD, POLICY, &OsRandom).unwrap();
         assert!(!current.needs_rehash(POLICY));
     }
 
@@ -483,7 +485,7 @@ mod tests {
     fn credentials_round_trip_through_storage() {
         let original = credential();
         let reloaded =
-            OwnerCredential::from_phc(original.expose_phc_for_storage().to_string()).unwrap();
+            PasswordCredential::from_phc(original.expose_phc_for_storage().to_string()).unwrap();
 
         reloaded.verify(GOOD).unwrap();
         assert!(reloaded.verify("wrong password here").is_err());
@@ -498,7 +500,7 @@ mod tests {
             "$unknown$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA",
         ] {
             assert!(
-                OwnerCredential::from_phc(bad).is_err(),
+                PasswordCredential::from_phc(bad).is_err(),
                 "must reject {bad:?}"
             );
         }

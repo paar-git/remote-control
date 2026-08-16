@@ -3,13 +3,13 @@
 //! # The state machine
 //!
 //! ```text
-//!   Offline ──connect──► Discovering ──► Connecting ──► Authenticating ──► Connected
-//!      ▲                      │              │                │               │
-//!      │                      └──────────────┴────────────────┘               │
-//!      │                                   failure                            │
-//!      │                                      │                               │
-//!      │                          ┌───────────┴────────────┐                  │
-//!      │                          │                        │                  │
+//!   Offline ──connect──► Connecting ──► Authenticating ──► Connected
+//!      ▲                      │                │               │
+//!      │                      └────────────────┴───────────────┘
+//!      │                                   failure
+//!      │                                      │
+//!      │                          ┌───────────┴────────────┐
+//!      │                          │                        │
 //!      └────── refused ───────────┘              WaitingToRetry ◄─────lost ────┘
 //!         (identity changed,                        │
 //!          revoked, not paired)                     └──► Reconnecting ──► …
@@ -34,39 +34,28 @@
 //! In order, stopping at the first that works:
 //!
 //! 1. The address the last successful connection used.
-//! 2. An address discovered over mDNS for this device id.
-//! 3. The operator-configured hostname or address.
-//!
-//! Discovery is only ever a *hint*: the connection that follows pins the agent's
-//! certificate fingerprint, so a spoofed announcement costs one failed dial and nothing
-//! else.
+//! 2. The operator-typed hostname or address.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rc_protocol::control::{
-    Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResult,
-    DeviceDescriptor, Disconnect, DisconnectReason,
+    Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
+    ControlResult, DeviceDescriptor, Disconnect, DisconnectReason, WireRefusal,
 };
+use rc_protocol::desktop::{DesktopAgentMessage, DesktopClientMessage, DisplayInfo};
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
-use rc_protocol::terminal::{TerminalAgentMessage, TerminalClientMessage};
-use rc_protocol::{DeviceId, RequestId, SessionId, TerminalId};
-use rc_security::{DeviceIdentity, Fingerprint};
-use rc_transport::{ChannelReader, ChannelWriter, ClientConnector, PinPolicy, TransportError};
+use rc_protocol::system::MetricsAgentMessage;
+use rc_protocol::{InputEvent, InputMessage, RequestId, SessionId};
+use rc_security::{DeviceIdentity, PermissionSet};
+use rc_transport::{
+    ChannelReader, ChannelWriter, ClientConnector, PeerAddress, PinPolicy, TransportError,
+};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
 /// How long to wait for a connection attempt before trying the next address.
 pub const CONNECT_TIMEOUT_SECS: u64 = 8;
-
-/// How long to wait for local discovery when no saved address works.
-pub const DISCOVERY_TIMEOUT_SECS: u64 = 3;
-
-/// How long to wait for a server to answer a request to open a terminal.
-///
-/// Generous, because the server resolves a shell and spawns a process. Bounded, because
-/// a server that never answers must not leave the UI waiting forever.
-pub const TERMINAL_OPEN_TIMEOUT_SECS: u64 = 20;
 
 /// How long to wait for the server to answer a file request.
 ///
@@ -90,51 +79,44 @@ struct FileChannel {
     reader: ChannelReader,
 }
 
-/// Where terminal output and lifecycle messages are delivered.
+/// Where pushed metrics are delivered.
 ///
-/// A callback rather than a channel so the caller decides how to deliver them — the
-/// desktop client emits Tauri events; a test collects into a vector.
-pub type TerminalSink = Arc<dyn Fn(TerminalAgentMessage) + Send + Sync>;
+/// A callback so the caller decides how to deliver them — the desktop client emits a
+/// Tauri event, and a test collects into a vector.
+pub type MetricsSink = Arc<dyn Fn(MetricsAgentMessage) + Send + Sync>;
 
-/// The terminal channel, shared by every terminal on one connection.
-struct TerminalChannel {
-    writer: Mutex<ChannelWriter>,
-    /// Open requests waiting for the agent's answer, keyed by the id they named.
-    pending_opens: Mutex<
-        std::collections::HashMap<TerminalId, tokio::sync::oneshot::Sender<TerminalAgentMessage>>,
-    >,
-}
-
-/// Forward agent terminal messages to `sink` until the channel closes.
+/// Forward pushed metrics to `sink` until the channel closes.
 ///
-/// An `Opened` or `Error` that answers a pending open is routed to whoever is waiting
-/// for it; everything else — output, exits — goes to the sink.
-fn spawn_terminal_reader(
-    channel: Arc<TerminalChannel>,
-    mut reader: ChannelReader,
-    sink: TerminalSink,
-) {
+/// The metrics channel carries only agent-to-client pushes — a subscription is started
+/// and stopped on the *control* channel — so there is nothing to write here and no
+/// request to correlate a reply with.
+fn spawn_metrics_reader(mut reader: ChannelReader, sink: MetricsSink) {
     tokio::spawn(async move {
-        while let Ok(Some(message)) = reader.next_message::<TerminalAgentMessage>().await {
-            let answering = match &message {
-                TerminalAgentMessage::Opened { terminal_id, .. }
-                | TerminalAgentMessage::Error { terminal_id, .. } => Some(*terminal_id),
-                _ => None,
-            };
-
-            if let Some(terminal_id) = answering
-                && let Some(waiting) = channel.pending_opens.lock().await.remove(&terminal_id)
-            {
-                // The open request is waiting for exactly this. A send failure means the
-                // caller gave up, which the timeout already reported.
-                let _ = waiting.send(message);
-                continue;
-            }
-
+        while let Ok(Some(message)) = reader.next_message::<MetricsAgentMessage>().await {
             sink(message);
         }
+        tracing::debug!("the metrics channel closed");
+    });
+}
 
-        tracing::debug!("the terminal channel closed");
+/// Where acknowledgements and display topology pushed on the input channel are
+/// delivered.
+///
+/// A callback for the same reason as [`MetricsSink`]: the desktop client emits Tauri
+/// events, a test collects into a vector. This is also what keeps
+/// [`ConnectionManager::send_input`] honest about the constraint in this module's
+/// callers — a `Failed` acknowledgement (a revoked `control_input` grant, for instance)
+/// must reach the sink rather than being read and discarded, since this client does not
+/// enforce that permission itself.
+pub type InputSink = Arc<dyn Fn(InputMessage) + Send + Sync>;
+
+/// Forward acknowledgements and display topology to `sink` until the channel closes.
+fn spawn_input_reader(mut reader: ChannelReader, sink: InputSink) {
+    tokio::spawn(async move {
+        while let Ok(Some(message)) = reader.next_message::<InputMessage>().await {
+            sink(message);
+        }
+        tracing::debug!("the input channel closed");
     });
 }
 
@@ -148,8 +130,6 @@ fn spawn_terminal_reader(
 pub enum ConnectionState {
     /// Not connected, and not trying.
     Offline,
-    /// Looking for the server on the local network.
-    Discovering,
     /// A transport connection is being established.
     Connecting {
         /// Where the attempt is aimed.
@@ -163,6 +143,15 @@ pub enum ConnectionState {
         session_id: String,
         /// Where the connection actually landed.
         address: String,
+        /// What the other machine granted this session, by stable permission name.
+        ///
+        /// Carried on the state rather than fetched separately, so it arrives with the
+        /// session and disappears with it. The interface uses it to decide which tools
+        /// to offer; the authority is still the other machine, which re-checks on every
+        /// request.
+        permissions: Vec<String>,
+        /// The name the other machine reported, for the session toolbar.
+        device_name: String,
     },
     /// A disconnect is in progress.
     Disconnecting,
@@ -195,10 +184,11 @@ pub enum ConnectionState {
 
 /// Why an agent refused a connection, as far as the client can tell.
 ///
-/// The agent deliberately reports every authorization refusal identically, so the
-/// client cannot distinguish "never paired" from "revoked" — that is what stops the
-/// port from being usable to enumerate an agent's trusted devices. The variants below
-/// are therefore about what *this client* can determine locally.
+/// The agent collapses a dismissal, a wrong unattended password and a lockout into one
+/// [`WireRefusal::Rejected`] before it answers, so this client genuinely cannot tell
+/// them apart — that is what stops the answer from being an oracle for whether
+/// unattended access is configured. The variants below are the most this side can
+/// determine: the coarse reason it was told, plus what it can see for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -221,8 +211,15 @@ impl RefusalReason {
     #[must_use]
     pub fn classify(error: &TransportError) -> Option<Self> {
         match error {
-            TransportError::FingerprintMismatch => Some(Self::IdentityChanged),
-            TransportError::NotTrusted | TransportError::Revoked => Some(Self::NotAuthorized),
+            TransportError::FingerprintMismatch
+            | TransportError::SessionRefused {
+                reason: WireRefusal::IdentityChanged,
+            } => Some(Self::IdentityChanged),
+            TransportError::SessionRefused {
+                reason: WireRefusal::NotAccepting | WireRefusal::Rejected,
+            }
+            | TransportError::NotTrusted
+            | TransportError::Revoked => Some(Self::NotAuthorized),
             TransportError::IncompatibleVersion => Some(Self::ProtocolMismatch),
             TransportError::Throttled { .. } => Some(Self::Throttled),
             _ => None,
@@ -282,77 +279,35 @@ impl BackoffPolicy {
     }
 }
 
-/// A saved server, as the connection manager needs to see it.
+/// Where a connection is aimed, and what it offers on arrival.
+///
+/// There is no saved-device record to pin against any more: the user types an address
+/// and the machine on the other end decides. So a target is the address as typed, plus
+/// the unattended password if one was given.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedServer {
-    /// Which device.
-    pub device_id: DeviceId,
-    /// Name to show.
-    pub display_name: String,
-    /// The certificate fingerprint to pin.
-    pub certificate_fingerprint: Fingerprint,
-    /// The identity fingerprint, which survives certificate renewal.
-    pub identity_fingerprint: Fingerprint,
-    /// The address the last successful connection used.
-    pub last_known_address: Option<SocketAddr>,
-    /// An operator-configured host and port.
-    pub configured_endpoint: Option<String>,
+pub struct Target {
+    /// The address the user typed, canonicalised. This exact string is what the
+    /// responder keys its pin on, so it travels on `Authenticate` unchanged.
+    pub address: PeerAddress,
+    /// The unattended-access password, when the user supplied one.
+    ///
+    /// Not logged and not stored. It is sent inside the already-authenticated TLS
+    /// exchange and dropped when the attempt ends.
+    pub unattended_password: Option<String>,
+    /// Identity previously seen at this address, if any.
+    pub pinned_identity: Option<rc_security::Fingerprint>,
 }
 
-/// The addresses to try, in order.
-///
-/// Separated from the connecting itself so the ordering rule can be tested without a
-/// network: the last address that worked comes first, because on a home LAN it is
-/// almost always still right and trying it first avoids a discovery round trip.
-#[must_use]
-pub fn candidate_addresses(
-    server: &SavedServer,
-    discovered: Option<SocketAddr>,
-) -> Vec<SocketAddr> {
-    let mut candidates = Vec::new();
-    let mut push = |address: SocketAddr| {
-        if !candidates.contains(&address) {
-            candidates.push(address);
+impl Target {
+    /// A target with no password offered, which is the common case.
+    #[must_use]
+    pub const fn new(address: PeerAddress) -> Self {
+        Self {
+            address,
+            unattended_password: None,
+            pinned_identity: None,
         }
-    };
-
-    if let Some(address) = server.last_known_address {
-        push(address);
     }
-    if let Some(address) = discovered {
-        push(address);
-    }
-    if let Some(endpoint) = &server.configured_endpoint
-        && let Some(address) = parse_endpoint(endpoint)
-    {
-        push(address);
-    }
-
-    candidates
-}
-
-/// Parse an operator-typed endpoint into a socket address.
-///
-/// Accepts `host:port` and a bare address, defaulting the port. Returns `None` rather
-/// than guessing at anything else: a value that cannot be parsed is a configuration
-/// error the operator should see, not one to work around.
-#[must_use]
-pub fn parse_endpoint(endpoint: &str) -> Option<SocketAddr> {
-    let trimmed = endpoint.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Ok(address) = trimmed.parse::<SocketAddr>() {
-        return Some(address);
-    }
-    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
-        return Some(SocketAddr::new(ip, rc_protocol::DEFAULT_AGENT_PORT));
-    }
-
-    // A hostname needs resolving, which is I/O; the caller does that. Reporting `None`
-    // here keeps this function pure and testable.
-    None
 }
 
 /// A live, authenticated connection.
@@ -362,6 +317,8 @@ struct ActiveConnection {
     reader: ChannelReader,
     session_id: SessionId,
     address: SocketAddr,
+    /// Kept so the QUIC endpoint outlives the connection.
+    _connector: ClientConnector,
 }
 
 /// Owns at most one connection to one server.
@@ -371,10 +328,60 @@ pub struct ConnectionManager {
     capabilities: Capabilities,
     state: std::sync::Mutex<ConnectionState>,
     active: Mutex<Option<ActiveConnection>>,
-    /// The terminal channel, opened lazily on the first terminal.
-    terminal: Mutex<Option<Arc<TerminalChannel>>>,
     /// The file channel, opened lazily on the first file operation.
     files: Mutex<Option<Arc<Mutex<FileChannel>>>>,
+    /// The metrics channel, opened lazily on the first subscription.
+    ///
+    /// Holds the send half even though the client never writes on it: the metrics
+    /// channel carries only pushes, and dropping the writer would close the stream the
+    /// agent is pushing on. Kept for the life of the connection — the agent samples
+    /// nothing until a subscription exists, so an open channel with nobody watching
+    /// costs a parked task and no load on the server.
+    metrics: Mutex<Option<ChannelWriter>>,
+    /// The write half of the video channel, while a stream is running.
+    ///
+    /// Held so [`ConnectionManager::video_stop_stream`] and
+    /// [`ConnectionManager::video_request_keyframe`] can reach it, and so the frame
+    /// reader task started by [`ConnectionManager::video_start_stream`] can ask for a
+    /// keyframe itself when the decoder falls behind. `Arc` because both this struct
+    /// and that task hold it at once.
+    video: Mutex<Option<Arc<Mutex<ChannelWriter>>>>,
+    /// The write half of the input channel, once opened.
+    ///
+    /// Opened lazily on the first input command and kept for the life of the
+    /// connection, mirroring `metrics`: a mouse-move stream would otherwise pay for a
+    /// fresh QUIC stream on every sample.
+    input: Mutex<Option<ChannelWriter>>,
+    /// Monotonic counter for `InputEvent::seq`.
+    ///
+    /// Shared by every input command on this connection so the host's acknowledgements
+    /// and applied watermark stay unambiguous. Gaps are fine — an event this build
+    /// dropped locally (see `input_commands::classify`) simply never uses its number —
+    /// repeats are not.
+    input_seq: std::sync::atomic::AtomicU32,
+    /// Who answered, once a connection is established.
+    ///
+    /// Arrives on `SessionAuthorization::Granted`, so it exists only for an admitted
+    /// session — a refused peer is told nothing about the machine it reached, and this
+    /// side has nothing to record. Used for the name shown in the session and written
+    /// to the recent list.
+    peer: Mutex<Option<DeviceDescriptor>>,
+    /// Identity extracted from the certificate presented on the last admitted session.
+    peer_identity: Mutex<Option<rc_security::Fingerprint>>,
+    /// Row in `session_history` for the current outgoing session, if one was written.
+    outgoing_history_id: Mutex<Option<i64>>,
+    /// What the agent granted this session, and therefore what this client may ask of
+    /// it.
+    ///
+    /// Not a cache of a decision made here: the agent decided it, sent it on
+    /// `SessionAuthorization::Granted`, and enforces it on every request of its own.
+    /// This copy exists so the client refuses locally too, and shows the operator
+    /// controls that can actually work rather than buttons that will be denied.
+    ///
+    /// Cleared by [`ConnectionManager::set_state`] on any state that is not
+    /// `Connected`, so a permission cannot outlive the session that carried it. That is
+    /// why it lives beside `state` and is written only there.
+    granted: std::sync::Mutex<PermissionSet>,
     /// Set by [`ConnectionManager::disconnect`] and cleared by an explicit connect.
     ///
     /// The single flag that separates "the link dropped" from "the operator ended it".
@@ -395,9 +402,16 @@ impl ConnectionManager {
             descriptor,
             capabilities,
             state: std::sync::Mutex::new(ConnectionState::Offline),
+            peer: Mutex::new(None),
+            peer_identity: Mutex::new(None),
+            outgoing_history_id: Mutex::new(None),
+            granted: std::sync::Mutex::new(PermissionSet::NONE),
             active: Mutex::new(None),
-            terminal: Mutex::new(None),
             files: Mutex::new(None),
+            metrics: Mutex::new(None),
+            video: Mutex::new(None),
+            input: Mutex::new(None),
+            input_seq: std::sync::atomic::AtomicU32::new(0),
             intentional_disconnect: std::sync::atomic::AtomicBool::new(false),
             backoff: BackoffPolicy::default(),
         }
@@ -418,50 +432,125 @@ impl ConnectionManager {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Who answered on the live connection, if one is up.
+    pub async fn peer(&self) -> Option<DeviceDescriptor> {
+        self.peer.lock().await.clone()
+    }
+
+    /// Identity the last admitted peer proved, if one was observed.
+    pub async fn peer_identity(&self) -> Option<rc_security::Fingerprint> {
+        *self.peer_identity.lock().await
+    }
+
+    /// Remember the history row for this outgoing session.
+    pub async fn set_outgoing_history_id(&self, id: i64) {
+        *self.outgoing_history_id.lock().await = Some(id);
+    }
+
+    /// Take the history row so it can be finished exactly once.
+    pub async fn take_outgoing_history_id(&self) -> Option<i64> {
+        self.outgoing_history_id.lock().await.take()
+    }
+
+    /// Wait until the live QUIC connection ends, if one is up.
+    pub async fn wait_until_closed(&self) {
+        let connection = {
+            let guard = self.active.lock().await;
+            guard.as_ref().map(|active| active.connection.clone())
+        };
+        if let Some(connection) = connection {
+            connection.closed().await;
+        }
+    }
+
+    /// Wait for the live QUIC connection to end, then reconnect unless the operator
+    /// disconnected on purpose. After a successful reconnect, watch the new link too —
+    /// a one-shot watch would leave the next drop sitting as "connected" forever.
+    pub fn watch_for_loss(self: &Arc<Self>, target: Target) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                this.wait_until_closed().await;
+                if this.was_intentional() {
+                    return;
+                }
+                if let Err(err) = this.reconnect(&target).await {
+                    tracing::warn!(%err, "automatic reconnect ended");
+                    return;
+                }
+            }
+        });
+    }
+
+    /// What the connected agent granted this session.
+    ///
+    /// [`PermissionSet::NONE`] whenever nothing is connected, which is what makes every
+    /// gated command fail closed between sessions rather than carrying the last one's
+    /// grant forward.
+    #[must_use]
+    pub fn granted(&self) -> PermissionSet {
+        self.granted
+            .lock()
+            .map_or(PermissionSet::NONE, |guard| *guard)
+    }
+
+    /// Record what the agent granted, for the life of this connection.
+    fn set_granted(&self, permissions: PermissionSet) {
+        if let Ok(mut guard) = self.granted.lock() {
+            *guard = permissions;
+        }
+    }
+
     fn set_state(&self, state: ConnectionState) {
+        // Any state but `Connected` means there is no session, so there is nothing
+        // granted. Clearing here rather than at each call site is what stops a grant
+        // outliving its session: every path out of `Connected` goes through this
+        // function, including the ones that end a connection by failing.
+        if !matches!(state, ConnectionState::Connected { .. }) {
+            self.set_granted(PermissionSet::NONE);
+        }
         if let Ok(mut guard) = self.state.lock() {
             tracing::debug!(?state, "connection state changed");
             *guard = state;
         }
     }
 
-    /// Connect to `server`, trying each candidate address in turn.
+    /// Connect to `target`, trying each address it resolves to in turn.
+    ///
+    /// A hostname can resolve to several addresses; all are tried in the order the
+    /// resolver gave them, because the first is not reliably the reachable one.
     ///
     /// # Errors
-    /// The failure of the last address tried. A refusal is reported as-is and is not
-    /// retried; see the module documentation.
-    pub async fn connect(
-        &self,
-        server: &SavedServer,
-        discovered: Option<SocketAddr>,
-    ) -> Result<SessionId, TransportError> {
+    /// The failure of the last address tried. A refusal is reported as-is and is never
+    /// retried against another address: it is a decision by the machine on the other
+    /// end, and the same machine answers on every address it has.
+    pub async fn connect(&self, target: &Target) -> Result<SessionId, TransportError> {
         // An explicit connect clears the flag: the operator has asked for a connection,
         // so a later accidental drop is eligible for automatic reconnect again.
         self.intentional_disconnect
             .store(false, std::sync::atomic::Ordering::Release);
 
-        let candidates = candidate_addresses(server, discovered);
-        if candidates.is_empty() {
-            let message = "No address is known for this server. Connect it to the network, or set \
-                 its address in the device settings."
-                .to_owned();
-            self.set_state(ConnectionState::Failed {
-                message: message.clone(),
-            });
-            return Err(TransportError::Connect { reason: message });
-        }
+        let candidates = match target.address.to_socket_addrs() {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                self.set_state(ConnectionState::Failed {
+                    message: err.to_string(),
+                });
+                return Err(err);
+            }
+        };
 
         let mut last_error = None;
         for address in candidates {
             self.set_state(ConnectionState::Connecting {
-                address: address.to_string(),
+                address: target.address.to_string(),
             });
 
-            match self.attempt(server, address).await {
+            match self.attempt(target, address).await {
                 Ok(session_id) => return Ok(session_id),
                 Err(err) => {
                     // A refusal is a decision, not a transport hiccup: trying the next
-                    // address would only produce the same refusal from the same agent.
+                    // address would only produce the same refusal from the same machine.
                     if let Some(reason) = RefusalReason::classify(&err) {
                         self.set_state(ConnectionState::Refused {
                             reason,
@@ -484,19 +573,21 @@ impl ConnectionManager {
         Err(err)
     }
 
-    /// One connection attempt against one address.
+    /// One connection attempt against one resolved address.
+    ///
+    /// The *dialled* address travels on `Authenticate`, never `address` — the responder
+    /// keys its pin on what the user typed, and a resolved socket address would key a
+    /// different entry every time a hostname resolved differently.
     async fn attempt(
         &self,
-        server: &SavedServer,
+        target: &Target,
         address: SocketAddr,
     ) -> Result<SessionId, TransportError> {
-        // Pinned to the certificate recorded for this server. An agent that renewed its
-        // certificate without the client recording the rotation fails here — loudly,
-        // which is the intent.
-        let (connector, _observed) = ClientConnector::new(
-            &self.identity,
-            PinPolicy::Pinned(server.certificate_fingerprint),
-        )?;
+        // TLS still uses trust-on-first-use so a certificate renewal is not a
+        // mismatch. The identity extracted from that certificate is compared below
+        // against any pin recorded for this address.
+        let (connector, observed) =
+            ClientConnector::new(&self.identity, PinPolicy::TrustOnFirstUse)?;
 
         let connection = tokio::time::timeout(
             std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
@@ -517,29 +608,45 @@ impl ConnectionManager {
             &mut writer,
             self.descriptor.clone(),
             self.capabilities.clone(),
+            target.address.clone(),
+            target.unattended_password.clone(),
             rc_protocol::now_ms(),
         )
         .await?;
 
-        // The agent's identity is verified by TLS against the pin; this is a second,
-        // cheaper check that the peer is the device the client meant to reach, and it
-        // catches a saved record that has drifted from the pin it was stored with.
-        if ack.descriptor.device_id != server.device_id {
-            return Err(TransportError::FingerprintMismatch);
+        let session_id = ack.session_id;
+
+        if let Some(certificate) = observed.get() {
+            let identity = rc_security::identity_fingerprint_of_certificate(&certificate.der)
+                .map_err(|_| TransportError::FingerprintMismatch)?;
+            if let Some(pinned) = target.pinned_identity
+                && !pinned.ct_eq(&identity)
+            {
+                return Err(TransportError::FingerprintMismatch);
+            }
+            *self.peer_identity.lock().await = Some(identity);
         }
 
-        let session_id = ack.session_id;
+        // Set after `set_state`, which clears it for every state but `Connected`.
         self.set_state(ConnectionState::Connected {
             session_id: session_id.to_canonical_string(),
-            address: address.to_string(),
+            address: target.address.to_string(),
+            permissions: ack
+                .permissions
+                .iter()
+                .map(|p| p.name().to_owned())
+                .collect(),
+            device_name: ack.descriptor.display_name.clone(),
         });
-
-        // The connector is held by the active connection: dropping it would close the
-        // endpoint underneath the connection that was just established.
-        std::mem::forget(connector);
+        self.set_granted(ack.permissions);
+        *self.peer.lock().await = Some(ack.descriptor.clone());
+        tracing::info!(
+            granted = ?ack.permissions,
+            machine = %ack.descriptor.display_name,
+            "the other machine admitted this session"
+        );
 
         // Any channels belonged to a previous connection.
-        *self.terminal.lock().await = None;
         *self.files.lock().await = None;
 
         *self.active.lock().await = Some(ActiveConnection {
@@ -548,6 +655,7 @@ impl ConnectionManager {
             reader,
             session_id,
             address,
+            _connector: connector,
         });
 
         tracing::info!(%address, %session_id, "connected");
@@ -616,10 +724,9 @@ impl ConnectionManager {
         let result = self.request(ControlRequestPayload::Ping { token }).await?;
 
         match result {
-            ControlResult::Ok(rc_protocol::control::ControlResponsePayload::Pong {
-                token: echoed,
-                ..
-            }) if echoed == token => {
+            ControlResult::Ok(ControlResponsePayload::Pong { token: echoed, .. })
+                if echoed == token =>
+            {
                 let elapsed = started.elapsed().as_millis();
                 Ok(u64::try_from(elapsed).unwrap_or(u64::MAX))
             }
@@ -628,63 +735,6 @@ impl ConnectionManager {
                 expected: "a pong echoing this token",
             }),
         }
-    }
-
-    /// Open a terminal on the connected server and start forwarding its output.
-    ///
-    /// The terminal channel is opened once per connection and shared by every terminal;
-    /// a stream per tab would multiply QUIC streams for no benefit, since the messages
-    /// already name their session.
-    ///
-    /// Returns the agent's answer to the open request — an `Opened` or an `Error` — so
-    /// the caller can report precisely what happened.
-    ///
-    /// # Errors
-    /// [`TransportError::Closed`] when nothing is connected, or the underlying transport
-    /// failure.
-    pub async fn open_terminal(
-        &self,
-        terminal_id: TerminalId,
-        request: TerminalClientMessage,
-        sink: TerminalSink,
-    ) -> Result<TerminalAgentMessage, TransportError> {
-        let channel = self.ensure_terminal_channel(sink).await?;
-
-        // Registered before the request is sent: the agent may answer faster than this
-        // side can prepare to listen, and a reply arriving first would be dropped.
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        channel.pending_opens.lock().await.insert(terminal_id, tx);
-
-        if let Err(err) = channel.writer.lock().await.send(&request).await {
-            channel.pending_opens.lock().await.remove(&terminal_id);
-            return Err(err);
-        }
-
-        // Bounded: a server that never answers must not leave the UI waiting forever.
-        let deadline = std::time::Duration::from_secs(TERMINAL_OPEN_TIMEOUT_SECS);
-        // A dropped sender and an elapsed deadline mean the same thing to the caller:
-        // no answer arrived.
-        let Ok(Ok(message)) = tokio::time::timeout(deadline, rx).await else {
-            channel.pending_opens.lock().await.remove(&terminal_id);
-            return Err(TransportError::HandshakeTimeout);
-        };
-        Ok(message)
-    }
-
-    /// Send a message on an already-open terminal channel.
-    ///
-    /// # Errors
-    /// [`TransportError::Closed`] if no terminal channel is open.
-    pub async fn send_terminal(
-        &self,
-        message: &TerminalClientMessage,
-    ) -> Result<(), TransportError> {
-        let channel = self.terminal.lock().await;
-        let channel = channel.as_ref().ok_or(TransportError::Closed {
-            reason: "no terminal is open".to_owned(),
-        })?;
-
-        channel.writer.lock().await.send(message).await
     }
 
     /// Send a file request and collect the agent's reply.
@@ -778,15 +828,59 @@ impl ConnectionManager {
         Ok(channel)
     }
 
-    /// Open the terminal channel if it is not already open.
-    async fn ensure_terminal_channel(
+    /// Start receiving pushed metrics, and return the interval the agent accepted.
+    ///
+    /// The answer is the agent's clamped figure, not what was asked for, so the screen
+    /// can say how often it is actually being updated rather than what it hoped for.
+    ///
+    /// The channel is opened *before* the subscription is requested. The agent tolerates
+    /// either order, but opening first means the first tick has somewhere to arrive.
+    ///
+    /// # Errors
+    /// The connection is gone, or the agent refused the subscription — which a
+    /// view-only-revoked device is entitled to be told rather than left waiting.
+    pub async fn subscribe_metrics(
         &self,
-        sink: TerminalSink,
-    ) -> Result<Arc<TerminalChannel>, TransportError> {
-        let mut slot = self.terminal.lock().await;
+        interval_ms: u32,
+        sink: MetricsSink,
+    ) -> Result<u32, TransportError> {
+        self.ensure_metrics_channel(sink).await?;
 
-        if let Some(existing) = slot.as_ref() {
-            return Ok(Arc::clone(existing));
+        let result = self
+            .request(ControlRequestPayload::SubscribeMetrics { interval_ms })
+            .await?;
+
+        match result {
+            ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms }) => {
+                Ok(interval_ms)
+            }
+            ControlResult::Err { message, .. } => Err(TransportError::Closed { reason: message }),
+            // An answer of another shape means the two builds disagree about what a
+            // subscription is. Reporting it beats waiting for pushes that never come.
+            ControlResult::Ok(_) => Err(TransportError::Closed {
+                reason: "the server did not accept the metrics subscription".to_owned(),
+            }),
+        }
+    }
+
+    /// Stop receiving pushed metrics.
+    ///
+    /// The channel is left open: subscribing again is then a single control request
+    /// rather than a new stream, and an open channel with no subscription costs nothing.
+    ///
+    /// # Errors
+    /// The connection is gone.
+    pub async fn unsubscribe_metrics(&self) -> Result<(), TransportError> {
+        self.request(ControlRequestPayload::UnsubscribeMetrics)
+            .await?;
+        Ok(())
+    }
+
+    /// Open the metrics channel if it is not already open.
+    async fn ensure_metrics_channel(&self, sink: MetricsSink) -> Result<(), TransportError> {
+        let mut slot = self.metrics.lock().await;
+        if slot.is_some() {
+            return Ok(());
         }
 
         let guard = self.active.lock().await;
@@ -795,17 +889,208 @@ impl ConnectionManager {
         })?;
 
         let (writer, reader) =
-            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Terminal).await?;
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Metrics).await?;
         drop(guard);
 
-        let channel = Arc::new(TerminalChannel {
-            writer: Mutex::new(writer),
-            pending_opens: Mutex::new(std::collections::HashMap::new()),
-        });
+        spawn_metrics_reader(reader, sink);
+        *slot = Some(writer);
+        Ok(())
+    }
 
-        spawn_terminal_reader(Arc::clone(&channel), reader, sink);
-        *slot = Some(Arc::clone(&channel));
+    /// Ask the agent to list its capturable displays.
+    ///
+    /// A fresh channel, used once and dropped: display enumeration happens before a
+    /// stream exists, so there is nothing yet worth keeping open.
+    ///
+    /// # Errors
+    /// The connection is gone, or the agent answered with something other than a
+    /// listing.
+    pub async fn video_list_displays(&self) -> Result<Vec<DisplayInfo>, TransportError> {
+        let (mut writer, mut reader) = self.open_video_channel().await?;
+        writer.send(&DesktopClientMessage::ListDisplays).await?;
+
+        match Self::next_video_message(&mut reader).await? {
+            DesktopAgentMessage::Displays(displays) => Ok(displays),
+            DesktopAgentMessage::Error { message, .. } => {
+                Err(TransportError::Closed { reason: message })
+            }
+            _ => Err(TransportError::Closed {
+                reason: "the agent did not answer with a display list".to_owned(),
+            }),
+        }
+    }
+
+    /// Open the video channel and ask the agent to start streaming.
+    ///
+    /// The write half is kept on `self.video` so [`Self::video_stop_stream`] and
+    /// [`Self::video_request_keyframe`] can reach it later, and so the caller can hand
+    /// its own clone to the task that reads frames — that task asks for a keyframe on
+    /// its own when the decoder falls behind, without a round trip back through here.
+    ///
+    /// # Errors
+    /// The connection is gone, the agent refused, or it answered with something other
+    /// than `StreamStarted`.
+    pub async fn video_start_stream(
+        &self,
+        request: &DesktopClientMessage,
+    ) -> Result<
+        (
+            DesktopAgentMessage,
+            Arc<Mutex<ChannelWriter>>,
+            ChannelReader,
+        ),
+        TransportError,
+    > {
+        let (mut writer, mut reader) = self.open_video_channel().await?;
+        writer.send(request).await?;
+
+        let reply = Self::next_video_message(&mut reader).await?;
+        if let DesktopAgentMessage::Error { message, .. } = reply {
+            *self.video.lock().await = None;
+            return Err(TransportError::Closed { reason: message });
+        }
+        if !matches!(reply, DesktopAgentMessage::StreamStarted { .. }) {
+            *self.video.lock().await = None;
+            return Err(TransportError::Closed {
+                reason: "the agent did not answer with StreamStarted".to_owned(),
+            });
+        }
+
+        let writer = Arc::new(Mutex::new(writer));
+        *self.video.lock().await = Some(Arc::clone(&writer));
+        Ok((reply, writer, reader))
+    }
+
+    /// Tell the agent to stop streaming.
+    ///
+    /// The write half is left in place rather than dropped: the reader task ends the
+    /// stream on its own once it sees `StreamStopped` or the channel close, and doing
+    /// it there keeps one place responsible for tearing the channel down.
+    ///
+    /// # Errors
+    /// The connection is gone, or nothing is streaming.
+    pub async fn video_stop_stream(&self) -> Result<(), TransportError> {
+        let writer = self.video_writer().await?;
+        let mut guard = writer.lock().await;
+        guard.send(&DesktopClientMessage::StopStream).await
+    }
+
+    /// Ask the agent for a fresh keyframe, e.g. after the decoder detects a gap.
+    ///
+    /// # Errors
+    /// The connection is gone, or nothing is streaming.
+    pub async fn video_request_keyframe(&self) -> Result<(), TransportError> {
+        let writer = self.video_writer().await?;
+        let mut guard = writer.lock().await;
+        guard.send(&DesktopClientMessage::RequestKeyframe).await
+    }
+
+    /// Publish this machine's clipboard text to the agent.
+    ///
+    /// Rides the video channel because the protocol puts `ClipboardUpdate` there, which
+    /// means clipboard sharing needs a desktop channel open — not a stream running, but
+    /// the channel itself.
+    ///
+    /// # Errors
+    /// The connection is gone, or no desktop channel is open.
+    pub async fn video_send_clipboard(&self, text: String) -> Result<(), TransportError> {
+        let writer = self.video_writer().await?;
+        let mut guard = writer.lock().await;
+        guard
+            .send(&DesktopClientMessage::ClipboardUpdate { text })
+            .await
+    }
+
+    /// The video channel's write half, if a stream is open.
+    async fn video_writer(&self) -> Result<Arc<Mutex<ChannelWriter>>, TransportError> {
+        self.video
+            .lock()
+            .await
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(TransportError::Closed {
+                reason: "no video stream is running".to_owned(),
+            })
+    }
+
+    /// Open a fresh video channel on the active connection.
+    async fn open_video_channel(&self) -> Result<(ChannelWriter, ChannelReader), TransportError> {
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let channel =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Video).await?;
+        drop(guard);
         Ok(channel)
+    }
+
+    /// The next sequence number for an input event on this connection.
+    #[must_use]
+    pub fn next_input_seq(&self) -> u32 {
+        self.input_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many input events have been given a sequence number so far.
+    ///
+    /// Compared against the host's applied watermark to say how far behind the host is.
+    #[must_use]
+    pub fn input_seq_issued(&self) -> u32 {
+        self.input_seq.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Send one input event, opening the input channel first if this is the first
+    /// event sent on this connection.
+    ///
+    /// # Errors
+    /// The connection is gone, or the transport failed.
+    pub async fn send_input(
+        &self,
+        event: &InputEvent,
+        sink: InputSink,
+    ) -> Result<(), TransportError> {
+        self.ensure_input_channel(sink).await?;
+        let mut slot = self.input.lock().await;
+        let writer = slot.as_mut().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+        writer.send(event).await
+    }
+
+    /// Open the input channel if it is not already open, and start draining
+    /// acknowledgements and display topology into `sink`.
+    async fn ensure_input_channel(&self, sink: InputSink) -> Result<(), TransportError> {
+        let mut slot = self.input.lock().await;
+        if slot.is_some() {
+            return Ok(());
+        }
+
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let (writer, reader) =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Input).await?;
+        drop(guard);
+
+        spawn_input_reader(reader, sink);
+        *slot = Some(writer);
+        Ok(())
+    }
+
+    /// Read one message off the video channel, mapping a closed stream to an error.
+    async fn next_video_message(
+        reader: &mut ChannelReader,
+    ) -> Result<DesktopAgentMessage, TransportError> {
+        reader
+            .next_message::<DesktopAgentMessage>()
+            .await?
+            .ok_or(TransportError::ConnectionLost {
+                reason: "the agent closed the video channel".to_owned(),
+            })
     }
 
     /// Disconnect deliberately.
@@ -817,10 +1102,12 @@ impl ConnectionManager {
             .store(true, std::sync::atomic::Ordering::Release);
         self.set_state(ConnectionState::Disconnecting);
 
-        // Both channels belong to the connection being closed; a later connection opens
+        // Every channel belongs to the connection being closed; a later connection opens
         // fresh ones rather than writing into a dead stream.
-        *self.terminal.lock().await = None;
         *self.files.lock().await = None;
+        *self.metrics.lock().await = None;
+        *self.video.lock().await = None;
+        *self.input.lock().await = None;
 
         if let Some(mut active) = self.active.lock().await.take() {
             // Best-effort: tell the agent why, so its audit trail records an intentional
@@ -860,11 +1147,7 @@ impl ConnectionManager {
     ///
     /// # Errors
     /// The last failure, after the retry budget is spent.
-    pub async fn reconnect(
-        &self,
-        server: &SavedServer,
-        discovered: Option<SocketAddr>,
-    ) -> Result<SessionId, TransportError> {
+    pub async fn reconnect(&self, target: &Target) -> Result<SessionId, TransportError> {
         let mut attempt = 1;
 
         loop {
@@ -904,7 +1187,7 @@ impl ConnectionManager {
 
             self.set_state(ConnectionState::Reconnecting { attempt });
 
-            match self.connect(server, discovered).await {
+            match self.connect(target).await {
                 Ok(session_id) => {
                     tracing::info!(attempt, "reconnected");
                     return Ok(session_id);
@@ -967,12 +1250,9 @@ pub fn client_descriptor(
 pub const fn client_capabilities() -> Capabilities {
     Capabilities {
         remote_desktop: false,
-        terminal: false,
         file_transfer: false,
         monitoring: true,
         process_management: false,
-        service_management: false,
-        power_control: false,
         clipboard: false,
         wake_on_lan: false,
         display_count: 0,
@@ -981,28 +1261,11 @@ pub const fn client_capabilities() -> Capabilities {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
-
     use rc_protocol::control::OsFamily;
 
     use rc_security::SystemClock;
 
     use super::*;
-
-    fn address(last_octet: u8, port: u16) -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, last_octet)), port)
-    }
-
-    fn server() -> SavedServer {
-        SavedServer {
-            device_id: DeviceId::generate(),
-            display_name: "home-server".to_owned(),
-            certificate_fingerprint: Fingerprint::of_certificate_der(b"cert"),
-            identity_fingerprint: Fingerprint::of_public_key(&[1u8; 32]),
-            last_known_address: None,
-            configured_endpoint: None,
-        }
-    }
 
     fn manager() -> ConnectionManager {
         let identity = Arc::new(DeviceIdentity::generate("client", &SystemClock).unwrap());
@@ -1011,72 +1274,24 @@ mod tests {
         ConnectionManager::new(identity, descriptor, client_capabilities())
     }
 
-    // -- address selection ---------------------------------------------------
+    // -- targets -------------------------------------------------------------
 
     #[test]
-    fn the_last_working_address_is_tried_first() {
-        // On a home LAN it is nearly always still right, and trying it first avoids a
-        // discovery round trip on every connect.
-        let mut saved = server();
-        saved.last_known_address = Some(address(50, 47811));
-
-        let candidates = candidate_addresses(&saved, Some(address(60, 47811)));
-        assert_eq!(candidates[0], address(50, 47811));
-        assert_eq!(candidates[1], address(60, 47811));
+    fn a_target_offers_no_password_unless_one_was_given() {
+        // The common case. A password is something the user types for a machine that
+        // asked for one, not a field that quietly carries an empty string.
+        let target = Target::new("192.168.1.77".parse().unwrap());
+        assert_eq!(target.unattended_password, None);
+        assert_eq!(target.address.to_string(), "192.168.1.77:7443");
     }
 
     #[test]
-    fn a_discovered_address_is_used_when_nothing_is_saved() {
-        let candidates = candidate_addresses(&server(), Some(address(60, 47811)));
-        assert_eq!(candidates, vec![address(60, 47811)]);
-    }
-
-    #[test]
-    fn a_configured_endpoint_is_the_last_resort() {
-        let mut saved = server();
-        saved.configured_endpoint = Some("192.168.1.70:47811".to_owned());
-        saved.last_known_address = Some(address(50, 47811));
-
-        let candidates = candidate_addresses(&saved, None);
-        assert_eq!(candidates, vec![address(50, 47811), address(70, 47811)]);
-    }
-
-    #[test]
-    fn a_duplicated_address_is_tried_once() {
-        let mut saved = server();
-        saved.last_known_address = Some(address(50, 47811));
-        saved.configured_endpoint = Some("192.168.1.50:47811".to_owned());
-
-        assert_eq!(
-            candidate_addresses(&saved, Some(address(50, 47811))),
-            vec![address(50, 47811)]
-        );
-    }
-
-    #[test]
-    fn a_server_with_nowhere_to_dial_yields_no_candidates() {
-        assert!(candidate_addresses(&server(), None).is_empty());
-    }
-
-    #[test]
-    fn an_endpoint_without_a_port_gets_the_default() {
-        assert_eq!(
-            parse_endpoint("10.0.0.4"),
-            Some(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
-                rc_protocol::DEFAULT_AGENT_PORT
-            ))
-        );
-    }
-
-    #[test]
-    fn an_unparseable_endpoint_is_reported_rather_than_guessed_at() {
-        // A hostname needs resolving, which is the caller's job; anything else is a
-        // configuration error the operator should see.
-        assert_eq!(parse_endpoint(""), None);
-        assert_eq!(parse_endpoint("   "), None);
-        assert_eq!(parse_endpoint("not an address"), None);
-        assert_eq!(parse_endpoint("server.local"), None);
+    fn a_target_keeps_the_address_as_typed_rather_than_resolving_it() {
+        // The dialled address is what the responder keys its pin on. Resolving it here
+        // would key a different entry every time a hostname resolved differently.
+        let target = Target::new("work-laptop.local:9000".parse().unwrap());
+        assert_eq!(target.address.host, "work-laptop.local");
+        assert_eq!(target.address.port, 9000);
     }
 
     // -- reconnect policy ----------------------------------------------------
@@ -1106,6 +1321,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_outgoing_history_id_is_taken_exactly_once() {
+        let manager = manager();
+        manager.set_outgoing_history_id(7).await;
+        assert_eq!(manager.take_outgoing_history_id().await, Some(7));
+        assert_eq!(manager.take_outgoing_history_id().await, None);
+    }
+
+    #[tokio::test]
     async fn connecting_again_re_arms_automatic_reconnect() {
         // After a deliberate disconnect and a deliberate reconnect, a later accidental
         // drop must be retried again.
@@ -1115,7 +1338,9 @@ mod tests {
 
         // The connect fails — there is nothing to connect to — but the flag it clears
         // is what is being asserted.
-        let _ = manager.connect(&server(), None).await;
+        let _ = manager
+            .connect(&Target::new("192.0.2.1".parse().unwrap()))
+            .await;
         assert!(!manager.was_intentional());
     }
 
@@ -1255,17 +1480,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connecting_with_no_address_reports_what_the_operator_should_do() {
-        // "Something went wrong" is not an acceptable answer here.
+    async fn connecting_to_a_name_that_does_not_resolve_says_so() {
+        // "Something went wrong" is not an acceptable answer here. `.invalid` is
+        // reserved by RFC 2606 precisely so it never resolves.
         let manager = manager();
-        let result = manager.connect(&server(), None).await;
+        let result = manager
+            .connect(&Target::new("nothing.invalid".parse().unwrap()))
+            .await;
 
         assert!(result.is_err());
         match manager.state() {
             ConnectionState::Failed { message } => {
                 assert!(
-                    message.contains("address"),
-                    "the message must say what is missing: {message}"
+                    message.contains("nothing.invalid"),
+                    "the message must name the address: {message}"
                 );
             }
             other => panic!("expected a failed state, got {other:?}"),
@@ -1276,7 +1504,6 @@ mod tests {
     fn every_connection_state_serialises_with_a_tag_the_ui_can_switch_on() {
         let states = [
             ConnectionState::Offline,
-            ConnectionState::Discovering,
             ConnectionState::Connecting {
                 address: "10.0.0.1:1".to_owned(),
             },
@@ -1284,6 +1511,8 @@ mod tests {
             ConnectionState::Connected {
                 session_id: "ses_x".to_owned(),
                 address: "10.0.0.1:1".to_owned(),
+                permissions: Vec::new(),
+                device_name: "pc".to_owned(),
             },
             ConnectionState::Disconnecting,
             ConnectionState::Reconnecting { attempt: 1 },
@@ -1310,7 +1539,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(tags.len(), 10);
+        assert_eq!(tags.len(), 9);
         assert!(tags.contains(&"connected".to_owned()));
         assert!(tags.contains(&"waiting_to_retry".to_owned()));
     }
@@ -1320,6 +1549,8 @@ mod tests {
         let state = ConnectionState::Connected {
             session_id: SessionId::generate().to_canonical_string(),
             address: "10.0.0.1:47811".to_owned(),
+            permissions: Vec::new(),
+            device_name: "pc".to_owned(),
         };
         let rendered = serde_json::to_string(&state).unwrap();
 
@@ -1334,7 +1565,6 @@ mod tests {
         // operation that then fails.
         let capabilities = client_capabilities();
         assert!(!capabilities.remote_desktop);
-        assert!(!capabilities.terminal);
         assert!(capabilities.monitoring);
     }
 

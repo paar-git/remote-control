@@ -5,7 +5,7 @@
 //! Both peers are machines the same person administers. There is no third party whose
 //! opinion about their names is worth anything, and introducing one would mean trusting
 //! it. Instead each device generates a self-signed certificate over its long-term
-//! Ed25519 identity key, and peers pin **fingerprints** established during pairing.
+//! Ed25519 identity key, and peers pin **fingerprints** rather than names.
 //!
 //! This inverts the usual model in a way worth stating plainly: a certificate here
 //! proves nothing on its own. It is a container for a public key. All the trust comes
@@ -28,10 +28,10 @@
 //! # The observed-certificate rule
 //!
 //! [`ObservedPeer`] records the certificate the peer actually presented on *this*
-//! connection. Every downstream decision — the trust lookup, and above all the pairing
-//! transcript — must use this value and never a fingerprint copied out of a message
-//! body. A peer that could name its own fingerprint could name someone else's, and the
-//! transcript's anti-relay property would be worth nothing.
+//! connection. Every downstream decision — above all whether to admit the peer at all —
+//! must use this value and never a fingerprint copied out of a message body. A peer that
+//! could name its own fingerprint could name someone else's, and the anti-relay property
+//! the whole design rests on would be worth nothing.
 
 use std::sync::{Arc, Mutex};
 
@@ -101,16 +101,20 @@ impl ObservedPeer {
 pub enum PinPolicy {
     /// Accept only a certificate whose fingerprint matches exactly.
     ///
-    /// Used for every connection to an already-paired device.
+    /// Used for every connection to a device whose fingerprint is already saved.
     Pinned(Fingerprint),
 
     /// Accept any well-formed self-signed certificate, recording what was seen.
     ///
-    /// Used **only** during pairing, where no pin exists yet — that is the entire
-    /// problem pairing solves. Safety comes from the pairing transcript, which binds
-    /// the observed fingerprints of both peers, so an interposed attacker cannot make
-    /// both sides agree. Using this policy anywhere else would remove the transport's
-    /// authentication entirely.
+    /// This is what the agent's listener uses, because it serves *many* clients and a
+    /// single pin could only ever match one of them. Admission is therefore decided a
+    /// layer up, in [`crate::handshake`], against the fingerprint this policy recorded
+    /// for the connection.
+    ///
+    /// Reaching that layer is all this policy grants: a peer gets a control stream and
+    /// an admission decision, nothing more. A *client* dialling a known device must use
+    /// [`PinPolicy::Pinned`] instead — on that side a pin exists and skipping it would
+    /// remove the client's only check that it reached the machine it meant to.
     TrustOnFirstUse,
 }
 
@@ -295,8 +299,7 @@ fn verify_pinned(
 
 /// The certificate fingerprint the peer presented **on this connection**.
 ///
-/// This is the sanctioned source of a peer's fingerprint for every authorization and
-/// pairing decision.
+/// This is the sanctioned source of a peer's fingerprint for every admission decision.
 ///
 /// [`ObservedPeer`] cannot serve that purpose on a listener: one `ObservedPeer` belongs
 /// to the endpoint, so with two clients connecting at once the second handshake
@@ -322,6 +325,32 @@ pub fn peer_certificate_fingerprint(connection: &quinn::Connection) -> Result<Fi
     // Exactly one, for the same reason `verify_pinned` refuses a chain.
     match certificates.as_slice() {
         [end_entity] => Ok(Fingerprint::of_certificate_der(end_entity)),
+        _ => Err(TransportError::IdentityProofRejected),
+    }
+}
+
+/// The DER of the certificate the peer presented **on this connection**.
+///
+/// The sanctioned source for establishing a [`crate::PeerIdentity`], and subject to
+/// exactly the reasoning in [`peer_certificate_fingerprint`]: read back from the
+/// connection, where QUIC keeps it per-connection and it cannot be raced by a second
+/// handshake arriving at the same endpoint.
+///
+/// # Errors
+/// [`TransportError::IdentityProofRejected`] if the peer presented no certificate, or
+/// presented something other than a single end-entity certificate.
+pub fn peer_certificate_der(connection: &quinn::Connection) -> Result<Vec<u8>> {
+    let identity = connection
+        .peer_identity()
+        .ok_or(TransportError::IdentityProofRejected)?;
+
+    let certificates = identity
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| TransportError::IdentityProofRejected)?;
+
+    // Exactly one, for the same reason `verify_pinned` refuses a chain.
+    match certificates.as_slice() {
+        [end_entity] => Ok(end_entity.as_ref().to_vec()),
         _ => Err(TransportError::IdentityProofRejected),
     }
 }
@@ -457,7 +486,8 @@ mod tests {
     #[test]
     fn the_observed_fingerprint_is_derived_from_bytes_not_claims() {
         // The value must come from the certificate itself. If this ever reads from a
-        // message field instead, the pairing transcript's anti-relay property breaks.
+        // message field instead, the anti-relay property of the admission decision
+        // breaks: a peer could name someone else's fingerprint.
         let a = identity("a");
         let b = identity("b");
 
@@ -529,7 +559,7 @@ mod tests {
         assert_eq!(
             observed.fingerprint(),
             Some(unknown.public().certificate_fingerprint),
-            "pairing depends on this value being the observed one"
+            "the admission decision depends on this value being the observed one"
         );
     }
 

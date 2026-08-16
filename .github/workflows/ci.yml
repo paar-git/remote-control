@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    name: Web toolchain (format, lint, types, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check version sync
+        run: pnpm version:check
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test:run
+
+      # The release generators otherwise only run when a tag is pushed, so a
+      # defect in them surfaces as a failed release instead of a failed check.
+      - name: Release pipeline smoke test
+        run: pnpm release:smoke
+
+  rust:
+    # Conditional compilation means a symbol can be live on one platform and
+    # dead on another, so lints and tests run on every platform the app ships
+    # to rather than on Linux alone.
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The desktop client links against the system webkit stack, so the Tauri
+      # packaging dependencies are required even for a check-only build.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --exclude rc-host-agent
+
+      # rc-input's `inject` feature is off by default, but the step above happens to
+      # enable it anyway: rc-host-agent turns it on by default and workspace feature
+      # unification carries that to rc-input. That is incidental — one
+      # `default-features = false` elsewhere would silently stop the injection backend's
+      # tests from running, and they are the only check that the intent tables and the
+      # platform keymap agree about what can be injected. Asking for the feature by
+      # name makes the guarantee explicit instead of a side effect. The check is
+      # per-platform by design: each runner asserts only that its own table is
+      # injectable by its own backend, so all three runners together cover all three.
+      - name: Input injection backend tests
+        run: cargo test -p rc-input --features inject
+
+      # The point of the `inject` feature is that rc-input builds without a desktop,
+      # a display server or any FFI dependency. Nothing verified that until now — the
+      # feature is on in every other step, so the headless path was never exercised.
+      # Building the package alone resolves its features in isolation, which is the
+      # only way to compile it as a machine with no desktop would.
+      - name: Input builds without an injection backend
+        run: cargo check -p rc-input
+
+      # The capture backend needs a display server, so only its compile is checked
+      # here; the tests that touch a real screen are #[ignore]d and run by hand.
+      - name: Video capture backend compiles
+        run: cargo clippy -p rc-video --features capture --all-targets -- -D warnings
+
+      # The agent's end-to-end tests each stand up a real QUIC listener and
+      # client. Running them in parallel on a two-core runner starves the
+      # network stack: a connection completes its handshake and is then lost
+      # before the client opens its first stream, failing whichever test loses
+      # the race. Serialising this one binary removes the contention without
+      # relaxing anything the tests assert.
+      - name: Agent end-to-end tests
+        run: cargo test -p rc-host-agent -- --test-threads=1

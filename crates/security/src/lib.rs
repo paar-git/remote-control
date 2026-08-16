@@ -1,4 +1,4 @@
-//! Security services: device identity, keystore, pairing, authentication, permissions.
+//! Security services: device identity, keystore, owner authentication, permissions.
 //!
 //! This crate owns every secret in the system. The rules it is written to:
 //!
@@ -17,24 +17,22 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod certificate;
 pub mod clock;
 pub mod error;
 pub mod fingerprint;
 pub mod identity;
 pub mod keystore;
-pub mod pairing;
 pub mod password;
 pub mod permissions;
 pub mod throttle;
 
+pub use certificate::{identity_fingerprint_of_certificate, identity_key_of_certificate};
 pub use clock::{Clock, OsRandom, RandomSource, RandomSourceExt, SystemClock};
 pub use error::{Result, SecurityError};
 pub use fingerprint::Fingerprint;
 pub use identity::{DeviceIdentity, DeviceIdentityPublic, derive_device_id};
 pub use keystore::Keystore;
-pub use pairing::{
-    PairingClient, PairingCode, PairingManager, PairingPolicy, PairingState, RequestedPermissions,
-};
-pub use password::{HashingPolicy, OwnerCredential};
-pub use permissions::{AuthorizationContext, Capability, Role};
+pub use password::{HashingPolicy, PasswordCredential};
+pub use permissions::{Permission, PermissionSet};
 pub use throttle::{Throttle, ThrottlePolicy};

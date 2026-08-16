@@ -56,176 +56,21 @@ export function getLocalIdentity(): Promise<LocalIdentity> {
   return call('local_identity', localIdentitySchema);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Owner account                                                              */
-/* -------------------------------------------------------------------------- */
-
-/** Whether an owner account exists and whether the app is unlocked. */
-export const ownerStatusSchema = z.object({
-  accountExists: z.boolean(),
-  authenticated: z.boolean(),
-  username: z.string().nullable(),
-});
-
-export type OwnerStatus = z.infer<typeof ownerStatusSchema>;
-
-/** Fetch the owner-account status. */
-export function getOwnerStatus(): Promise<OwnerStatus> {
-  return call('owner_status', ownerStatusSchema);
-}
-
-/** Create the owner account. Only valid on first run. */
-export function createOwner(username: string, password: string): Promise<null> {
-  return call('create_owner', z.null(), { credentials: { username, password } });
-}
-
-/** Authenticate and unlock the application. */
-export function ownerLogin(username: string, password: string): Promise<OwnerStatus> {
-  return call('owner_login', ownerStatusSchema, { credentials: { username, password } });
-}
-
-/** Lock the application. */
-export function ownerLogout(): Promise<null> {
-  return call('owner_logout', z.null());
-}
-
-/* -------------------------------------------------------------------------- */
-/* Trusted devices                                                            */
-/* -------------------------------------------------------------------------- */
-
-/** Permission roles, mirroring the Rust `Role`. */
-export const roleSchema = z.enum(['owner', 'view_only', 'operator']);
-export type DeviceRole = z.infer<typeof roleSchema>;
-
-/** Human labels for roles. */
-export const ROLE_LABELS: Record<DeviceRole, string> = {
-  owner: 'Owner',
-  view_only: 'View only',
-  operator: 'Operator',
-};
-
 /**
- * A trusted device.
- *
- * `displayName` and `hostname` originate on a remote machine, so they are passed
- * through `untrustedText` to strip control characters and bidirectional overrides
- * before they are ever rendered.
+ * A permission a session can hold. These exact strings are `Permission::name()` in
+ * `rc-security`; the enum is closed on purpose, so a build that learns a new permission
+ * without the interface learning it fails validation rather than rendering a name
+ * nobody has written a control for.
  */
-export const trustedDeviceSchema = z.object({
-  deviceId: z.string().min(1),
-  displayName: untrustedText(128),
-  hostname: untrustedText(253),
-  identityFingerprint: fingerprintSchema,
-  certificateFingerprint: fingerprintSchema,
-  role: roleSchema,
-  capabilities: z.array(z.string()),
-  pairedAtMs: z.number().int(),
-  lastAuthenticatedAtMs: z.number().int().nullable(),
-  revoked: z.boolean(),
-  revokedAtMs: z.number().int().nullable(),
-});
-
-export type TrustedDevice = z.infer<typeof trustedDeviceSchema>;
-
-/** List trusted devices. */
-export function listTrustedDevices(): Promise<TrustedDevice[]> {
-  return call('list_trusted_devices', z.array(trustedDeviceSchema));
-}
-
-/** Rename a trusted device. */
-export function renameTrustedDevice(deviceId: string, newName: string): Promise<null> {
-  return call('rename_trusted_device', z.null(), { deviceId, newName });
-}
-
-/** Revoke a trusted device. Takes effect immediately. */
-export function revokeTrustedDevice(deviceId: string): Promise<null> {
-  return call('revoke_trusted_device', z.null(), { deviceId });
-}
-
-/* -------------------------------------------------------------------------- */
-/* Audit                                                                      */
-/* -------------------------------------------------------------------------- */
-
-/** One audit-log entry. */
-export const auditEntrySchema = z.object({
-  id: z.number().int(),
-  occurredAtMs: z.number().int(),
-  category: z.string(),
-  action: z.string(),
-  result: z.enum(['success', 'failure', 'denied']),
-  targetDeviceId: z.string().nullable(),
-});
-
-export type AuditEntry = z.infer<typeof auditEntrySchema>;
-
-/** Fetch recent audit entries. */
-export function getRecentAuditEvents(limit = 50): Promise<AuditEntry[]> {
-  return call('recent_audit_events', z.array(auditEntrySchema), { limit });
-}
-
-/* -------------------------------------------------------------------------- */
-/* Pairing                                                                    */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Check that a typed pairing code *could* be a code.
- *
- * Format only. It gives immediate feedback while the operator types; it proves
- * nothing about whether the code is correct, which only the server can decide.
- */
-export function checkPairingCodeFormat(code: string): Promise<boolean> {
-  return call('check_pairing_code_format', z.boolean(), { code });
-}
-
-/**
- * A server seen on the local network.
- *
- * Every field here is **untrusted**: anyone on the LAN can broadcast an announcement
- * claiming any device id and name. It is shown so the operator can pick a machine to
- * pair with; the connection that follows authenticates regardless. `claimedFingerprint`
- * is named for what it is, and is never treated as the pinned value.
- */
-export const discoveredAgentSchema = z.object({
-  deviceId: z.string().min(1),
-  displayName: untrustedText(64),
-  address: z.string().min(1),
-  claimedFingerprint: z.string().nullable(),
-  alreadySaved: z.boolean(),
-});
-
-export type DiscoveredAgent = z.infer<typeof discoveredAgentSchema>;
-
-/** Search the local network for servers. An empty list is a normal outcome. */
-export function discoverAgents(): Promise<DiscoveredAgent[]> {
-  return call('discover_agents', z.array(discoveredAgentSchema));
-}
-
-/** What a completed pairing produced. */
-export const pairedServerSchema = z.object({
-  deviceId: z.string().min(1),
-  displayName: untrustedText(128),
-  /** Grouped for reading aloud against what the server printed. */
-  identityFingerprint: z.string().min(1),
-  role: roleSchema,
-});
-
-export type PairedServer = z.infer<typeof pairedServerSchema>;
-
-/**
- * Pair with a server and save it.
- *
- * The code is sent to the backend and is never returned, logged or stored. It is used
- * once to derive a proof and then dropped.
- */
-export function pairWithServer(
-  address: string,
-  code: string,
-  displayName: string,
-): Promise<PairedServer> {
-  return call('pair_with_server', pairedServerSchema, {
-    input: { address, code, displayName },
-  });
-}
+export const permissionSchema = z.enum([
+  'view_screen',
+  'control_input',
+  'transfer_files',
+  'view_metrics',
+  'clipboard',
+  'administer',
+]);
+export type Permission = z.infer<typeof permissionSchema>;
 
 /* -------------------------------------------------------------------------- */
 /* Connection                                                                 */
@@ -249,13 +94,20 @@ export type RefusalReason = z.infer<typeof refusalReasonSchema>;
  */
 export const connectionStateSchema = z.discriminatedUnion('state', [
   z.object({ state: z.literal('offline') }),
-  z.object({ state: z.literal('discovering') }),
   z.object({ state: z.literal('connecting'), address: z.string() }),
   z.object({ state: z.literal('authenticating') }),
   z.object({
     state: z.literal('connected'),
     sessionId: z.string(),
     address: z.string(),
+    /**
+     * What the other machine granted this session.
+     *
+     * Rides on the state so it arrives with the session and vanishes with it: there is
+     * no separate call that could report a grant for a connection that has ended.
+     */
+    permissions: z.array(permissionSchema),
+    deviceName: z.string(),
   }),
   z.object({ state: z.literal('disconnecting') }),
   z.object({ state: z.literal('reconnecting'), attempt: z.number().int() }),
@@ -279,12 +131,10 @@ export function describeConnectionState(state: ConnectionState): string {
   switch (state.state) {
     case 'offline':
       return 'Not connected';
-    case 'discovering':
-      return 'Searching the local network…';
     case 'connecting':
-      return `Connecting to ${state.address}…`;
+      return `Finding the device at ${state.address}…`;
     case 'authenticating':
-      return 'Verifying the server’s identity…';
+      return 'Establishing a secure connection…';
     case 'connected':
       return `Connected — ${state.address}`;
     case 'disconnecting':
@@ -308,7 +158,6 @@ export function isConnected(state: ConnectionState): boolean {
 /** Whether a state means something is in progress. */
 export function isBusy(state: ConnectionState): boolean {
   return (
-    state.state === 'discovering' ||
     state.state === 'connecting' ||
     state.state === 'authenticating' ||
     state.state === 'disconnecting' ||
@@ -317,19 +166,9 @@ export function isBusy(state: ConnectionState): boolean {
   );
 }
 
-/** Connect to a saved server. */
-export function connectToServer(deviceId: string): Promise<ConnectionState> {
-  return call('connect_to_server', connectionStateSchema, { deviceId });
-}
-
 /** Disconnect deliberately. Suppresses automatic reconnection. */
 export function disconnectFromServer(): Promise<ConnectionState> {
   return call('disconnect_from_server', connectionStateSchema);
-}
-
-/** Reconnect to a saved server, applying the backoff. */
-export function reconnectToServer(deviceId: string): Promise<ConnectionState> {
-  return call('reconnect_to_server', connectionStateSchema, { deviceId });
 }
 
 /** The current connection state. */
@@ -432,129 +271,87 @@ export function getServerFacts(): Promise<ServerFacts> {
   return call('server_facts', serverFactsSchema);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Terminal                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/** A terminal that opened on the server. */
-export const openedTerminalSchema = z.object({
-  terminalId: z.string().min(1),
-  shellPath: untrustedText(512),
-  pid: z.number().int().nonnegative(),
-  elevated: z.boolean(),
-});
-
-export type OpenedTerminal = z.infer<typeof openedTerminalSchema>;
-
-/** Open a terminal on the connected server. */
-export function openTerminal(
-  shell: string,
-  cols: number,
-  rows: number,
-  workingDirectory: string | null = null,
-): Promise<OpenedTerminal> {
-  return call('open_terminal', openedTerminalSchema, {
-    input: { shell, cols, rows, workingDirectory },
-  });
-}
-
 /**
- * Send keystrokes to a terminal.
+ * One pushed reading.
  *
- * Encoded to UTF-8 and then base64 because the transport carries bytes, not strings.
- * A terminal's input is not text in general — it includes control characters and the
- * emulator's own replies to the shell's queries — and treating it as text would mangle
- * anything that is not.
+ * Deliberately a subset of {@link snapshotSchema}: the fields that change between
+ * samples. The process list and the CPU model come from a snapshot, once — sending them
+ * every tick would make fixed facts look like live readings, and would make a dashboard
+ * cost a full process walk several times a minute on the server it is watching.
  */
-export function sendTerminalInput(terminalId: string, data: string): Promise<null> {
-  return call('send_terminal_input', z.null(), {
-    terminalId,
-    dataBase64: bytesToBase64(new TextEncoder().encode(data)),
-  });
-}
-
-/** Tell the server the terminal window changed size. */
-export function resizeTerminal(terminalId: string, cols: number, rows: number): Promise<null> {
-  return call('resize_terminal', z.null(), { terminalId, cols, rows });
-}
-
-/** Close a terminal. */
-export function closeTerminal(terminalId: string): Promise<null> {
-  return call('close_terminal', z.null(), { terminalId });
-}
-
-/** One chunk of terminal output, already decoded. */
-export interface TerminalOutput {
-  readonly terminalId: string;
-  /** The bytes the shell wrote, as a binary string the emulator consumes. */
-  readonly data: string;
-}
-
-/** A terminal that ended. */
-export interface TerminalExit {
-  readonly terminalId: string;
-  readonly exitCode: number | null;
-  readonly error: string | null;
-}
-
-const terminalOutputEventSchema = z.object({
-  terminalId: z.string().min(1),
-  dataBase64: z.string(),
+export const metricsTickSchema = z.object({
+  capturedAtMs: z.number().int(),
+  uptimeSecs: z.number().nonnegative(),
+  cpuPercent: z.number(),
+  cpuPerCore: z.array(z.number()),
+  memoryUsedBytes: z.number().nonnegative(),
+  memoryTotalBytes: z.number().nonnegative(),
+  swapUsedBytes: z.number().nonnegative(),
+  swapTotalBytes: z.number().nonnegative(),
+  disks: z.array(diskSchema),
+  networks: z.array(networkSchema),
+  temperatures: z.array(temperatureSchema),
+  loadAverage: z.tuple([z.number(), z.number(), z.number()]).nullable(),
 });
 
-const terminalExitEventSchema = z.object({
-  terminalId: z.string().min(1),
-  exitCode: z.number().int().nullable(),
-  error: z.string().nullable(),
+export type MetricsTick = z.infer<typeof metricsTickSchema>;
+
+/** Why a metrics stream ended. */
+export const metricsStoppedSchema = z.object({
+  reason: z.string().min(1),
+  message: untrustedText(256),
 });
+
+export type MetricsStopped = z.infer<typeof metricsStoppedSchema>;
 
 /**
- * Subscribe to terminal output.
+ * Ask the server to push readings.
+ *
+ * Resolves to the interval the server actually accepted, which may be slower than the
+ * one requested — so a screen reports the rate it is getting rather than the rate it
+ * hoped for.
+ */
+export function subscribeMetrics(intervalMs: number): Promise<number> {
+  return call('subscribe_metrics', z.number().int().positive(), { intervalMs });
+}
+
+/** Ask the server to stop pushing readings. */
+export function unsubscribeMetrics(): Promise<null> {
+  return call('unsubscribe_metrics', z.null());
+}
+
+/**
+ * Subscribe to pushed readings.
  *
  * Returns the unlisten function, as Tauri's event API does.
  */
-export async function listenTerminalOutput(
-  handler: (output: TerminalOutput) => void,
+export async function listenMetricsUpdate(
+  handler: (tick: MetricsTick) => void,
 ): Promise<() => void> {
   const { listen } = await import('@tauri-apps/api/event');
 
-  return listen('terminal://output', (event) => {
-    const parsed = terminalOutputEventSchema.safeParse(event.payload);
-    if (!parsed.success) return;
-
-    handler({
-      terminalId: parsed.data.terminalId,
-      // A binary string, one character per byte. A UTF-8 decode here would corrupt a
-      // multi-byte character split across two chunks; the emulator reassembles them.
-      data: base64ToBinaryString(parsed.data.dataBase64),
-    });
-  });
-}
-
-/** Subscribe to terminal exits and failures. */
-export async function listenTerminalExit(
-  handler: (exit: TerminalExit) => void,
-): Promise<() => void> {
-  const { listen } = await import('@tauri-apps/api/event');
-
-  return listen('terminal://exit', (event) => {
-    const parsed = terminalExitEventSchema.safeParse(event.payload);
+  return listen('metrics://update', (event) => {
+    const parsed = metricsTickSchema.safeParse(event.payload);
     if (parsed.success) handler(parsed.data);
   });
 }
 
-/** Encode bytes as base64. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
+/**
+ * Subscribe to the end of a metrics stream.
+ *
+ * Worth listening for rather than assuming silence means idle: a dashboard that stopped
+ * being updated must say so instead of leaving its last reading on screen looking
+ * current.
+ */
+export async function listenMetricsStopped(
+  handler: (stopped: MetricsStopped) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
 
-/** Decode base64 into a binary string, one character per byte. */
-function base64ToBinaryString(encoded: string): string {
-  return atob(encoded);
+  return listen('metrics://stopped', (event) => {
+    const parsed = metricsStoppedSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -708,4 +505,440 @@ export function parentPath(path: string): string | null {
   // on drive C", which is not what clicking "up" is asking for.
   const parent = trimmed.slice(0, cut);
   return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Updates                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export const updateStateSchema = z.enum([
+  'idle',
+  'checking_for_updates',
+  'no_update_available',
+  'update_available',
+  'preparing_download',
+  'downloading',
+  'paused',
+  'waiting_for_network',
+  'resuming',
+  'verifying',
+  'ready_to_install',
+  'waiting_for_user_confirmation',
+  'installing',
+  'restart_required',
+  'completed',
+  'failed',
+  'recovering',
+]);
+export type UpdateState = z.infer<typeof updateStateSchema>;
+
+export const downloadQueueStateSchema = z.enum([
+  'queued',
+  'downloading',
+  'paused',
+  'waiting_for_network',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+export const packageFormatSchema = z.enum([
+  'exe',
+  'msi',
+  'dmg',
+  'pkg',
+  'appimage',
+  'deb',
+  'rpm',
+  'tar.gz',
+]);
+export type PackageFormat = z.infer<typeof packageFormatSchema>;
+
+export const updatePlatformSchema = z.object({
+  os: z.enum(['windows', 'macos', 'linux']),
+  osVersion: z.string(),
+  cpuArchitecture: z.enum(['x64', 'arm64']),
+  installationArchitecture: z.enum(['x64', 'arm64']),
+  key: z.string().min(1),
+  osBuild: z.number().int().nonnegative().nullable().optional(),
+  linuxKernelVersion: z.string().nullable().optional(),
+  linuxGlibcVersion: z.string().nullable().optional(),
+  linuxDistribution: z.string().nullable().optional(),
+  installationType: z.enum([
+    'windows-msi',
+    'windows-exe',
+    'macos-app-bundle',
+    'macos-pkg',
+    'linux-deb',
+    'linux-rpm',
+    'linux-app-image',
+    'portable-archive',
+    'unknown',
+  ]),
+});
+
+export const downloadProgressSchema = z.object({
+  key: z.string().min(1),
+  state: downloadQueueStateSchema,
+  downloadedBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  percent: z.number().min(0).max(100),
+  retryCount: z.number().int().nonnegative(),
+});
+export type DownloadProgress = z.infer<typeof downloadProgressSchema>;
+
+export const updateStatusSchema = z.object({
+  state: updateStateSchema,
+  manifestUrl: z.string().nullable(),
+  currentVersion: z.string().min(1),
+  availableVersion: z.string().nullable(),
+  releaseNotes: z.string().nullable(),
+  platform: updatePlatformSchema,
+  packageFormat: packageFormatSchema.nullable(),
+  download: downloadProgressSchema.nullable(),
+  readyPath: z.string().nullable(),
+  lastError: z.string().nullable(),
+});
+export type UpdateStatus = z.infer<typeof updateStatusSchema>;
+
+export const installResultSchema = z.object({
+  restartRequired: z.boolean(),
+  message: z.string().min(1),
+});
+export type InstallResult = z.infer<typeof installResultSchema>;
+
+export function getUpdateStatus(): Promise<UpdateStatus> {
+  return call('update_status', updateStatusSchema);
+}
+
+export function checkForUpdates(manifestUrl: string | null): Promise<UpdateStatus> {
+  return call('check_for_updates', updateStatusSchema, { request: { manifestUrl } });
+}
+
+export function downloadUpdate(): Promise<UpdateStatus> {
+  return call('download_update', updateStatusSchema);
+}
+
+export function pauseUpdateDownload(): Promise<UpdateStatus> {
+  return call('pause_update_download', updateStatusSchema);
+}
+
+export function resumeUpdateDownload(): Promise<UpdateStatus> {
+  return call('resume_update_download', updateStatusSchema);
+}
+
+export function cancelUpdateDownload(deletePartial: boolean): Promise<UpdateStatus> {
+  return call('cancel_update_download', updateStatusSchema, { deletePartial });
+}
+
+export function installUpdate(): Promise<InstallResult> {
+  return call('install_update', installResultSchema);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The host side: accepting connections on this machine                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A machine name chosen by whoever owns that machine.
+ *
+ * Stripped first and measured second: a name made entirely of control characters or
+ * bidi overrides renders as nothing at all, and a length check applied before the strip
+ * would let it through.
+ */
+const machineName = untrustedText(64).refine(
+  (value) => value.length > 0,
+  'a machine name is required',
+);
+
+/** Whether this machine is accepting connections, and where it can be reached. */
+export const hostStatusSchema = z.object({
+  accepting: z.boolean(),
+  /** Every address a peer could dial to reach this machine, `host:port`. */
+  addresses: z.array(z.string().min(1)),
+  machineName,
+  listenPort: z.number().int().min(1).max(65535),
+});
+
+export type HostStatus = z.infer<typeof hostStatusSchema>;
+
+/**
+ * An incoming connection waiting for a human to decide.
+ *
+ * `machineName` is chosen by the peer, so it goes through `untrustedText` — the same
+ * treatment remote file names get, and for the same reason. The fingerprint does not:
+ * it is generated locally from the observed certificate and must reach the interface
+ * byte-for-byte, since comparing it is the whole point of showing it.
+ */
+export const acceptRequestSchema = z.object({
+  requestId: z.string().min(1),
+  address: z.string().min(1),
+  /** The identity the peer proved. Compared across screens; not sanitised. */
+  identityFingerprint: fingerprintSchema,
+  deviceId: z.string().min(1),
+  machineName: untrustedText(64),
+  osFamily: untrustedText(32),
+  /** Whether this device already has a trust row. */
+  trusted: z.boolean(),
+});
+
+export type AcceptRequest = z.infer<typeof acceptRequestSchema>;
+
+/** How much of an Accept answer outlives the connection. */
+export const trustChoiceSchema = z.enum(['once', 'remember', 'remember_unattended']);
+export type TrustChoice = z.infer<typeof trustChoiceSchema>;
+
+/** A machine this installation has connected to before. */
+export const recentSchema = z.object({
+  address: z.string().min(1),
+  machineName: untrustedText(64),
+  lastConnectedMs: z.number().int(),
+  /** The identity that answered here, once one has. Compared, never trusted blindly. */
+  knownIdentity: fingerprintSchema.nullable(),
+});
+
+export type Recent = z.infer<typeof recentSchema>;
+
+/**
+ * This machine's own settings.
+ *
+ * Note what is absent. There is no field for the unattended password or its hash, and
+ * the schema strips unknown keys rather than passing them through, so a backend that
+ * started sending one would not deliver it to the webview.
+ */
+export const settingsSchema = z.object({
+  accepting: z.boolean(),
+  listenPort: z.number().int().min(1).max(65535),
+  machineName,
+  /** Whether a password is set. Never the password, and never its hash. */
+  unattendedConfigured: z.boolean(),
+  /** What an unattended-password connection receives. Empty unless configured. */
+  unattendedPermissions: z.array(permissionSchema),
+});
+
+export type Settings = z.infer<typeof settingsSchema>;
+
+/** Whether this machine is accepting, and where it can be reached. */
+export function getHostStatus(): Promise<HostStatus> {
+  return call('host_status', hostStatusSchema);
+}
+
+/** Start or stop accepting incoming connections. */
+export function setAccepting(accepting: boolean): Promise<HostStatus> {
+  return call('set_accepting', hostStatusSchema, { accepting });
+}
+
+/** The connection waiting on a decision, if one is waiting. */
+export function getPendingAcceptRequest(): Promise<AcceptRequest | null> {
+  return call('pending_accept_request', acceptRequestSchema.nullable());
+}
+
+/**
+ * Answer a pending request.
+ *
+ * An empty `granted` is a refusal, not an empty session — the backend treats it as one,
+ * in one place, rather than the interface deciding separately.
+ */
+export function answerAcceptRequest(
+  requestId: string,
+  granted: Permission[],
+  trust: TrustChoice,
+): Promise<null> {
+  return call('answer_accept_request', z.null(), { requestId, granted, trust });
+}
+
+/**
+ * Subscribe to accept requests raised by the backend.
+ *
+ * Two callbacks rather than one: a request appearing and a request being withdrawn are
+ * different events, and a dialog that only learned about the first would sit on screen
+ * after its request had already timed out, inviting a click that lands on nothing.
+ *
+ * A payload that does not parse is dropped rather than shown. The machine name in it is
+ * chosen by whoever is knocking, and a malformed request is not one to render.
+ */
+export async function listenAcceptRequests(
+  onRaised: (request: AcceptRequest) => void,
+  onWithdrawn: () => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  const stopRaised = await listen('rc://accept-request', (event) => {
+    const parsed = acceptRequestSchema.safeParse(event.payload);
+    if (parsed.success) onRaised(parsed.data);
+  });
+  const stopWithdrawn = await listen('rc://accept-resolved', () => {
+    onWithdrawn();
+  });
+
+  return () => {
+    stopRaised();
+    stopWithdrawn();
+  };
+}
+
+/**
+ * Refuse a pending request.
+ *
+ * A separate call from answering with nothing, so "No" is an explicit act rather than
+ * an accept that happens to carry no permissions.
+ */
+export function dismissAcceptRequest(requestId: string): Promise<null> {
+  return call('dismiss_accept_request', z.null(), { requestId });
+}
+
+/**
+ * Connect to a machine by address.
+ *
+ * `address` must be the canonical form from `parseAddress`: it is the key the other
+ * machine pins on, so a different spelling of the same address is a different machine
+ * as far as its "always allow" list is concerned.
+ */
+export function connectToAddress(
+  address: string,
+  unattendedPassword: string | null,
+): Promise<ConnectionState> {
+  return call('connect_to_address', connectionStateSchema, { address, unattendedPassword });
+}
+
+/** Machines connected to before, most recent first. */
+export function listRecent(): Promise<Recent[]> {
+  return call('list_recent', z.array(recentSchema));
+}
+
+/** Forget a machine from the outgoing history. */
+export function removeRecent(address: string): Promise<null> {
+  return call('remove_recent', z.null(), { address });
+}
+
+/** This machine's settings. */
+export function getHostSettings(): Promise<Settings> {
+  return call('host_settings', settingsSchema);
+}
+
+/**
+ * Set or clear the unattended-access password.
+ *
+ * Passing `null` clears it, and clearing it also clears what it granted — the backend
+ * writes both together so a password can never be removed while leaving permissions
+ * behind for the next one.
+ */
+export function setUnattendedPassword(
+  password: string | null,
+  permissions: Permission[],
+): Promise<null> {
+  return call('set_unattended_password', z.null(), { password, permissions });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Trust, history and inbound sessions                                        */
+/* -------------------------------------------------------------------------- */
+
+/** A device this machine trusts. */
+export const trustedDeviceSchema = z.object({
+  identityFingerprint: fingerprintSchema,
+  deviceId: z.string().min(1),
+  displayName: untrustedText(64),
+  osFamily: untrustedText(32),
+  lastAddress: z.string().min(1).nullable(),
+  addedMs: z.number().int(),
+  lastConnectedMs: z.number().int().nullable(),
+  unattended: z.boolean(),
+  suspended: z.boolean(),
+  permissions: z.array(permissionSchema),
+});
+
+export type TrustedDevice = z.infer<typeof trustedDeviceSchema>;
+
+/** One recorded session or refused connection. */
+export const sessionRecordSchema = z.object({
+  id: z.number().int(),
+  sessionId: z.string().min(1).nullable(),
+  identityFingerprint: fingerprintSchema.nullable(),
+  deviceName: untrustedText(64),
+  direction: z.enum(['incoming', 'outgoing']),
+  address: z.string().min(1),
+  startedMs: z.number().int(),
+  endedMs: z.number().int().nullable(),
+  permissions: z.array(permissionSchema),
+  outcome: z.enum(['completed', 'refused', 'failed']),
+  endReason: untrustedText(64).nullable(),
+});
+
+export type SessionRecord = z.infer<typeof sessionRecordSchema>;
+
+/** A session controlling this machine right now. */
+export const inboundSessionSchema = z.object({
+  sessionId: z.string().min(1),
+  identityFingerprint: fingerprintSchema,
+  deviceName: untrustedText(64),
+  address: z.string().min(1),
+  permissions: z.array(permissionSchema),
+  startedMs: z.number().int(),
+});
+
+export type InboundSession = z.infer<typeof inboundSessionSchema>;
+
+/** Whether a reachability probe found something answering. */
+export const presenceSchema = z.enum(['online', 'offline', 'checking']);
+export type Presence = z.infer<typeof presenceSchema>;
+
+/** Devices this machine trusts, most recently connected first. */
+export function listTrustedDevices(): Promise<TrustedDevice[]> {
+  return call('list_trusted_devices', z.array(trustedDeviceSchema));
+}
+
+/** Replace what an admitted session from this device receives. */
+export function setDevicePermissions(identity: string, permissions: Permission[]): Promise<null> {
+  return call('set_device_permissions', z.null(), { identity, permissions });
+}
+
+/** Allow or stop this device connecting without anyone approving. */
+export function setDeviceUnattended(identity: string, enabled: boolean): Promise<null> {
+  return call('set_device_unattended', z.null(), { identity, enabled });
+}
+
+/** Temporarily refuse a trusted device without forgetting it. */
+export function setDeviceSuspended(identity: string, suspended: boolean): Promise<null> {
+  return call('set_device_suspended', z.null(), { identity, suspended });
+}
+
+/** Forget a trusted device. */
+export function revokeDevice(identity: string): Promise<null> {
+  return call('revoke_device', z.null(), { identity });
+}
+
+/**
+ * Whether anything answers at `address`.
+ *
+ * The probe drops the connection before Authenticate, so the far side never raises a
+ * prompt, never records a session and never counts an unattended-password attempt.
+ */
+export function probeDevice(address: string): Promise<Exclude<Presence, 'checking'>> {
+  return call('probe_device', z.enum(['online', 'offline']), { address });
+}
+
+/** Recorded sessions and refusals on this machine, most recent first. */
+export function listSessionHistory(): Promise<SessionRecord[]> {
+  return call('list_session_history', z.array(sessionRecordSchema));
+}
+
+/** Sessions controlling this machine right now. */
+export function listInboundSessions(): Promise<InboundSession[]> {
+  return call('inbound_sessions', z.array(inboundSessionSchema));
+}
+
+/** End one inbound session. Returns whether that session was still live. */
+export function disconnectInbound(sessionId: string): Promise<boolean> {
+  return call('disconnect_inbound', z.boolean(), { sessionId });
+}
+
+/**
+ * End every inbound session and stop accepting.
+ *
+ * Closes the door as well as the sessions: ending them while still accepting would let
+ * an unattended device return immediately.
+ */
+export function emergencyDisconnect(): Promise<number> {
+  return call('emergency_disconnect', z.number().int().nonnegative());
 }

@@ -93,8 +93,6 @@ pub struct NetworkConfig {
     pub listen_address: IpAddr,
     /// UDP port for QUIC.
     pub listen_port: u16,
-    /// Whether to advertise the agent over mDNS on the local network.
-    pub discovery_enabled: bool,
     /// Whether to register with a coordination server for connections from outside
     /// the LAN. Off by default: remote reachability must be a deliberate choice.
     pub remote_access_enabled: bool,
@@ -119,7 +117,6 @@ impl Default for NetworkConfig {
             listen_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             listen_port: rc_protocol::DEFAULT_AGENT_PORT,
             health_port: rc_protocol::DEFAULT_AGENT_HEALTH_PORT,
-            discovery_enabled: true,
             remote_access_enabled: false,
             coordination_url: None,
             relay_url: None,
@@ -162,16 +159,10 @@ impl Default for SessionConfig {
 pub struct FeatureConfig {
     /// Allow screen capture and input injection.
     pub remote_desktop: bool,
-    /// Allow PTY sessions.
-    pub terminal: bool,
     /// Allow file browsing and transfer.
     pub file_transfer: bool,
     /// Allow process termination.
     pub process_management: bool,
-    /// Allow service control.
-    pub service_management: bool,
-    /// Allow power actions.
-    pub power_control: bool,
     /// Allow clipboard synchronisation.
     pub clipboard_sync: bool,
     /// Roots the file manager is confined to. Empty means the whole filesystem, which
@@ -185,11 +176,8 @@ impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
             remote_desktop: true,
-            terminal: true,
             file_transfer: true,
             process_management: true,
-            service_management: true,
-            power_control: true,
             clipboard_sync: true,
             file_transfer_roots: Vec::new(),
             max_transfer_bytes: 64 * 1024 * 1024 * 1024,
@@ -374,6 +362,17 @@ impl AgentConfig {
         if let Some(url) = &self.network.relay_url {
             validate_url(url, "network.relay_url")?;
         }
+
+        self.validate_session_and_features()?;
+        Ok(())
+    }
+
+    /// The second half of validation: session lifetimes and feature limits.
+    ///
+    /// Split from [`AgentConfig::validate`] only for length; the two are always run
+    /// together and neither is meaningful alone.
+    fn validate_session_and_features(&self) -> Result<(), ConfigError> {
+        let invalid = |field, reason| Err(ConfigError::Invalid { field, reason });
 
         if self.session.access_token_ttl_secs == 0 {
             return invalid("session.access_token_ttl_secs", "must be greater than 0");
@@ -655,7 +654,7 @@ mod tests {
         let config = AgentConfig {
             device_name: "home-server".into(),
             features: FeatureConfig {
-                terminal: false,
+                remote_desktop: false,
                 ..FeatureConfig::default()
             },
             ..AgentConfig::default()

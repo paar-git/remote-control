@@ -14,7 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ProtocolError, Result};
 
 /// Protocol version implemented by this build.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+///
+/// `1.1` added the `Administer` permission bit and the trust-management requests it
+/// gates. The bump is minor rather than major because the additions are ignorable: an
+/// older peer never sends them, and a permission set carrying the new bit is *refused*
+/// by `PermissionSet::from_bits` rather than silently masked, so the two builds cannot
+/// end up reading the same bits as different grants.
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 
 /// A `major.minor` protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

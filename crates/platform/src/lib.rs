@@ -9,9 +9,6 @@
 //!
 //! * [`paths`] — where configuration, data and logs live on each OS.
 //! * [`host`] — facts about the machine.
-//! * [`privileged`] — the closed allowlist of privileged commands. Read the module
-//!   docs before adding anything: the injection-resistance argument depends on the
-//!   rules described there.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
@@ -19,12 +16,10 @@
 pub mod error;
 pub mod host;
 pub mod paths;
-pub mod privileged;
 
 pub use error::{PlatformError, Result};
-pub use host::HostInfo;
+pub use host::{HostInfo, reachable_addresses};
 pub use paths::AppPaths;
-pub use privileged::PrivilegedCommand;
 
 /// Whether the current process is running with Administrator / root privileges.
 ///

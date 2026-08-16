@@ -1,9 +1,9 @@
 {
   "name": "remote-control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Private remote-access platform: host agent, desktop client and optional coordination service.",
+  "description": "Private remote-access platform: host agent and desktop client.",
   "license": "MIT OR Apache-2.0",
   "packageManager": "pnpm@11.1.1",
   "engines": {
@@ -20,9 +20,14 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "rust:fmt": "cargo fmt --all",
+    "rust:fmt:check": "cargo fmt --all -- --check",
     "rust:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "rust:test": "cargo test --workspace",
-    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:run && pnpm rust:lint && pnpm rust:test"
+    "verify": "pnpm version:check && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:run && pnpm release:smoke && pnpm rust:fmt:check && pnpm rust:lint && pnpm rust:test",
+    "version:check": "node scripts/check-version-sync.mjs",
+    "release:smoke": "node scripts/smoke-release-pipeline.mjs",
+    "release:manifest": "node scripts/generate-release-manifest.mjs",
+    "release:index": "node scripts/generate-release-index.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

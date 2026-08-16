@@ -2,64 +2,135 @@
 //!
 //! # Why there is a second handshake at all
 //!
-//! TLS answers "which key is on the other end". It cannot answer "is that key still
-//! trusted", because revocation happens in a database long after a certificate was
-//! pinned. A connection that relied on the TLS result alone would only notice a
-//! revocation if the certificate happened to change — which is to say, never.
-//!
-//! So the agent runs this exchange on the control channel and, before admitting the
-//! peer, performs a **fresh** trust lookup against the authoritative store:
+//! TLS answers "which key is on the other end". It cannot answer "may that key have a
+//! session", because that is a decision the machine being controlled makes — and, in
+//! this design, one its user makes by hand. So the agent runs an exchange on the
+//! control channel and decides, per connection, whether to admit the peer:
 //!
 //! ```text
 //!   client                                    agent
 //!     │──── Hello ─────────────────────────────►│
-//!     │                                          ├─ observed fingerprint from TLS
-//!     │                                          ├─ TrustDirectory::authorize()
-//!     │                                          │    unknown?  → reject
-//!     │                                          │    revoked?  → reject
-//!     │                                          │    changed fingerprint? → reject
+//!     │                                          ├─ version and role checks
 //!     │◄──── HelloAck ──── or ──── Reject ───────│
+//!     │──── Authenticate ───────────────────────►│
+//!     │                                          ├─ observed fingerprint from TLS
+//!     │                                          ├─ admission decision
+//!     │◄──── SessionAuthorization ────────────────│
 //! ```
 //!
-//! # The lookup is by observed fingerprint, never by claim
+//! [`HelloAck`] is sent to every peer that passes the version and role checks; it is
+//! not an admission decision. The admission decision — whether this peer may actually
+//! hold a session, and with what permissions — is made only after [`Authenticate`]
+//! arrives, and is reported back as a [`SessionAuthorization`]. Splitting the two is
+//! what lets the password (if any) travel inside the already-authenticated exchange
+//! rather than inside [`Hello`], which a peer sends before it has seen who it is
+//! talking to.
 //!
-//! [`Hello`] carries a device id, but that value is *asserted by the peer*. The
-//! authorization decision uses the certificate fingerprint recorded by the TLS verifier
-//! ([`crate::tls::ObservedPeer`]). The claimed id is compared against the record found
-//! that way and a mismatch is a rejection — the claim is never what performs the lookup.
+//! Because [`HelloAck`] precedes the decision, it carries the negotiated version and
+//! nothing else. Everything that identifies this machine — its name, hostname, OS and
+//! application versions, device id, capabilities and the session id — rides on
+//! [`SessionAuthorization::Granted`], which only an admitted peer ever sees. Otherwise
+//! anyone able to reach the port could fingerprint the machine and then be dismissed,
+//! having learned everything anyway.
 //!
-//! # Rejections are uniform
+//! # The decision is made from the observed certificate, never from a claim
 //!
-//! Unknown, revoked and fingerprint-changed all produce the identical
-//! [`RejectReason::NotAuthorized`]. The precise cause is recorded locally through
-//! [`RejectionCause`]. Distinguishing them on the wire would let anyone who can reach
-//! the port enumerate which devices an agent knows.
+//! [`Hello`] carries a device id, but that value is *asserted by the peer*. Any
+//! admission decision uses the [`PeerIdentity`] built from the certificate the peer
+//! actually presented, which it proved possession of by completing TLS. The claimed id
+//! is never what performs a lookup — it is display text.
+//!
+//! # This crate does not decide; it carries the decision
+//!
+//! The rule for *what* to admit — a pinned peer, an unattended password, or a human
+//! answering a prompt — lives in `rc-host-agent`'s `access` module, which this crate
+//! must not depend on. [`finish_accept`] and [`accept_handshake`] instead take an
+//! `authorize` callback supplied by the caller, and carry only [`HandshakeAuthorization`]
+//! — the coarse two-way outcome (granted permissions, or a [`WireRefusal`] safe to tell
+//! the peer) — across the boundary.
+//!
+//! # Refusals are coarse on the wire
+//!
+//! What the peer is told is exactly [`WireRefusal`]; the caller's finer-grained local
+//! reason is never sent. See that type's documentation for why.
+
+use std::future::Future;
 
 use rc_protocol::control::{
-    Capabilities, DeviceDescriptor, Hello, HelloAck, Opening, PeerRole, Reject, RejectReason,
+    Authenticate, Capabilities, DeviceDescriptor, Hello, HelloAck, Opening, PeerRole, Reject,
+    RejectReason, SessionAuthorization, WirePermissions, WireRefusal,
 };
 use rc_protocol::frame::Channel;
 use rc_protocol::{DeviceId, ProtocolVersion, SessionId};
-use rc_security::{Fingerprint, Role};
+use rc_security::{Fingerprint, PermissionSet};
 
+use crate::PeerAddress;
 use crate::channel::{ChannelReader, ChannelWriter};
-use crate::error::{RejectionCause, Result, TransportError};
+use crate::error::{Result, TransportError};
 
 /// How long a peer has to complete the application handshake.
 ///
 /// A connection that has completed TLS but sends nothing consumes agent resources. The
-/// deadline is generous for a slow link and still bounded.
+/// deadline is generous for a slow link and still bounded. It is applied to each leg of
+/// the exchange separately (`Hello`, then `Authenticate`), rather than once for the
+/// whole handshake, so a peer that is merely slow to decide on a password is not
+/// penalised for time already spent completing an earlier leg.
 pub const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
+
+/// Who a peer is, established from the certificate it actually presented.
+///
+/// Built only by [`PeerIdentity::from_certificate_der`], from the DER the TLS layer
+/// recorded for this connection — never from a message body. A peer that could name its
+/// own identity could name someone else's, and that property is what makes every trust
+/// decision downstream sound.
+///
+/// The three values are not interchangeable:
+///
+/// | Field | Derived from | Changes on renewal? |
+/// |---|---|---|
+/// | `certificate_fingerprint` | the certificate DER | yes |
+/// | `identity_fingerprint` | the identity public key | **no** — the trust key |
+/// | `device_id` | the identity public key | no |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIdentity {
+    /// Fingerprint of the certificate presented on this connection.
+    pub certificate_fingerprint: Fingerprint,
+    /// Fingerprint of the identity key behind it. **The trust key.**
+    pub identity_fingerprint: Fingerprint,
+    /// Stable id derived from the same identity key.
+    pub device_id: DeviceId,
+}
+
+impl PeerIdentity {
+    /// Establish a peer's identity from the certificate it presented.
+    ///
+    /// # Errors
+    /// Propagates [`rc_security::SecurityError::MalformedIdentity`] when the certificate
+    /// carries no Ed25519 identity key. Such a connection must be refused rather than
+    /// admitted under an invented identity — see [`rc_security::certificate`].
+    pub fn from_certificate_der(der: &[u8]) -> rc_security::Result<Self> {
+        let key = rc_security::identity_key_of_certificate(der)?;
+        Ok(Self {
+            certificate_fingerprint: Fingerprint::of_certificate_der(der),
+            identity_fingerprint: Fingerprint::of_public_key(&key),
+            device_id: rc_security::derive_device_id(&key),
+        })
+    }
+}
 
 /// What the agent learned about an admitted peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPeer {
-    /// The trusted device's id, taken from the **stored record**, not the peer's claim.
+    /// Stable identifier derived from the peer's **identity** key, so the same device
+    /// keeps the same id across certificate renewal. It was once derived from the
+    /// certificate fingerprint, which meant it changed whenever the certificate did.
     pub device_id: DeviceId,
+    /// The identity the peer proved by completing TLS. The key trust is stored under.
+    pub identity_fingerprint: Fingerprint,
     /// Name to show in the UI. Untrusted text; sanitise before rendering.
     pub display_name: String,
-    /// Role recorded for this device.
-    pub role: Role,
+    /// Permissions this session was admitted with.
+    pub permissions: PermissionSet,
     /// Certificate fingerprint observed on this connection.
     pub certificate_fingerprint: Fingerprint,
     /// Version both peers agreed on.
@@ -70,75 +141,19 @@ pub struct AuthenticatedPeer {
     pub session_id: SessionId,
 }
 
-/// A trusted device as the authorization store sees it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustRecord {
-    /// Stored device id.
-    pub device_id: DeviceId,
-    /// Stored display name.
-    pub display_name: String,
-    /// Stored role.
-    pub role: Role,
-    /// Whether trust has been revoked.
-    pub revoked: bool,
-    /// The certificate fingerprint last recorded for this device.
-    pub certificate_fingerprint: Fingerprint,
-}
-
-/// The authorization store, as the transport needs to see it.
+/// What the caller of [`finish_accept`] decided about a candidate connection, once its
+/// identity and any offered credential are known.
 ///
-/// Defined as a trait so the transport does not depend on `rc-storage`, and so the
-/// handshake can be tested exhaustively — including revocation races — without a
-/// database. The agent supplies the real implementation over its trust repository.
-///
-/// Implementations **must** read through to the authoritative store on every call.
-/// Caching here would reintroduce exactly the staleness this layer exists to prevent.
-#[async_trait::async_trait]
-pub trait TrustDirectory: Send + Sync {
-    /// Look a device up by the certificate fingerprint observed on the connection.
-    ///
-    /// Returns `None` when no device matches, and also when the store cannot be read —
-    /// a directory that cannot answer must not admit anyone. Implementations log the
-    /// underlying failure; it is deliberately not distinguishable here, because every
-    /// caller would have to treat it as a refusal anyway.
-    async fn find_by_certificate(&self, fingerprint: Fingerprint) -> Option<TrustRecord>;
-}
-
-/// Decide whether an observed peer may be admitted.
-///
-/// Separated from the message exchange so the decision can be tested directly, and so
-/// there is exactly one place where admission is decided.
-///
-/// # Errors
-/// Never returns `Err`; the decision is expressed as `Result<TrustRecord, RejectionCause>`.
-pub async fn authorize(
-    directory: &dyn TrustDirectory,
-    observed: Fingerprint,
-    claimed_device_id: DeviceId,
-) -> std::result::Result<TrustRecord, RejectionCause> {
-    // The lookup key is what TLS observed, never what the peer claimed.
-    let Some(record) = directory.find_by_certificate(observed).await else {
-        return Err(RejectionCause::UnknownDevice);
-    };
-
-    // Checked on every connection, against the live store. This is the revocation
-    // re-check that the whole two-stage handshake exists to make possible.
-    if record.revoked {
-        return Err(RejectionCause::RevokedDevice(record.device_id));
-    }
-
-    // A peer holding a trusted certificate but claiming a different id is either
-    // confused or probing. Either way it is not admitted under the claimed id.
-    if record.device_id != claimed_device_id {
-        return Err(RejectionCause::FingerprintChanged(record.device_id));
-    }
-
-    // Defensive: the record must be the one the fingerprint selected.
-    if !record.certificate_fingerprint.ct_eq(&observed) {
-        return Err(RejectionCause::FingerprintChanged(record.device_id));
-    }
-
-    Ok(record)
+/// This is the entire boundary between this crate and whatever decides admission
+/// (`rc-host-agent`'s `access` module, in production). It carries only what is safe and
+/// necessary to cross that boundary: the granted [`PermissionSet`] or a [`WireRefusal`]
+/// safe to disclose to the peer — never the caller's finer-grained local reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeAuthorization {
+    /// Admit the peer, holding exactly these permissions for the whole session.
+    Granted(PermissionSet),
+    /// Refuse, for a reason safe to disclose to the peer.
+    Refused(WireRefusal),
 }
 
 /// Whether two protocol versions can talk to each other.
@@ -165,39 +180,49 @@ pub const fn negotiate(ours: ProtocolVersion, theirs: ProtocolVersion) -> Protoc
 
 /// Run the agent's side of the handshake.
 ///
-/// `observed` is the fingerprint the TLS verifier recorded for this connection. Passing
-/// anything else — in particular anything from the peer's message — defeats the point.
+/// `observed` is the [`PeerIdentity`] built from the certificate the TLS layer recorded
+/// for this connection. Passing anything else — in particular anything derived from the
+/// peer's message — defeats the point.
+///
+/// `authorize` is called once, after `Authenticate` arrives, with that identity, the
+/// peer's self-reported machine name (from [`Hello`], untrusted) and
+/// any unattended password it offered. It decides admission; this function only carries
+/// the decision to the peer and, on success, builds the [`AuthenticatedPeer`] the caller
+/// runs the session against.
 ///
 /// # Errors
-/// [`TransportError::NotTrusted`] when the peer is refused, after a `Reject` has been
-/// sent. [`TransportError::HandshakeTimeout`] if the peer does not send a `Hello` in
-/// time.
-pub async fn accept_handshake(
+/// [`TransportError::SessionRefused`] when `authorize` refuses the peer, after a
+/// [`SessionAuthorization::Refused`] has been sent. [`TransportError::HandshakeTimeout`]
+/// if the peer does not complete its side in time.
+pub async fn accept_handshake<F, Fut>(
     reader: &mut ChannelReader,
     writer: &mut ChannelWriter,
-    directory: &dyn TrustDirectory,
-    observed: Fingerprint,
+    observed: PeerIdentity,
     agent_descriptor: DeviceDescriptor,
     agent_capabilities: Capabilities,
     now_ms: i64,
-) -> Result<AuthenticatedPeer> {
-    // A pairing exchange arriving here means the caller routed the connection wrongly:
-    // the agent decides which connections may pair, and a session handshake is not
-    // that path.
+    authorize: F,
+) -> Result<AuthenticatedPeer>
+where
+    F: FnOnce(PeerIdentity, PeerAddress, String, Option<String>) -> Fut + Send,
+    Fut: Future<Output = HandshakeAuthorization> + Send,
+{
     let Opening::Hello(hello) = read_opening(reader).await? else {
+        // `Opening` is `#[non_exhaustive]`: an opening from a newer peer that this build
+        // does not know is refused, not approximated.
         send_reject(writer, RejectReason::BadRequest).await;
         return Err(TransportError::UnexpectedMessage { expected: "Hello" });
     };
-    let hello = *hello;
 
     finish_accept(
+        reader,
         writer,
-        directory,
         observed,
-        hello,
+        *hello,
         agent_descriptor,
         agent_capabilities,
         now_ms,
+        authorize,
     )
     .await
 }
@@ -213,30 +238,31 @@ pub async fn read_opening(reader: &mut ChannelReader) -> Result<Opening> {
     tokio::time::timeout(deadline, reader.next_message())
         .await
         .map_err(|_| TransportError::HandshakeTimeout)?
-        .and_then(|message| {
-            message.ok_or(TransportError::UnexpectedMessage {
-                expected: "Hello or Pairing",
-            })
-        })
+        .and_then(|message| message.ok_or(TransportError::UnexpectedMessage { expected: "Hello" }))
 }
 
-/// Authorize an already-read [`Hello`] and reply.
+/// Check an already-read [`Hello`], acknowledge it, then read [`Authenticate`] and
+/// decide whether to admit the peer.
 ///
 /// Split out from [`accept_handshake`] so an agent that has already consumed the
-/// opening — to decide whether the connection is pairing or a session — can finish the
-/// session path without reading a second one.
+/// opening can finish without reading a second one.
 ///
 /// # Errors
 /// As [`accept_handshake`].
-pub async fn finish_accept(
+pub async fn finish_accept<F, Fut>(
+    reader: &mut ChannelReader,
     writer: &mut ChannelWriter,
-    directory: &dyn TrustDirectory,
-    observed: Fingerprint,
+    observed: PeerIdentity,
     hello: Hello,
     agent_descriptor: DeviceDescriptor,
     agent_capabilities: Capabilities,
     now_ms: i64,
-) -> Result<AuthenticatedPeer> {
+    authorize: F,
+) -> Result<AuthenticatedPeer>
+where
+    F: FnOnce(PeerIdentity, PeerAddress, String, Option<String>) -> Fut + Send,
+    Fut: Future<Output = HandshakeAuthorization> + Send,
+{
     // A client that announces itself as an agent is not something to accommodate.
     if hello.role != PeerRole::Client {
         send_reject(writer, RejectReason::BadRequest).await;
@@ -255,52 +281,93 @@ pub async fn finish_accept(
         return Err(TransportError::IncompatibleVersion);
     }
 
-    let record = match authorize(directory, observed, hello.descriptor.device_id).await {
-        Ok(record) => record,
-        Err(cause) => {
-            // Precise locally, uniform on the wire.
-            tracing::warn!(
-                cause = cause.name(),
-                observed = %observed,
-                "refusing a connection"
-            );
-            send_reject(writer, RejectReason::NotAuthorized).await;
-            return Err(cause.wire_error());
-        }
-    };
-
     let negotiated_version = negotiate(rc_protocol::CURRENT_VERSION, hello.version);
     let session_id = SessionId::generate();
 
+    // Sent to every peer that passes the checks above, which under trust-on-first-use
+    // is anyone who can reach the port. It therefore carries the negotiated version and
+    // nothing else — see [`HelloAck`]. Everything identifying this machine waits for
+    // the admission decision below.
     writer
-        .send(&HelloAck {
-            negotiated_version,
-            descriptor: agent_descriptor,
-            capabilities: agent_capabilities,
-            sent_at_ms: now_ms,
-            already_paired: true,
-            session_id,
-            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-        })
+        .send(&HelloAck::for_version(negotiated_version))
         .await?;
 
-    tracing::info!(
-        device_id = %record.device_id,
-        session_id = %session_id,
-        role = record.role.name(),
-        version = %negotiated_version,
-        "client authenticated"
-    );
+    let authenticate = read_authenticate(reader).await?;
+    let Ok(dialed_address) = authenticate.dialed_address.parse::<PeerAddress>() else {
+        tracing::warn!("refusing a connection with an invalid dialed address");
+        send_session_refusal(writer, WireRefusal::Rejected).await;
+        return Err(TransportError::UnexpectedMessage {
+            expected: "Authenticate with a valid dialed address",
+        });
+    };
 
-    Ok(AuthenticatedPeer {
-        device_id: record.device_id,
-        display_name: record.display_name,
-        role: record.role,
-        certificate_fingerprint: observed,
-        negotiated_version,
-        capabilities: hello.capabilities,
-        session_id,
-    })
+    let outcome = authorize(
+        observed,
+        dialed_address,
+        hello.descriptor.display_name.clone(),
+        authenticate.unattended_password,
+    )
+    .await;
+
+    match outcome {
+        HandshakeAuthorization::Granted(permissions) => {
+            writer
+                .send(&SessionAuthorization::Granted {
+                    permissions: to_wire_permissions(permissions),
+                    descriptor: Box::new(agent_descriptor),
+                    capabilities: agent_capabilities,
+                    sent_at_ms: now_ms,
+                    session_id,
+                    idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+                })
+                .await?;
+
+            tracing::info!(
+                session_id = %session_id,
+                version = %negotiated_version,
+                "client authenticated"
+            );
+
+            Ok(AuthenticatedPeer {
+                device_id: observed.device_id,
+                identity_fingerprint: observed.identity_fingerprint,
+                display_name: hello.descriptor.display_name,
+                permissions,
+                certificate_fingerprint: observed.certificate_fingerprint,
+                negotiated_version,
+                capabilities: hello.capabilities,
+                session_id,
+            })
+        }
+        HandshakeAuthorization::Refused(reason) => {
+            tracing::warn!(
+                identity = %observed.identity_fingerprint,
+                reason = ?reason,
+                "refusing a connection after authentication"
+            );
+            send_session_refusal(writer, reason).await;
+            Err(TransportError::SessionRefused { reason })
+        }
+    }
+}
+
+/// Read the [`Authenticate`] frame, bounded by its own handshake deadline.
+///
+/// # Errors
+/// [`TransportError::HandshakeTimeout`] if nothing arrives in time, or
+/// [`TransportError::UnexpectedMessage`] if the stream ends first or sends something
+/// else.
+async fn read_authenticate(reader: &mut ChannelReader) -> Result<Authenticate> {
+    let deadline = std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
+
+    tokio::time::timeout(deadline, reader.next_message())
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout)?
+        .and_then(|message| {
+            message.ok_or(TransportError::UnexpectedMessage {
+                expected: "Authenticate",
+            })
+        })
 }
 
 /// Idle seconds after which the agent ends a session.
@@ -310,18 +377,48 @@ pub async fn finish_accept(
 /// keep-alives while a stream is active — and short enough to matter.
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u32 = 1800;
 
+/// What the initiator learns once the responder has decided.
+///
+/// Every field here arrives on [`SessionAuthorization::Granted`], not on the
+/// acknowledgement: a peer that is refused learns none of it. That is why there is no
+/// way to build one of these from a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedSession {
+    /// The responder's identity. Its `display_name` is the machine name to show in the
+    /// initiator's Recent list.
+    pub descriptor: DeviceDescriptor,
+    /// What the responder can do.
+    pub capabilities: Capabilities,
+    /// The permissions this session was granted. Fixed for the session's lifetime.
+    pub permissions: PermissionSet,
+    /// The responder's wall-clock time in milliseconds since the Unix epoch.
+    pub sent_at_ms: i64,
+    /// Identifier assigned to this session, for correlating the two sides' logs.
+    pub session_id: SessionId,
+    /// Seconds of inactivity after which the responder will end the session, or `0`
+    /// when no idle timeout applies.
+    pub idle_timeout_secs: u32,
+}
+
 /// Run the client's side of the handshake.
 ///
+/// `unattended_password` is sent inside [`Authenticate`], after [`HelloAck`] — never
+/// inside [`Hello`] itself, which is sent before the peer has been seen at all.
+///
 /// # Errors
-/// [`TransportError::NotTrusted`] if the agent refuses, or
-/// [`TransportError::IncompatibleVersion`] on a version mismatch.
+/// [`TransportError::SessionRefused`] if the agent refuses after authenticating,
+/// [`TransportError::NotTrusted`] if it refuses before that,
+/// [`TransportError::IncompatibleVersion`] on a version mismatch, or
+/// [`TransportError::HandshakeTimeout`] if either leg does not complete in time.
 pub async fn begin_handshake(
     reader: &mut ChannelReader,
     writer: &mut ChannelWriter,
     descriptor: DeviceDescriptor,
     capabilities: Capabilities,
+    dialed_address: PeerAddress,
+    unattended_password: Option<String>,
     now_ms: i64,
-) -> Result<HelloAck> {
+) -> Result<AdmittedSession> {
     writer
         .send(&Opening::Hello(Box::new(Hello {
             version: rc_protocol::CURRENT_VERSION,
@@ -342,14 +439,12 @@ pub async fn begin_handshake(
             })
         })?;
 
-    // The agent replies with either an ack or a rejection; both arrive here.
+    // The agent replies with either an ack or a rejection; both arrive here. The ack
+    // says only that the versions are compatible, so nothing is kept from it.
     if let Ok(ack) = frame.decode_body::<HelloAck>()
         && versions_compatible(rc_protocol::CURRENT_VERSION, ack.negotiated_version)
     {
-        return Ok(ack);
-    }
-
-    if let Ok(reject) = frame.decode_body::<Reject>() {
+    } else if let Ok(reject) = frame.decode_body::<Reject>() {
         return Err(match reject.reason {
             RejectReason::IncompatibleVersion => TransportError::IncompatibleVersion,
             RejectReason::RateLimited => TransportError::Throttled {
@@ -363,11 +458,71 @@ pub async fn begin_handshake(
                 reason: "the agent refused the connection".to_owned(),
             },
         });
+    } else {
+        return Err(TransportError::UnexpectedMessage {
+            expected: "HelloAck",
+        });
     }
 
-    Err(TransportError::UnexpectedMessage {
-        expected: "HelloAck",
-    })
+    writer
+        .send(&Authenticate {
+            dialed_address: dialed_address.to_string(),
+            unattended_password,
+        })
+        .await?;
+
+    let authorization: SessionAuthorization = tokio::time::timeout(deadline, reader.next_message())
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout)?
+        .and_then(|message| {
+            message.ok_or(TransportError::UnexpectedMessage {
+                expected: "SessionAuthorization",
+            })
+        })?;
+
+    match authorization {
+        SessionAuthorization::Granted {
+            permissions,
+            descriptor,
+            capabilities,
+            sent_at_ms,
+            session_id,
+            idle_timeout_secs,
+        } => {
+            let permissions =
+                from_wire_permissions(permissions).ok_or(TransportError::UnknownPermissions)?;
+            Ok(AdmittedSession {
+                descriptor: *descriptor,
+                capabilities,
+                permissions,
+                sent_at_ms,
+                session_id,
+                idle_timeout_secs,
+            })
+        }
+        SessionAuthorization::Refused { reason } => Err(TransportError::SessionRefused { reason }),
+        // `SessionAuthorization` is `#[non_exhaustive]`: a variant from a newer agent
+        // that this build does not know is treated as a plain refusal, not guessed at.
+        _ => Err(TransportError::UnexpectedMessage {
+            expected: "a recognised SessionAuthorization",
+        }),
+    }
+}
+
+/// Convert a granted permission set to its wire representation.
+///
+/// A plain function rather than a `From` impl: neither [`PermissionSet`] nor
+/// [`WirePermissions`] is local to this crate, so implementing a foreign trait between
+/// two foreign types would violate the orphan rules. See [`WirePermissions`]'s
+/// documentation for why the two types are kept separate at all.
+const fn to_wire_permissions(permissions: PermissionSet) -> WirePermissions {
+    WirePermissions(permissions.bits())
+}
+
+/// Convert a wire permission set back, refusing rather than masking any bit this build
+/// does not recognise. See [`PermissionSet::from_bits`].
+fn from_wire_permissions(permissions: WirePermissions) -> Option<PermissionSet> {
+    PermissionSet::from_bits(permissions.0)
 }
 
 /// Send a rejection, ignoring a write failure — the connection is ending anyway.
@@ -381,194 +536,76 @@ async fn send_reject(writer: &mut ChannelWriter, reason: RejectReason) {
     }
 }
 
+/// Tell the peer it was refused, ignoring a write failure — the connection is ending
+/// anyway.
+///
+/// Only [`WireRefusal`] crosses this boundary; the caller's finer-grained local reason
+/// stays local. See [`WireRefusal`] for why.
+async fn send_session_refusal(writer: &mut ChannelWriter, reason: WireRefusal) {
+    if let Err(err) = writer.send(&SessionAuthorization::Refused { reason }).await {
+        tracing::debug!(%err, "could not deliver a session refusal");
+        return;
+    }
+    // Finished, not merely written. The caller tears the connection down as soon as this
+    // returns, and unfinished stream data goes with it — the peer would then see a lost
+    // connection rather than a refusal. That matters beyond tidiness: a lost connection
+    // is retryable and a refusal is not, so the peer would reconnect in a loop against a
+    // machine that had already said no.
+    if let Err(err) = writer.finish() {
+        tracing::debug!(%err, "could not finish the stream carrying a session refusal");
+    }
+}
+
 /// The control channel both sides use for this exchange.
 pub const HANDSHAKE_CHANNEL: Channel = Channel::Control;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    use rc_security::{DeviceIdentity, SystemClock};
-
     use super::*;
 
-    /// An in-memory directory whose contents can change between calls, so a revocation
-    /// landing mid-connection can be modelled.
-    #[derive(Debug, Default)]
-    struct FakeDirectory {
-        records: Mutex<HashMap<String, TrustRecord>>,
-    }
+    #[test]
+    fn a_peer_identity_is_derived_from_the_certificate_not_claimed_by_the_peer() {
+        let clock = rc_security::clock::TestClock::default();
+        let identity = rc_security::DeviceIdentity::generate("peer", &clock).unwrap();
+        let public = identity.public();
 
-    impl FakeDirectory {
-        fn with(record: TrustRecord) -> Self {
-            let directory = Self::default();
-            directory.insert(record);
-            directory
-        }
+        let derived = PeerIdentity::from_certificate_der(&public.certificate_der).unwrap();
 
-        fn insert(&self, record: TrustRecord) {
-            self.records
-                .lock()
-                .unwrap()
-                .insert(record.certificate_fingerprint.to_hex(), record);
-        }
-
-        fn revoke_all(&self) {
-            for record in self.records.lock().unwrap().values_mut() {
-                record.revoked = true;
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TrustDirectory for FakeDirectory {
-        async fn find_by_certificate(&self, fingerprint: Fingerprint) -> Option<TrustRecord> {
-            self.records
-                .lock()
-                .unwrap()
-                .get(&fingerprint.to_hex())
-                .cloned()
-        }
-    }
-
-    fn identity(name: &str) -> DeviceIdentity {
-        DeviceIdentity::generate(name, &SystemClock).unwrap()
-    }
-
-    fn record_for(id: &DeviceIdentity, role: Role) -> TrustRecord {
-        TrustRecord {
-            device_id: id.device_id(),
-            display_name: "Test Client".to_owned(),
-            role,
-            revoked: false,
-            certificate_fingerprint: id.public().certificate_fingerprint,
-        }
-    }
-
-    #[tokio::test]
-    async fn a_trusted_device_is_admitted() {
-        let client = identity("client");
-        let directory = FakeDirectory::with(record_for(&client, Role::Operator));
-
-        let admitted = authorize(
-            &directory,
-            client.public().certificate_fingerprint,
-            client.device_id(),
-        )
-        .await
-        .expect("a trusted device is admitted");
-
-        assert_eq!(admitted.device_id, client.device_id());
-        assert_eq!(admitted.role, Role::Operator);
-    }
-
-    #[tokio::test]
-    async fn an_unknown_device_is_refused() {
-        let stranger = identity("stranger");
-        let directory = FakeDirectory::default();
-
+        assert_eq!(derived.identity_fingerprint, public.identity_fingerprint);
         assert_eq!(
-            authorize(
-                &directory,
-                stranger.public().certificate_fingerprint,
-                stranger.device_id()
-            )
-            .await,
-            Err(RejectionCause::UnknownDevice)
+            derived.certificate_fingerprint,
+            public.certificate_fingerprint
         );
-    }
-
-    #[tokio::test]
-    async fn revocation_takes_effect_on_the_very_next_connection() {
-        // The property Phase 3 must not break: revoking is immediate, not "immediate
-        // once the certificate changes" and not "once a cache expires".
-        let client = identity("client");
-        let directory = FakeDirectory::with(record_for(&client, Role::Owner));
-        let fingerprint = client.public().certificate_fingerprint;
-
-        assert!(
-            authorize(&directory, fingerprint, client.device_id())
-                .await
-                .is_ok()
-        );
-
-        directory.revoke_all();
-
         assert_eq!(
-            authorize(&directory, fingerprint, client.device_id()).await,
-            Err(RejectionCause::RevokedDevice(client.device_id())),
-            "a revoked device must be refused on its next connection"
+            derived.device_id, public.device_id,
+            "the device id must come from the identity key, so the same device always \
+             reports the same id -- deriving it from the certificate made it change on \
+             every renewal"
         );
     }
 
-    #[tokio::test]
-    async fn a_peer_claiming_someone_elses_device_id_is_refused() {
-        // The certificate is trusted, but the claimed id does not match the record it
-        // selected. Admitting under the claim would let a device impersonate another.
-        let client = identity("client");
-        let other = identity("other");
-        let directory = FakeDirectory::with(record_for(&client, Role::Operator));
+    #[test]
+    fn a_renewed_certificate_keeps_the_device_id_and_changes_only_the_credential() {
+        let clock = rc_security::clock::TestClock::default();
+        let identity = rc_security::DeviceIdentity::generate("peer", &clock).unwrap();
+        let before =
+            PeerIdentity::from_certificate_der(&identity.public().certificate_der).unwrap();
 
-        let result = authorize(
-            &directory,
-            client.public().certificate_fingerprint,
-            other.device_id(),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(RejectionCause::FingerprintChanged(_))),
-            "a mismatched claim must be refused, got {result:?}"
+        clock.advance_ms(24 * 3600 * 1000);
+        let renewed = identity.renew_certificate("peer", &clock).unwrap();
+        let after = PeerIdentity::from_certificate_der(&renewed.public().certificate_der).unwrap();
+
+        assert_eq!(after.identity_fingerprint, before.identity_fingerprint);
+        assert_eq!(after.device_id, before.device_id);
+        assert_ne!(
+            after.certificate_fingerprint, before.certificate_fingerprint,
+            "the credential is the part that rotates"
         );
     }
 
-    #[tokio::test]
-    async fn the_lookup_uses_the_observed_fingerprint_not_the_claim() {
-        // An attacker holding an untrusted certificate cannot get in by naming a
-        // trusted device's id.
-        let trusted = identity("trusted");
-        let attacker = identity("attacker");
-        let directory = FakeDirectory::with(record_for(&trusted, Role::Owner));
-
-        let result = authorize(
-            &directory,
-            attacker.public().certificate_fingerprint,
-            trusted.device_id(),
-        )
-        .await;
-        assert_eq!(
-            result,
-            Err(RejectionCause::UnknownDevice),
-            "naming a trusted id must not admit an untrusted certificate"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_record_whose_fingerprint_disagrees_is_refused() {
-        // Defensive: a store that returns a record not matching the lookup key must not
-        // be trusted to have meant it.
-        let client = identity("client");
-        let other = identity("other");
-        let mut record = record_for(&client, Role::Owner);
-        record.certificate_fingerprint = other.public().certificate_fingerprint;
-
-        let directory = FakeDirectory::default();
-        directory
-            .records
-            .lock()
-            .unwrap()
-            .insert(client.public().certificate_fingerprint.to_hex(), record);
-
-        assert!(
-            authorize(
-                &directory,
-                client.public().certificate_fingerprint,
-                client.device_id()
-            )
-            .await
-            .is_err(),
-            "an inconsistent record must not admit a peer"
-        );
+    #[test]
+    fn a_peer_identity_cannot_be_built_from_a_certificate_with_no_identity() {
+        assert!(PeerIdentity::from_certificate_der(b"not a certificate").is_err());
     }
 
     #[test]
@@ -598,42 +635,17 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn every_refusal_reports_the_same_thing_to_the_peer() {
-        let client = identity("client");
-        let stranger = identity("stranger");
+    #[test]
+    fn wire_permissions_round_trip_through_known_bits() {
+        let set = PermissionSet::ALL;
+        assert_eq!(from_wire_permissions(to_wire_permissions(set)), Some(set));
+    }
 
-        let revoked_dir = FakeDirectory::with({
-            let mut r = record_for(&client, Role::Owner);
-            r.revoked = true;
-            r
-        });
-        let empty_dir = FakeDirectory::default();
-
-        let revoked = authorize(
-            &revoked_dir,
-            client.public().certificate_fingerprint,
-            client.device_id(),
-        )
-        .await
-        .unwrap_err();
-        let unknown = authorize(
-            &empty_dir,
-            stranger.public().certificate_fingerprint,
-            stranger.device_id(),
-        )
-        .await
-        .unwrap_err();
-
-        assert_ne!(
-            revoked.name(),
-            unknown.name(),
-            "audit must distinguish them"
-        );
-        assert_eq!(
-            revoked.wire_error().to_string(),
-            unknown.wire_error().to_string(),
-            "the peer must not be able to tell them apart"
-        );
+    #[test]
+    fn an_unknown_permission_bit_is_refused_not_masked() {
+        // A peer sending a bit this build does not know must not have it silently
+        // dropped: the same wire value would then mean different things on either
+        // side.
+        assert_eq!(from_wire_permissions(WirePermissions(0b1000_0000)), None);
     }
 }

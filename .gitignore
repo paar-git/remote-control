@@ -60,3 +60,10 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Local release staging produced by scripts/, not source.
+release-dist/
+
+# Subagent-driven-development scratch: ledgers, briefs and review packages.
+# The git history is the durable record; this directory is not.
+.superpowers/

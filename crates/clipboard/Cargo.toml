@@ -1,0 +1,26 @@
+[package]
+name = "rc-clipboard"
+description = "Clipboard sharing between two machines: loop-safe sync logic and an optional OS backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# The real OS backend is off by default, exactly as `rc-input`'s `inject` is: the
+# loop-prevention logic — and every test that covers it — must build and run on a
+# machine with no desktop at all, including CI containers. Enabling this pulls in the
+# only dependency that touches the windowing system.
+default = []
+system = ["dep:arboard"]
+
+[dependencies]
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+arboard = { version = "3.4", optional = true }
+
+[lints]
+workspace = true

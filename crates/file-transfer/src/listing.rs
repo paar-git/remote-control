@@ -188,7 +188,7 @@ fn permission_string(metadata: &std::fs::Metadata) -> String {
             }
         };
 
-        return [
+        [
             bit(6, 4, 'r'),
             bit(6, 2, 'w'),
             bit(6, 1, 'x'),
@@ -200,7 +200,7 @@ fn permission_string(metadata: &std::fs::Metadata) -> String {
             bit(0, 1, 'x'),
         ]
         .into_iter()
-        .collect();
+        .collect()
     }
 
     #[cfg(not(unix))]

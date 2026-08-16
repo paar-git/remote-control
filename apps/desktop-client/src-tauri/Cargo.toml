@@ -20,14 +20,28 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-rc-protocol = { workspace = true }
+rc-host-agent = { workspace = true }
+# No `inject` feature: the client only needs the intent translation tables, never the
+# OS injection backend. Pulling `inject` in would drag enigo into a process that never
+# injects input locally.
+rc-input = { workspace = true }
+rc-clipboard = { workspace = true }
+rc-keygrab = { workspace = true }
 rc-platform = { workspace = true }
+rc-protocol = { workspace = true }
 rc-security = { workspace = true }
 rc-storage = { workspace = true }
 rc-transport = { workspace = true }
 rc-file-transfer = { workspace = true }
+rc-updater = { workspace = true }
+rc-video = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 quinn = { workspace = true }
+reqwest = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
@@ -37,6 +51,15 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `start_paused` lets the accept-timeout tests assert the timeout in milliseconds
+# instead of waiting the real thirty seconds out, twice, on every run.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+

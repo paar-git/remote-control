@@ -26,11 +26,10 @@
 //! | [`ids`] | Typed identifiers |
 //! | [`replay`] | Sliding-window replay detection |
 //! | [`control`] | Handshake, session lifecycle, errors |
-//! | [`pairing`] | First-time trust establishment |
-//! | [`terminal`] | PTY sessions |
 //! | [`files`] | Browsing and resumable transfer |
 //! | [`system`] | Metrics, processes, services, power |
-//! | [`desktop`] | Video streaming and input injection |
+//! | [`desktop`] | Video streaming and display enumeration |
+//! | [`input`] | Physical keys, logical intents and acknowledgement |
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
@@ -41,16 +40,19 @@ pub mod error;
 pub mod files;
 pub mod frame;
 pub mod ids;
+pub mod input;
 pub mod limits;
-pub mod pairing;
 pub mod replay;
 pub mod system;
-pub mod terminal;
 pub mod version;
 
 pub use error::{ProtocolError, Result};
 pub use frame::{Channel, Frame, FrameDecoder};
-pub use ids::{DeviceId, PairingSessionId, RequestId, SessionId, TerminalId, TransferId, UserId};
+pub use ids::{DeviceId, RequestId, SessionId, TransferId, UserId};
+pub use input::{
+    InputAck, InputCapability, InputEvent, InputFailure, InputMessage, Intent, KeyState, Modifiers,
+    MouseButton, PhysicalKey,
+};
 pub use version::{CURRENT_VERSION, ProtocolVersion};
 
 /// Application-Layer Protocol Negotiation identifier offered on every QUIC/TLS
@@ -59,16 +61,13 @@ pub use version::{CURRENT_VERSION, ProtocolVersion};
 pub const ALPN_PROTOCOL: &[u8] = b"rc/1";
 
 /// Default UDP port the host agent listens on for QUIC.
-pub const DEFAULT_AGENT_PORT: u16 = 47_811;
+pub const DEFAULT_AGENT_PORT: u16 = 7443;
 
 /// Default TCP port for the agent's loopback-only health endpoint.
 pub const DEFAULT_AGENT_HEALTH_PORT: u16 = 47_813;
 
 /// Default TCP port the optional coordination service listens on.
 pub const DEFAULT_COORDINATION_PORT: u16 = 47_812;
-
-/// mDNS service type used for local discovery.
-pub const MDNS_SERVICE_TYPE: &str = "_remotectl._udp.local.";
 
 /// Current wall-clock time in milliseconds since the Unix epoch.
 ///
@@ -127,11 +126,5 @@ mod tests {
         let now = now_ms();
         assert!(now > 1_577_836_800_000);
         assert!(now < 4_102_444_800_000);
-    }
-
-    #[test]
-    fn mdns_service_type_is_well_formed() {
-        assert!(MDNS_SERVICE_TYPE.starts_with('_'));
-        assert!(MDNS_SERVICE_TYPE.ends_with(".local."));
     }
 }

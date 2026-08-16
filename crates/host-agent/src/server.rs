@@ -9,26 +9,26 @@
 //!        ├─ accept the control stream
 //!        ├─ read the Opening, which states its purpose
 //!        │
-//!        ├── Opening::Hello ────► trust lookup, revocation re-check ──► session
-//!        └── Opening::Pairing ──► only while a window is open ────────► pairing
+//!        └── Opening::Hello ────► admission decision ──────────────────► session
 //! ```
 //!
 //! # Why TLS admits unknown peers here
 //!
-//! The listener pins nothing, because it serves *many* paired clients and a single pin
-//! could only ever match one of them. Admission is decided one layer up, by the
-//! handshake's trust lookup, which reads the database on every connection so a
-//! revocation takes effect on the very next attempt rather than at the next restart.
+//! The listener pins nothing, because it serves *many* clients and a single pin could
+//! only ever match one of them. Admission is decided one layer up, in the handshake.
 //!
 //! That means an unknown peer can complete a TLS handshake and open a stream. What it
-//! cannot do is anything else: it is refused at the handshake unless it is trusted, or
-//! unless the operator has deliberately opened a pairing window.
+//! cannot do is anything else until admission decides. Completing TLS proves only
+//! which key is on the other end. The handshake then asks
+//! [`crate::access::authorize_connection`]: a trusted identity, an unattended
+//! password, or a human clicking Accept. A refused peer learns only that it was
+//! refused; see [`rc_transport::handshake`].
 //!
 //! # Bounds
 //!
 //! Concurrent sessions are capped by configuration. A connection arriving over the cap
-//! is refused immediately and audited, rather than queued — a queue would let anyone
-//! who can reach the port hold agent memory.
+//! is refused immediately, rather than queued — a queue would let anyone who can reach
+//! the port hold agent memory.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,23 +36,19 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use rc_protocol::control::{
     Capabilities, ControlRequest, ControlRequestPayload, ControlResponse, ControlResponsePayload,
-    ControlResult, DeviceDescriptor, DisconnectReason, Opening,
+    ControlResult, DeviceDescriptor, DisconnectReason, Opening, WireRefusal,
 };
-use rc_protocol::pairing::PairingMessage;
-use rc_security::pairing::{PairingManager, PairingOutcome};
-use rc_security::permissions::{AuthorizationContext, Capability};
-use rc_security::{Clock, DeviceIdentity, Fingerprint, SystemClock};
-use rc_storage::audit::{AuditCategory, AuditEvent, AuditRepository, AuditResult, actions};
-use rc_storage::models::PeerRoleRow;
-use rc_storage::trust::TrustRepository;
-use rc_transport::handshake::{TrustDirectory, TrustRecord};
-use rc_transport::{
-    AgentListener, ChannelReader, ChannelWriter, PairingRecorder, PairingService, PinPolicy,
-    TransportError,
-};
+use rc_security::{Clock, DeviceIdentity, Permission, PermissionSet, SystemClock};
+use rc_storage::{SessionHistoryRepository, SettingsRepository, TrustRepository};
+use rc_transport::handshake::HandshakeAuthorization;
+use rc_transport::{AgentListener, ChannelReader, ChannelWriter, PinPolicy, TransportError};
 
+use crate::access::{
+    AcceptAnswer, AcceptDecision, AcceptPrompt, AcceptRequest, AccessDeps, Authorization,
+    ConnectionRequest, authorize_connection,
+};
 use crate::config::AgentConfig;
-use crate::sessions::{SessionRegistry, SessionSlot};
+use crate::sessions::{Session, SessionRegistry, SessionSlot};
 
 /// Everything the listener needs, assembled once at startup.
 pub struct AgentServer {
@@ -60,10 +56,6 @@ pub struct AgentServer {
     identity: Arc<DeviceIdentity>,
     /// Validated configuration.
     config: AgentConfig,
-    /// The agent's local database.
-    database: rc_storage::Database,
-    /// Open pairing windows. Shared with the `pair` command path.
-    pairing: Arc<PairingManager>,
     /// Live sessions, for the cap and for the operator's session list.
     sessions: Arc<SessionRegistry>,
     /// Time source. Injected so expiry is testable.
@@ -76,6 +68,18 @@ pub struct AgentServer {
     /// measured across an interval, so several collectors would each pay for their own
     /// process enumeration and none would agree with the others.
     metrics: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
+    /// This machine's own access settings.
+    settings: SettingsRepository,
+    /// Recently seen and pinned peer identities.
+    trust: TrustRepository,
+    trust_service: crate::TrustService,
+    history: SessionHistoryRepository,
+    /// UI boundary for human accept/deny decisions.
+    prompt: Arc<dyn AcceptPrompt>,
+    /// Rate limiter for unattended-password attempts.
+    throttle: tokio::sync::Mutex<rc_security::Throttle>,
+    /// Serialises interactive accept dialogs.
+    pending_dialog: tokio::sync::Mutex<()>,
     /// Set once the QUIC listener is bound, cleared when it stops.
     ///
     /// Read by the health endpoint, which must be able to distinguish "the process is
@@ -84,27 +88,52 @@ pub struct AgentServer {
     listener_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Fail-closed accept prompt used by the standalone service binary.
+#[derive(Debug, Default)]
+pub struct DismissingPrompt;
+
+#[async_trait::async_trait]
+impl AcceptPrompt for DismissingPrompt {
+    async fn ask(&self, request: AcceptRequest) -> AcceptAnswer {
+        tracing::warn!(
+            address = %request.address,
+            identity = %request.identity_fingerprint,
+            trusted = request.trusted,
+            "no interactive accept prompt is attached; dismissing connection request"
+        );
+        AcceptAnswer {
+            request_id: request.request_id,
+            decision: AcceptDecision::Dismiss,
+        }
+    }
+}
+
 impl AgentServer {
     /// Assemble a server. Does not bind anything yet.
     #[must_use]
     pub fn new(
         identity: Arc<DeviceIdentity>,
         config: AgentConfig,
-        database: rc_storage::Database,
-        pairing: Arc<PairingManager>,
+        database: &rc_storage::Database,
+        prompt: Arc<dyn AcceptPrompt>,
     ) -> Self {
         let max_sessions = usize::from(config.network.max_sessions);
         Self {
             identity,
             config,
-            database,
-            pairing,
             sessions: Arc::new(SessionRegistry::new(max_sessions)),
             clock: Arc::new(SystemClock),
             host: rc_platform::HostInfo::detect(),
             metrics: Arc::new(tokio::sync::Mutex::new(
                 rc_monitoring::MetricsCollector::new(),
             )),
+            settings: SettingsRepository::new(database),
+            trust: TrustRepository::new(database),
+            trust_service: crate::TrustService::new(TrustRepository::new(database)),
+            history: SessionHistoryRepository::new(database),
+            prompt,
+            throttle: tokio::sync::Mutex::new(rc_security::Throttle::with_defaults()),
+            pending_dialog: tokio::sync::Mutex::new(()),
             listener_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -121,49 +150,12 @@ impl AgentServer {
         Arc::clone(&self.listener_ready)
     }
 
-    /// What this agent tells peers about itself.
-    #[must_use]
-    pub fn descriptor(&self) -> DeviceDescriptor {
-        let public = self.identity.public();
-        DeviceDescriptor {
-            device_id: public.device_id,
-            display_name: self.config.device_name.clone(),
-            hostname: self.host.hostname.clone(),
-            os_family: self.host.os_family,
-            os_version: self.host.os_version.clone(),
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
-            // Self-reported, for display. Peers use what their TLS connection saw.
-            certificate_fingerprint: public.certificate_fingerprint.to_hex(),
-        }
-    }
-
-    /// What this build of this agent, with this configuration, can actually do.
-    ///
-    /// Derived from the feature switches rather than hard-coded, so an operator running
-    /// a monitoring-only agent has that reflected in what the client offers to do.
-    #[must_use]
-    pub fn capabilities(&self) -> Capabilities {
-        let features = &self.config.features;
-        Capabilities {
-            remote_desktop: features.remote_desktop,
-            terminal: features.terminal,
-            file_transfer: features.file_transfer,
-            monitoring: true,
-            process_management: features.process_management,
-            service_management: features.service_management,
-            power_control: features.power_control,
-            clipboard: features.clipboard_sync,
-            wake_on_lan: false,
-            display_count: 0,
-        }
-    }
-
     /// Bind the listener and serve until `shutdown` resolves.
     ///
     /// # Errors
-    /// Fails only if the socket cannot be bound. Per-connection failures are logged and
-    /// audited; they never stop the listener, because one hostile peer must not be able
-    /// to take the agent off the network.
+    /// Fails only if the socket cannot be bound. Per-connection failures are logged;
+    /// they never stop the listener, because one hostile peer must not be able to take
+    /// the agent off the network.
     pub async fn run(
         self: Arc<Self>,
         shutdown: impl Future<Output = ()> + Send,
@@ -182,36 +174,6 @@ impl AgentServer {
         self.listener_ready
             .store(true, std::sync::atomic::Ordering::Release);
         tracing::info!(%bound, "listening for client connections");
-
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::LISTENER_STARTED,
-                AuditResult::Success,
-            )
-            .meta("port", bound.port()),
-        )
-        .await;
-
-        // Discovery is a convenience. Failing to advertise must not stop the agent
-        // serving clients that already know its address.
-        let _advertiser = if self.config.network.discovery_enabled {
-            match rc_transport::Advertiser::start(
-                self.identity.device_id(),
-                &self.config.device_name,
-                self.identity.public().identity_fingerprint,
-                bound.port(),
-            ) {
-                Ok(advertiser) => Some(advertiser),
-                Err(err) => {
-                    tracing::warn!(%err, "could not advertise on the local network");
-                    None
-                }
-            }
-        } else {
-            tracing::info!("local discovery is disabled by configuration");
-            None
-        };
 
         let accepting = async {
             while let Some(incoming) = listener.accept().await {
@@ -254,91 +216,35 @@ impl AgentServer {
 
         // From this connection, never from a message and never from the endpoint-wide
         // record, which every concurrent handshake shares.
-        let observed = rc_transport::peer_certificate_fingerprint(&connection)?;
+        //
+        // A certificate carrying no Ed25519 identity key cannot be trusted or even
+        // named, so such a connection is refused here rather than admitted under an
+        // identity this build would have to invent for it.
+        let der = rc_transport::peer_certificate_der(&connection)?;
+        let observed = rc_transport::PeerIdentity::from_certificate_der(&der).map_err(|err| {
+            tracing::warn!(%remote, %err, "refusing a peer whose certificate carries no identity");
+            TransportError::IdentityProofRejected
+        })?;
 
         let (mut writer, mut reader) = rc_transport::accept_channel(&connection).await?;
         let opening = rc_transport::handshake::read_opening(&mut reader).await?;
 
-        match opening {
-            Opening::Pairing(message) => {
-                self.handle_pairing(&mut reader, &mut writer, *message, observed, remote)
-                    .await
-            }
-            Opening::Hello(hello) => {
-                self.handle_session(
-                    &connection,
-                    &mut reader,
-                    &mut writer,
-                    *hello,
-                    observed,
-                    remote,
-                )
-                .await
-            }
-            // `Opening` is `#[non_exhaustive]`: a purpose from a newer client that this
-            // build does not know is refused, not approximated.
-            _ => {
-                tracing::warn!(%remote, "a peer opened a connection for an unknown purpose");
-                Err(TransportError::UnexpectedMessage {
-                    expected: "Hello or Pairing",
-                }
-                .into())
-            }
-        }
-    }
-
-    /// Run a pairing exchange, if the operator has a window open.
-    async fn handle_pairing(
-        &self,
-        reader: &mut ChannelReader,
-        writer: &mut ChannelWriter,
-        message: PairingMessage,
-        observed: Fingerprint,
-        remote: SocketAddr,
-    ) -> anyhow::Result<()> {
-        let PairingMessage::Request(request) = message else {
-            // The exchange has a fixed shape; anything else is a protocol error.
-            return Err(TransportError::UnexpectedMessage {
-                expected: "pairing request",
-            }
-            .into());
+        // `Opening` is `#[non_exhaustive]`: a purpose from a newer client that this
+        // build does not know is refused, not approximated.
+        let Opening::Hello(hello) = opening else {
+            tracing::warn!(%remote, "a peer opened a connection for an unknown purpose");
+            return Err(TransportError::UnexpectedMessage { expected: "Hello" }.into());
         };
 
-        tracing::info!(%remote, "a peer is attempting to pair");
-
-        let recorder = TrustRecorder {
-            database: self.database.clone(),
-            clock: Arc::clone(&self.clock),
-        };
-
-        let service = PairingService {
-            manager: &self.pairing,
-            identity: &self.identity,
-            descriptor: self.descriptor(),
-            clock: self.clock.as_ref(),
-            recorder: &recorder,
-        };
-
-        match service.serve(reader, writer, &request, observed).await {
-            Ok(outcome) => {
-                // The persisted trail is closed out here, after trust has been
-                // recorded, so a row can never read `consumed` for a pairing that did
-                // not complete.
-                crate::identity::mark_window_consumed(
-                    &self.database,
-                    outcome.pairing_session_id,
-                    outcome.client_device_id,
-                    self.clock.now_ms(),
-                )
-                .await;
-                self.audit_pairing_success(&outcome, remote).await;
-                Ok(())
-            }
-            Err(err) => {
-                self.audit_pairing_failure(&err, remote).await;
-                Err(err.into())
-            }
-        }
+        self.handle_session(
+            &connection,
+            &mut reader,
+            &mut writer,
+            *hello,
+            observed,
+            remote,
+        )
+        .await
     }
 
     /// Authenticate a client and run its session.
@@ -348,59 +254,61 @@ impl AgentServer {
         reader: &mut ChannelReader,
         writer: &mut ChannelWriter,
         hello: rc_protocol::control::Hello,
-        observed: Fingerprint,
+        observed: rc_transport::PeerIdentity,
         remote: SocketAddr,
     ) -> anyhow::Result<()> {
         // Checked before authenticating, so an authenticated client is never turned
         // away for a reason it could have been told about earlier — and so the cap
         // cannot be exceeded by clients that all authenticate at once.
         let Some(slot) = self.sessions.reserve() else {
-            tracing::warn!(%remote, "refusing a connection: the session limit is reached");
-            self.audit(
-                AuditEvent::new(
-                    AuditCategory::Connection,
-                    actions::CONNECTION_LIMIT_REACHED,
-                    AuditResult::Denied,
-                )
-                .meta("source", redact_address(remote)),
-            )
-            .await;
+            tracing::warn!(
+                %remote,
+                source = %redact_address(remote),
+                "refusing a connection: the session limit is reached"
+            );
             return Err(TransportError::Throttled {
                 retry_after_secs: 30,
             }
             .into());
         };
 
-        let directory = DatabaseDirectory {
-            trust: TrustRepository::new(&self.database),
-        };
+        // Taken before `hello` is moved into the handshake. Untrusted, like the display
+        // name beside it, and stored only so My Devices can show what kind of machine a
+        // trusted device is.
+        let peer_os = os_family_name(hello.descriptor.os_family).to_owned();
+        // Kept for the history record on the refusal path, where `peer` does not exist.
+        let peer_name = hello.descriptor.display_name.clone();
 
         let peer = match rc_transport::handshake::finish_accept(
+            reader,
             writer,
-            &directory,
             observed,
             hello,
             self.descriptor(),
             self.capabilities(),
             self.clock.now_ms(),
+            {
+                let server = Arc::clone(self);
+                let peer_os = peer_os.clone();
+                move |identity, dialed_address, machine_name, unattended_password| async move {
+                    server
+                        .decide(ConnectionRequest {
+                            address: dialed_address,
+                            identity,
+                            machine_name,
+                            os_family: peer_os,
+                            unattended_password,
+                        })
+                        .await
+                }
+            },
         )
         .await
         {
             Ok(peer) => peer,
             Err(err) => {
-                self.audit(
-                    AuditEvent::new(
-                        AuditCategory::Connection,
-                        actions::CONNECTION_REFUSED,
-                        AuditResult::Denied,
-                    )
-                    .meta("source", redact_address(remote))
-                    // The observed fingerprint is not secret and is what an operator
-                    // needs in order to tell a renewal apart from an impostor.
-                    .meta("observed_fingerprint", observed)
-                    .meta("reason", &err),
-                )
-                .await;
+                self.on_refused(connection, observed, remote, &peer_name, &err)
+                    .await;
                 return Err(err.into());
             }
         };
@@ -410,43 +318,171 @@ impl AgentServer {
         slot.activate(
             session_id,
             device_id,
-            peer.role,
+            peer.identity_fingerprint,
+            peer.display_name.clone(),
+            peer.permissions,
             remote,
             self.clock.now_ms(),
         );
 
-        self.record_session_start(&peer, remote).await;
+        record_session_start(&peer, remote);
 
-        // The authorization this connection was admitted with, re-checked on every
-        // request rather than assumed for the life of the session.
-        let authorization = AuthorizationContext::new(peer.role);
-
-        // Terminals live on their own channel. Serving it in a task lets a shell
-        // produce output while the control channel is idle, and dropping the task's
-        // registry when the connection ends is what stops shells outliving it.
-        let terminals =
-            self.spawn_channel_server(connection, authorization.clone(), device_id, session_id);
-
-        let reason = self
-            .run_session(connection, reader, writer, &slot, &authorization)
+        let history_id = self
+            .record_history(&rc_storage::NewSessionRecord {
+                session_id: Some(session_id.to_canonical_string()),
+                identity_fingerprint: Some(peer.identity_fingerprint),
+                device_name: peer.display_name.clone(),
+                direction: rc_storage::SessionDirection::Incoming,
+                address: redact_address(remote),
+                started_ms: self.clock.now_ms(),
+                permissions: peer.permissions,
+                outcome: rc_storage::SessionOutcome::Completed,
+                end_reason: None,
+            })
             .await;
 
-        terminals.abort();
+        // The permissions this connection was admitted with, re-checked on every
+        // request rather than assumed for the life of the session.
+        let session = Session::new(peer.permissions, peer.identity_fingerprint);
 
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::SESSION_ENDED,
-                AuditResult::Success,
-            )
-            .actor_device(device_id)
-            .meta("session_id", session_id)
-            .meta("reason", reason_name(reason)),
-        )
-        .await;
+        // A metrics subscription is asked for on the control channel and delivered on
+        // the metrics channel, so the two need a handle in common. Created here, before
+        // either exists, so neither ordering loses the subscription.
+        let (subscription, subscribed) = tokio::sync::watch::channel(None);
+
+        // Additional channels are served in their own task so a client's requests on
+        // one do not block the control channel.
+        let channel_server =
+            self.spawn_channel_server(connection, session, device_id, session_id, subscribed);
+
+        // Selected against the operator's Disconnect, so ending a session closes the
+        // connection rather than only clearing it from a list. `HostTerminated` is not
+        // eligible for automatic reconnection, so the peer does not immediately come
+        // back — which is what someone pressing Disconnect means.
+        let reason = tokio::select! {
+            reason = self.run_session(connection, reader, writer, &slot, &session, &subscription) => reason,
+            () = slot.ended() => {
+                tracing::info!(%session_id, "the operator ended this session");
+                DisconnectReason::HostTerminated
+            }
+        };
+
+        channel_server.abort();
 
         tracing::info!(%device_id, %session_id, reason = reason_name(reason), "session ended");
+
+        if let Some(id) = history_id
+            && let Err(err) = self
+                .history
+                .finish(
+                    id,
+                    self.clock.now_ms(),
+                    outcome_of(reason),
+                    Some(reason_name(reason)),
+                )
+                .await
+        {
+            tracing::warn!(%err, "could not record how the session ended");
+        }
+
         Ok(())
+    }
+
+    /// Apply the admission rule to one connection.
+    ///
+    /// The rule itself lives in [`crate::access`] and is shared with the desktop
+    /// application, so the two cannot drift into deciding differently. This method
+    /// supplies it with everything it reads and translates its answer into the coarse
+    /// outcome the transport carries to the peer.
+    ///
+    /// A failure to *decide* is a refusal. Anything else would mean a database that had
+    /// gone away could admit a connection nobody approved.
+    async fn decide(&self, request: ConnectionRequest) -> HandshakeAuthorization {
+        let deps = AccessDeps {
+            settings: &self.settings,
+            trust: &self.trust,
+            prompt: self.prompt.as_ref(),
+            throttle: &self.throttle,
+            clock: self.clock.as_ref(),
+            pending_dialog: &self.pending_dialog,
+        };
+
+        match authorize_connection(&request, &deps).await {
+            Ok(Authorization::Granted(permissions)) => HandshakeAuthorization::Granted(permissions),
+            Ok(Authorization::Refused(reason)) => HandshakeAuthorization::Refused(reason.into()),
+            Err(err) => {
+                tracing::error!(%err, "could not decide connection authorization");
+                HandshakeAuthorization::Refused(WireRefusal::Rejected)
+            }
+        }
+    }
+
+    /// Log, record and wind down a connection that was not admitted.
+    ///
+    /// Separate from [`Self::handle_session`] because it is a whole story of its own —
+    /// what the operator is told, what the peer is allowed to observe, and how the
+    /// connection is closed — and because keeping it inline made the admission path
+    /// harder to read than the branch it guards.
+    async fn on_refused(
+        &self,
+        connection: &quinn::Connection,
+        observed: rc_transport::PeerIdentity,
+        remote: SocketAddr,
+        peer_name: &str,
+        err: &TransportError,
+    ) {
+        tracing::warn!(
+            source = %redact_address(remote),
+            // Neither value is secret, and together they are what an operator needs in
+            // order to tell a renewal apart from an impostor: the identity is the same
+            // across a renewal, the certificate is not.
+            identity = %observed.identity_fingerprint,
+            certificate = %observed.certificate_fingerprint,
+            %err,
+            "refusing a connection"
+        );
+
+        // The refusal has been written and its stream finished. Wait for the peer to
+        // acknowledge by closing, rather than dropping the connection out from under the
+        // frame: a peer that never receives its refusal sees a lost connection instead,
+        // which is retryable, and would reconnect in a loop against a machine that had
+        // already refused it.
+        //
+        // Bounded, because a peer that does not close is not something to wait on. Two
+        // seconds is far longer than a loopback or LAN round trip.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), connection.closed()).await;
+
+        // Recorded so the operator can see that someone was turned away. A refusal has
+        // no session id, and a stranger has no trust row, so both travel as `None`
+        // rather than being invented. The name is what the peer called itself, which is
+        // untrusted and displayed as such.
+        self.record_history(&rc_storage::NewSessionRecord {
+            session_id: None,
+            identity_fingerprint: None,
+            device_name: peer_name.to_owned(),
+            direction: rc_storage::SessionDirection::Incoming,
+            address: redact_address(remote),
+            started_ms: self.clock.now_ms(),
+            permissions: PermissionSet::NONE,
+            outcome: rc_storage::SessionOutcome::Refused,
+            end_reason: None,
+        })
+        .await;
+    }
+
+    /// Write a history row, reporting a failure rather than failing the connection.
+    ///
+    /// A session that ran is a fact whether or not it could be written down, and a
+    /// database that has gone away must not turn an admitted session into a refused
+    /// one. The row id comes back so the session can be finished later.
+    async fn record_history(&self, entry: &rc_storage::NewSessionRecord) -> Option<i64> {
+        match self.history.record(entry).await {
+            Ok(id) => Some(id),
+            Err(err) => {
+                tracing::warn!(%err, "could not record a session in the history");
+                None
+            }
+        }
     }
 
     /// Serve control requests until the client disconnects or the session times out.
@@ -459,7 +495,8 @@ impl AgentServer {
         reader: &mut ChannelReader,
         writer: &mut ChannelWriter,
         slot: &SessionSlot,
-        authorization: &AuthorizationContext,
+        session: &Session,
+        subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> DisconnectReason {
         let idle_timeout = self.config.session.idle_timeout_secs;
 
@@ -489,7 +526,7 @@ impl AgentServer {
 
             let response = ControlResponse {
                 request_id: request.request_id,
-                result: self.answer(&request.payload, authorization).await,
+                result: self.answer(&request.payload, session, subscription).await,
             };
 
             if let Err(err) = writer.send(&response).await {
@@ -507,7 +544,8 @@ impl AgentServer {
     async fn answer(
         &self,
         payload: &ControlRequestPayload,
-        authorization: &AuthorizationContext,
+        session: &Session,
+        subscription: &tokio::sync::watch::Sender<Option<u32>>,
     ) -> ControlResult {
         match payload {
             ControlRequestPayload::Ping { token } => {
@@ -520,10 +558,7 @@ impl AgentServer {
             ControlRequestPayload::SystemSnapshot => {
                 // Checked against this connection's authorization on every request, not
                 // once at connect: a device revoked mid-session must stop being answered.
-                if authorization
-                    .require(Capability::RemoteDesktopView)
-                    .is_err()
-                {
+                if session.require(Permission::ViewMetrics).is_err() {
                     return denied("view this server's status");
                 }
 
@@ -536,10 +571,7 @@ impl AgentServer {
             }
 
             ControlRequestPayload::HostInfo => {
-                if authorization
-                    .require(Capability::RemoteDesktopView)
-                    .is_err()
-                {
+                if session.require(Permission::ViewMetrics).is_err() {
                     return denied("view this server's status");
                 }
                 ControlResult::Ok(ControlResponsePayload::HostInfo(Box::new(
@@ -548,21 +580,35 @@ impl AgentServer {
             }
 
             ControlRequestPayload::SubscribeMetrics { interval_ms } => {
-                if authorization
-                    .require(Capability::RemoteDesktopView)
-                    .is_err()
-                {
+                if session.require(Permission::ViewMetrics).is_err() {
                     return denied("view this server's status");
                 }
                 // Clamped rather than honoured: a client asking for 10 ms would cost a
-                // full process enumeration a hundred times a second on the machine it is
-                // supposed to be observing.
-                ControlResult::Ok(ControlResponsePayload::MetricsSubscribed {
-                    interval_ms: rc_monitoring::MetricsCollector::clamp_interval(*interval_ms),
-                })
+                // sample a hundred times a second on the machine it is supposed to be
+                // observing.
+                let interval_ms = rc_monitoring::MetricsCollector::clamp_interval(*interval_ms);
+
+                // The metrics-channel task is the receiver. A send failing means that
+                // task is gone, which for a live session means the connection is on its
+                // way out — reported rather than answered with a success the client
+                // would wait on forever.
+                if subscription.send(Some(interval_ms)).is_err() {
+                    return ControlResult::Err {
+                        code: rc_protocol::control::ErrorCode::Internal,
+                        message: "this session can no longer deliver metrics".to_owned(),
+                    };
+                }
+
+                // The clamped figure, not the requested one, so a client displays the
+                // rate it is actually getting.
+                ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms })
             }
 
             ControlRequestPayload::UnsubscribeMetrics => {
+                // Unsubscribing when nothing was subscribed is not an error: a client
+                // tidying up on the way out should not have to remember whether it ever
+                // started.
+                let _ = subscription.send(None);
                 ControlResult::Ok(ControlResponsePayload::Empty)
             }
 
@@ -572,75 +618,38 @@ impl AgentServer {
                 message: "the request was routed incorrectly".to_owned(),
             },
 
-            // `ControlRequestPayload` is `#[non_exhaustive]`: a request from a newer
-            // client is refused rather than approximated.
-            _ => ControlResult::Err {
-                code: rc_protocol::control::ErrorCode::Unsupported,
-                message: "this agent does not support that request".to_owned(),
+            // Trust management, behind `Administer`. Delegated rather than inlined so
+            // the no-self-modification rule lives in one place with its own tests.
+            payload => match self.trust_service.handle(session, payload).await {
+                Ok(Some(response)) => ControlResult::Ok(response),
+                // `ControlRequestPayload` is `#[non_exhaustive]`: a request from a newer
+                // client is refused rather than approximated.
+                Ok(None) => ControlResult::Err {
+                    code: rc_protocol::control::ErrorCode::Unsupported,
+                    message: "this agent does not support that request".to_owned(),
+                },
+                Err(err) => access_error_result(&err),
             },
         }
-    }
-
-    /// Record that a session began, in the database and in the audit trail.
-    ///
-    /// Called only after the peer has been admitted, so a refused connection can never
-    /// move the "last authenticated" timestamp an operator reads to decide whether a
-    /// device is still in use.
-    async fn record_session_start(
-        &self,
-        peer: &rc_transport::AuthenticatedPeer,
-        remote: SocketAddr,
-    ) {
-        if let Err(err) = TrustRepository::new(&self.database)
-            .record_authentication(peer.device_id, self.clock.now_ms())
-            .await
-        {
-            let device_id = peer.device_id;
-            tracing::warn!(%err, %device_id, "could not record the authentication time");
-        }
-
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Connection,
-                actions::SESSION_STARTED,
-                AuditResult::Success,
-            )
-            .actor_device(peer.device_id)
-            .meta("session_id", peer.session_id)
-            .meta("role", peer.role.name())
-            .meta("source", redact_address(remote))
-            .meta("protocol", peer.negotiated_version),
-        )
-        .await;
-
-        tracing::info!(
-            device_id = %peer.device_id,
-            session_id = %peer.session_id,
-            role = peer.role.name(),
-            %remote,
-            "session started"
-        );
     }
 
     /// Serve the channels a client opens after authenticating.
     ///
     /// The control channel is already established; this accepts the *additional*
-    /// streams — today the terminal channel — and serves each on its own task.
+    /// streams and serves each on its own task.
     ///
-    /// Aborting the returned handle when the session ends is what guarantees no shell
-    /// outlives the connection that started it: the terminal registry lives inside this
-    /// task, so cancelling it drops the registry, and dropping the registry kills every
-    /// PTY it holds.
+    /// Aborting the returned handle when the session ends is what guarantees no
+    /// per-channel task outlives the connection that started it.
     fn spawn_channel_server(
         self: &Arc<Self>,
         connection: &quinn::Connection,
-        authorization: AuthorizationContext,
+        session: Session,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
+        subscribed: tokio::sync::watch::Receiver<Option<u32>>,
     ) -> tokio::task::JoinHandle<()> {
         let server = Arc::clone(self);
         let connection = connection.clone();
-
         tokio::spawn(async move {
             loop {
                 let (writer, mut reader) = match rc_transport::accept_channel(&connection).await {
@@ -653,37 +662,80 @@ impl AgentServer {
                 };
 
                 match reader.channel() {
-                    rc_protocol::Channel::Terminal => {
-                        let service = crate::terminal_service::TerminalService::new(
-                            writer,
-                            authorization.clone(),
-                            server.database.clone(),
-                            device_id,
-                            session_id,
-                            Arc::clone(&server.clock),
-                            server.config.features.terminal,
-                        );
-                        tokio::spawn(async move {
-                            service.run(&mut reader).await;
-                        });
-                    }
                     rc_protocol::Channel::FileTransfer => {
                         let service = crate::file_service::FileService::new(
                             writer,
                             server.file_policy(),
                             server.config.features.max_transfer_bytes,
-                            authorization.clone(),
-                            server.database.clone(),
+                            session,
                             device_id,
                             session_id,
-                            Arc::clone(&server.clock),
                             server.config.features.file_transfer,
                         );
                         tokio::spawn(async move {
                             service.run(&mut reader).await;
                         });
                     }
-                    other => {
+                    rc_protocol::Channel::Metrics => {
+                        let service = crate::metrics_service::MetricsService::new(
+                            writer,
+                            session,
+                            Arc::clone(&server.metrics),
+                            Arc::clone(&server.clock),
+                            subscribed.clone(),
+                        );
+                        tokio::spawn(service.run());
+                    }
+                    rc_protocol::Channel::Input => {
+                        // The sink is built per channel so a host that cannot inject
+                        // reports that fact to this client rather than failing at
+                        // startup for every client.
+                        match rc_input::backend::enigo::EnigoSink::new() {
+                            Ok(sink) => {
+                                let service = crate::input_service::InputService::new(
+                                    writer,
+                                    session,
+                                    sink,
+                                    server.config.features.remote_desktop,
+                                );
+                                tokio::spawn(async move {
+                                    service.run(&mut reader).await;
+                                });
+                            }
+                            Err(err) => {
+                                // Answered rather than ignored: a client waiting on an
+                                // acknowledgement that never comes cannot tell a
+                                // permission problem from a dead link.
+                                tracing::warn!(%err, "input channel opened on a host that cannot inject");
+                            }
+                        }
+                    }
+                    rc_protocol::Channel::Video => {
+                        // The source is built per channel for the same reason as the
+                        // input sink: a host that cannot capture reports that fact to
+                        // this client rather than failing at startup for every client.
+                        match crate::video_service::new_source() {
+                            Ok(source) => {
+                                let service = crate::video_service::VideoService::new(
+                                    writer,
+                                    session,
+                                    source,
+                                    server.config.features.remote_desktop,
+                                )
+                                .with_clipboard(
+                                    crate::video_service::new_clipboard(),
+                                    server.config.features.clipboard_sync,
+                                );
+                                tokio::spawn(async move {
+                                    service.run(&mut reader).await;
+                                });
+                            }
+                            Err(err) => {
+                                tracing::warn!(%err, "video channel opened on a host that cannot capture");
+                            }
+                        }
+                    }
+                    other @ rc_protocol::Channel::Control => {
                         // A channel this build does not serve is closed rather than left
                         // open: a client waiting on a stream nobody reads would appear
                         // to hang, which is worse than a clear end.
@@ -695,6 +747,35 @@ impl AgentServer {
                 }
             }
         })
+    }
+
+    fn descriptor(&self) -> DeviceDescriptor {
+        let public = self.identity.public();
+        DeviceDescriptor {
+            device_id: public.device_id,
+            display_name: self.config.device_name.clone(),
+            hostname: self.host.hostname.clone(),
+            os_family: self.host.os_family,
+            os_version: self.host.os_version.clone(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            certificate_fingerprint: public.certificate_fingerprint.to_hex(),
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            remote_desktop: self.config.features.remote_desktop
+                && rc_input::backend::enigo::probe().is_usable(),
+            file_transfer: self.config.features.file_transfer,
+            monitoring: true,
+            process_management: self.config.features.process_management,
+            clipboard: self.config.features.clipboard_sync,
+            wake_on_lan: false,
+            // Reported rather than hardcoded, so a client can tell a single-monitor
+            // host from a multi-monitor one before opening a session.
+            display_count: u8::try_from(rc_input::backend::displays::enumerate().len())
+                .unwrap_or(u8::MAX),
+        }
     }
 
     /// Where connected clients may read and write files.
@@ -745,119 +826,6 @@ impl AgentServer {
             booted_at_ms: boot_time_ms(self.clock.now_ms()),
         }
     }
-
-    /// Append an audit record, logging rather than failing if the write does not work.
-    async fn audit(&self, event: AuditEvent) {
-        let repository = AuditRepository::new(&self.database);
-        if let Err(err) = repository.record(&event, self.clock.now_ms()).await {
-            tracing::error!(%err, action = event.action, "could not write an audit record");
-        }
-    }
-
-    async fn audit_pairing_success(&self, outcome: &PairingOutcome, remote: SocketAddr) {
-        self.audit(
-            AuditEvent::new(
-                AuditCategory::Pairing,
-                actions::PAIRING_COMPLETED,
-                AuditResult::Success,
-            )
-            .target_device(outcome.client_device_id)
-            .meta("pairing_session_id", outcome.pairing_session_id)
-            .meta("role", outcome.granted_permissions.role.name())
-            .meta("source", redact_address(remote))
-            // A short digest, enough to correlate the two peers' records and not
-            // enough to reconstruct the exchange.
-            .meta("transcript_digest", &outcome.transcript_digest),
-        )
-        .await;
-    }
-
-    async fn audit_pairing_failure(&self, err: &TransportError, remote: SocketAddr) {
-        // Throttling is recorded distinctly from a rejected proof: the first says an
-        // attacker is being rate-limited, the second that one attempt was wrong.
-        let (action, result) = match err {
-            TransportError::Throttled { .. } => (actions::PAIRING_THROTTLED, AuditResult::Denied),
-            TransportError::PairingClosed => (actions::PAIRING_EXPIRED, AuditResult::Failure),
-            _ => (actions::PAIRING_ATTEMPT_FAILED, AuditResult::Failure),
-        };
-
-        self.audit(
-            AuditEvent::new(AuditCategory::Pairing, action, result)
-                .meta("source", redact_address(remote))
-                // Every `TransportError` message is written to be safe to display: it
-                // never echoes peer input and never names a secret.
-                .meta("reason", err),
-        )
-        .await;
-    }
-}
-
-/// The trust store, as the transport's handshake needs to see it.
-///
-/// Every lookup goes to the database. Caching would defeat the point: the whole reason
-/// authorization is separate from TLS is so a revocation applies to the next connection
-/// rather than the next restart.
-struct DatabaseDirectory {
-    trust: TrustRepository,
-}
-
-#[async_trait::async_trait]
-impl TrustDirectory for DatabaseDirectory {
-    async fn find_by_certificate(&self, fingerprint: Fingerprint) -> Option<TrustRecord> {
-        // Listed by certificate rather than identity because that is what TLS observed.
-        // A device whose certificate has been renewed but whose identity is unchanged
-        // will not match here and is refused; re-pinning a renewed certificate is a
-        // deliberate step, not something a connection attempt performs.
-        let device = match self.trust.find_by_certificate(fingerprint).await {
-            Ok(device) => device?,
-            Err(err) => {
-                // A store that cannot answer must not admit anyone.
-                tracing::error!(%err, "could not read the trust store; refusing the connection");
-                return None;
-            }
-        };
-
-        if device.peer_role != PeerRoleRow::Client {
-            // A record describing a server this agent connects *to* is not a client it
-            // accepts connections *from*.
-            return None;
-        }
-
-        Some(TrustRecord {
-            device_id: device.device_id,
-            display_name: device.display_name,
-            role: device.role,
-            revoked: device.revoked,
-            certificate_fingerprint: device.certificate_fingerprint,
-        })
-    }
-}
-
-/// Persists a completed pairing.
-struct TrustRecorder {
-    database: rc_storage::Database,
-    clock: Arc<dyn Clock>,
-}
-
-#[async_trait::async_trait]
-impl PairingRecorder for TrustRecorder {
-    async fn record(&self, outcome: &PairingOutcome) -> Result<(), String> {
-        TrustRepository::new(&self.database)
-            .insert_paired_device(
-                outcome.client_device_id,
-                PeerRoleRow::Client,
-                &outcome.client_display_name,
-                "",
-                &outcome.client_public_key,
-                outcome.client_identity_fingerprint,
-                outcome.client_certificate_fingerprint,
-                &outcome.granted_permissions,
-                Some(&outcome.transcript_digest),
-                self.clock.now_ms(),
-            )
-            .await
-            .map_err(|err| err.to_string())
-    }
 }
 
 /// What reading the next control request produced.
@@ -899,6 +867,75 @@ async fn read_control_request(
         Err(TransportError::Protocol(_)) => RequestOutcome::Malformed,
         // A finished stream and a dropped connection are the same outcome here.
         Ok(None) | Err(_) => RequestOutcome::Closed,
+    }
+}
+
+/// Record that a session began.
+///
+/// Called only after the peer has been admitted, so a refused connection never appears
+/// to have started a session.
+///
+/// The trusted-device row's "last connected" is written by `authorize_connection`, which
+/// belongs to admission rather than to this already-authenticated path — and which must
+/// write it for an unattended reconnection that never reaches here as a decision at all.
+fn record_session_start(peer: &rc_transport::AuthenticatedPeer, remote: SocketAddr) {
+    tracing::info!(
+        device_id = %peer.device_id,
+        identity = %peer.identity_fingerprint,
+        session_id = %peer.session_id,
+        permissions = %permission_names(peer.permissions),
+        %remote,
+        "session started"
+    );
+}
+
+/// The stored form of an operating-system family.
+///
+/// Kept next to its one caller rather than on the protocol type: this is the string the
+/// database and the interface use, and pinning it here means a rename in the protocol
+/// enum cannot silently change what is already stored in a trust row.
+const fn os_family_name(family: rc_protocol::control::OsFamily) -> &'static str {
+    match family {
+        rc_protocol::control::OsFamily::Windows => "windows",
+        rc_protocol::control::OsFamily::Linux => "linux",
+        rc_protocol::control::OsFamily::MacOs => "macos",
+        _ => "unknown",
+    }
+}
+
+/// A typed access error as a control-channel result.
+///
+/// The message is a fixed string per variant, never the error's own display text: a
+/// storage failure's message can name a file path, and a caller that was refused is not
+/// entitled to learn one.
+fn access_error_result(err: &crate::error::AccessError) -> ControlResult {
+    use crate::error::AccessError;
+    match err {
+        AccessError::PermissionDenied { permission } => denied(permission),
+        AccessError::InvalidArgument { field } => ControlResult::Err {
+            code: rc_protocol::control::ErrorCode::InvalidArgument,
+            message: format!("the {field} in this request is not valid"),
+        },
+        AccessError::Storage(storage) => {
+            tracing::warn!(%storage, "a trust-management request could not be served");
+            ControlResult::Err {
+                code: rc_protocol::control::ErrorCode::Internal,
+                message: "the request could not be completed".to_owned(),
+            }
+        }
+    }
+}
+
+/// How a session that ended for `reason` is recorded.
+///
+/// Only a transport failure or a protocol error is a failure; everything else, including
+/// an idle timeout and a host-initiated disconnect, is a session that ran and finished.
+const fn outcome_of(reason: DisconnectReason) -> rc_storage::SessionOutcome {
+    match reason {
+        DisconnectReason::TransportFailure | DisconnectReason::ProtocolError => {
+            rc_storage::SessionOutcome::Failed
+        }
+        _ => rc_storage::SessionOutcome::Completed,
     }
 }
 
@@ -968,6 +1005,16 @@ fn redact_address(address: SocketAddr) -> String {
     address.ip().to_string()
 }
 
+/// Render a session's granted permissions for logs and audit records, as a
+/// comma-separated list of their stable names.
+fn permission_names(permissions: PermissionSet) -> String {
+    permissions
+        .iter()
+        .map(Permission::name)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,57 +1029,145 @@ mod tests {
         Arc::new(AgentServer::new(
             identity,
             config(),
-            database,
-            Arc::new(PairingManager::with_defaults()),
+            &database,
+            Arc::new(DismissingPrompt),
         ))
     }
 
+    /// Every permission, which is what an ordinary session carries.
+    fn owner() -> Session {
+        Session::new(
+            PermissionSet::ALL,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        )
+    }
+
+    fn no_permissions() -> Session {
+        Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        )
+    }
+
+    /// A session's metrics-subscription handle.
+    ///
+    /// The receiver is returned rather than dropped because a `watch` sender with no
+    /// receivers fails to send — which is exactly how a real session reports that its
+    /// metrics task has gone, so a test that dropped it would be testing that path
+    /// instead of the one it named.
+    fn subscription() -> (
+        tokio::sync::watch::Sender<Option<u32>>,
+        tokio::sync::watch::Receiver<Option<u32>>,
+    ) {
+        tokio::sync::watch::channel(None)
+    }
+
     #[tokio::test]
-    async fn the_descriptor_reports_this_agents_identity() {
+    async fn a_session_without_administer_cannot_read_the_trusted_devices() {
+        // The dispatch is what is under test here; the rule itself has its own tests in
+        // `trust_service`. What this pins is that the request actually reaches that rule
+        // rather than falling through to the `Unsupported` arm, which would look like a
+        // refusal while meaning something entirely different.
         let server = server().await;
-        let descriptor = server.descriptor();
+        let (subscription, _receiver) = subscription();
 
-        assert_eq!(descriptor.device_id, server.identity.device_id());
-        assert_eq!(
-            descriptor.certificate_fingerprint,
-            server.identity.public().certificate_fingerprint.to_hex()
+        let result = server
+            .answer(
+                &ControlRequestPayload::ListTrustedDevices,
+                &no_permissions(),
+                &subscription,
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                ControlResult::Err {
+                    code: rc_protocol::control::ErrorCode::PermissionDenied,
+                    ..
+                }
+            ),
+            "got {result:?}"
         );
-        assert!(!descriptor.hostname.is_empty());
     }
 
     #[tokio::test]
-    async fn capabilities_follow_the_feature_switches() {
-        // An operator who turned a feature off must not have the client offer it.
-        let identity = Arc::new(DeviceIdentity::generate("test-agent", &SystemClock).unwrap());
-        let database = rc_storage::Database::open_in_memory().await.unwrap();
+    async fn an_administrator_session_can_read_the_trusted_devices() {
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
 
-        let mut config = config();
-        config.features.terminal = false;
-        config.features.power_control = false;
+        let result = server
+            .answer(
+                &ControlRequestPayload::ListTrustedDevices,
+                &owner(),
+                &subscription,
+            )
+            .await;
 
-        let server = AgentServer::new(
-            identity,
-            config,
-            database,
-            Arc::new(PairingManager::with_defaults()),
+        assert!(
+            matches!(
+                result,
+                ControlResult::Ok(ControlResponsePayload::TrustedDevices(_))
+            ),
+            "got {result:?}"
         );
-        let capabilities = server.capabilities();
-
-        assert!(!capabilities.terminal);
-        assert!(!capabilities.power_control);
-        assert!(capabilities.file_transfer);
     }
 
-    /// An owner's authorization, which is what an ordinary session carries.
-    fn owner() -> AuthorizationContext {
-        AuthorizationContext::new(rc_security::Role::Owner)
+    #[tokio::test]
+    async fn an_administrator_cannot_revoke_itself_over_the_control_channel() {
+        // The end-to-end shape of the no-self-modification rule: it must survive the
+        // trip through dispatch, not only hold inside the service.
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
+        let caller = owner();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::RevokeDevice {
+                    identity: caller.identity().to_hex(),
+                },
+                &caller,
+                &subscription,
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                ControlResult::Err {
+                    code: rc_protocol::control::ErrorCode::PermissionDenied,
+                    ..
+                }
+            ),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_does_not_disclose_what_went_wrong() {
+        // An error message is shown to a remote peer. A storage error's own text can
+        // name a file path, so the wire message is a fixed string per variant.
+        let result = access_error_result(&crate::error::AccessError::Storage(
+            rc_storage::StorageError::NotFound,
+        ));
+
+        let ControlResult::Err { code, message } = result else {
+            panic!("expected an error")
+        };
+        assert_eq!(code, rc_protocol::control::ErrorCode::Internal);
+        assert_eq!(message, "the request could not be completed");
     }
 
     #[tokio::test]
     async fn a_ping_is_answered_with_the_token_it_carried() {
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::Ping { token: 42 }, &owner())
+            .answer(
+                &ControlRequestPayload::Ping { token: 42 },
+                &owner(),
+                &subscription,
+            )
             .await;
 
         match result {
@@ -1046,8 +1181,13 @@ mod tests {
     #[tokio::test]
     async fn a_snapshot_carries_values_the_agent_actually_measured() {
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::SystemSnapshot, &owner())
+            .answer(
+                &ControlRequestPayload::SystemSnapshot,
+                &owner(),
+                &subscription,
+            )
             .await;
 
         match result {
@@ -1068,8 +1208,9 @@ mod tests {
         // Sending the CPU model and kernel version on every tick would make them look
         // like live readings when they are not.
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::HostInfo, &owner())
+            .answer(&ControlRequestPayload::HostInfo, &owner(), &subscription)
             .await;
 
         match result {
@@ -1084,14 +1225,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_view_only_device_may_still_read_the_dashboard() {
-        // Watching a server is what View Only is for; refusing it would leave the role
-        // with nothing it could do.
+    async fn a_session_with_only_view_metrics_may_still_read_the_dashboard() {
+        // A session holding only ViewMetrics is what a metrics-only grant is for;
+        // refusing it would leave that permission with nothing it could do.
         let server = server().await;
-        let view_only = AuthorizationContext::new(rc_security::Role::ViewOnly);
+        let view_only = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
 
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::SystemSnapshot, &view_only)
+            .answer(
+                &ControlRequestPayload::SystemSnapshot,
+                &view_only,
+                &subscription,
+            )
             .await;
         assert!(matches!(
             result,
@@ -1100,14 +1249,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_revoked_device_is_refused_even_mid_session() {
-        // The check is against the live authorization on every request, so revocation
-        // does not wait for the connection to end.
+    async fn a_session_without_view_metrics_is_refused_even_mid_session() {
+        // The check is against the live permission set on every request, so a
+        // permission lost mid-session does not wait for the connection to end.
         let server = server().await;
-        let revoked = AuthorizationContext::revoked(rc_security::Role::Owner);
+        let revoked = Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
 
+        let (subscription, _receiver) = subscription();
         let result = server
-            .answer(&ControlRequestPayload::SystemSnapshot, &revoked)
+            .answer(
+                &ControlRequestPayload::SystemSnapshot,
+                &revoked,
+                &subscription,
+            )
             .await;
         assert!(
             matches!(
@@ -1126,10 +1283,12 @@ mod tests {
         // A client asking for 10 ms would cost a full process enumeration a hundred
         // times a second on the machine it is supposed to be observing.
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
             .answer(
                 &ControlRequestPayload::SubscribeMetrics { interval_ms: 1 },
                 &owner(),
+                &subscription,
             )
             .await;
 
@@ -1142,10 +1301,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribing_arms_the_handle_the_metrics_channel_reads() {
+        // The subscription is asked for on the control channel and delivered on the
+        // metrics channel. If the answer did not reach the handle, a client would be
+        // told it had subscribed and then receive nothing at all.
+        let server = server().await;
+        let (subscription, receiver) = subscription();
+
+        assert_eq!(*receiver.borrow(), None, "nothing is pushed unasked");
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            ControlResult::Ok(ControlResponsePayload::MetricsSubscribed { interval_ms: 2_000 })
+        ));
+        assert_eq!(
+            *receiver.borrow(),
+            Some(2_000),
+            "the metrics channel must see the interval the client was promised"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribing_disarms_the_handle() {
+        let server = server().await;
+        let (subscription, receiver) = subscription();
+
+        server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
+                &owner(),
+                &subscription,
+            )
+            .await;
+        server
+            .answer(
+                &ControlRequestPayload::UnsubscribeMetrics,
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert_eq!(
+            *receiver.borrow(),
+            None,
+            "a client that asked to stop must actually stop being sampled"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribing_without_a_subscription_is_not_an_error() {
+        // A client tidying up on the way out should not have to remember whether it
+        // ever started.
+        let server = server().await;
+        let (subscription, _receiver) = subscription();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::UnsubscribeMetrics,
+                &owner(),
+                &subscription,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            ControlResult::Ok(ControlResponsePayload::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_session_without_view_metrics_cannot_subscribe_to_metrics() {
+        // Denial must leave the handle untouched: a refused subscription that still
+        // armed the pusher would stream readings to a device that was just refused.
+        let server = server().await;
+        let (subscription, receiver) = subscription();
+
+        let result = server
+            .answer(
+                &ControlRequestPayload::SubscribeMetrics { interval_ms: 2_000 },
+                &no_permissions(),
+                &subscription,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            ControlResult::Err {
+                code: rc_protocol::control::ErrorCode::PermissionDenied,
+                ..
+            }
+        ));
+        assert_eq!(
+            *receiver.borrow(),
+            None,
+            "a refused subscription must not arm the pusher"
+        );
+    }
+
+    #[tokio::test]
     async fn a_request_this_build_does_not_implement_is_refused_not_faked() {
         // Returning an empty answer would put figures on the operator's dashboard that
         // the agent never measured.
         let server = server().await;
+        let (subscription, _receiver) = subscription();
         let result = server
             .answer(
                 &ControlRequestPayload::Disconnect(rc_protocol::control::Disconnect {
@@ -1153,107 +1419,13 @@ mod tests {
                     detail: None,
                 }),
                 &owner(),
+                &subscription,
             )
             .await;
 
         assert!(
             matches!(result, ControlResult::Err { .. }),
             "a misrouted request must not be answered as though it succeeded"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unknown_certificate_is_not_found_in_the_directory() {
-        let database = rc_storage::Database::open_in_memory().await.unwrap();
-        let directory = DatabaseDirectory {
-            trust: TrustRepository::new(&database),
-        };
-
-        let stranger = Fingerprint::of_certificate_der(b"never-seen");
-        assert!(directory.find_by_certificate(stranger).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn a_paired_client_is_found_and_a_revoked_one_is_reported_as_revoked() {
-        let database = rc_storage::Database::open_in_memory().await.unwrap();
-        let trust = TrustRepository::new(&database);
-        let client = DeviceIdentity::generate("client", &SystemClock).unwrap();
-        let public = client.public();
-
-        trust
-            .insert_paired_device(
-                public.device_id,
-                PeerRoleRow::Client,
-                "Client",
-                "host",
-                &public.identity_public_key,
-                public.identity_fingerprint,
-                public.certificate_fingerprint,
-                &rc_security::pairing::RequestedPermissions::full(rc_security::Role::Operator),
-                None,
-                1,
-            )
-            .await
-            .unwrap();
-
-        let directory = DatabaseDirectory {
-            trust: TrustRepository::new(&database),
-        };
-
-        let found = directory
-            .find_by_certificate(public.certificate_fingerprint)
-            .await
-            .expect("a paired client must be found");
-        assert_eq!(found.device_id, public.device_id);
-        assert!(!found.revoked);
-
-        // Revocation must be visible to the very next lookup, with no cache in between.
-        trust.revoke(public.device_id, 2).await.unwrap();
-        let after = directory
-            .find_by_certificate(public.certificate_fingerprint)
-            .await
-            .expect("a revoked device stays visible, marked revoked");
-        assert!(
-            after.revoked,
-            "revocation must be reported, not made to look like an unknown device"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_saved_server_record_is_not_accepted_as_a_client() {
-        // The same database holds both "servers I connect to" and "clients I accept".
-        // Confusing the two would let a device inbound-connect on the strength of a
-        // record that only ever meant the opposite direction.
-        let database = rc_storage::Database::open_in_memory().await.unwrap();
-        let trust = TrustRepository::new(&database);
-        let peer = DeviceIdentity::generate("peer", &SystemClock).unwrap();
-        let public = peer.public();
-
-        trust
-            .insert_paired_device(
-                public.device_id,
-                PeerRoleRow::Agent,
-                "A server",
-                "host",
-                &public.identity_public_key,
-                public.identity_fingerprint,
-                public.certificate_fingerprint,
-                &rc_security::pairing::RequestedPermissions::full(rc_security::Role::Owner),
-                None,
-                1,
-            )
-            .await
-            .unwrap();
-
-        let directory = DatabaseDirectory {
-            trust: TrustRepository::new(&database),
-        };
-        assert!(
-            directory
-                .find_by_certificate(public.certificate_fingerprint)
-                .await
-                .is_none(),
-            "an agent record must not authorize an inbound client"
         );
     }
 

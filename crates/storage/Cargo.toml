@@ -1,6 +1,6 @@
 [package]
 name = "rc-storage"
-description = "SQLite persistence: saved devices, trusted identities, sessions, audit log."
+description = "SQLite persistence: recent connections and this machine's access settings."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+rc-platform = { workspace = true }
 rc-protocol = { workspace = true }
 rc-security = { workspace = true }
 sqlx = { workspace = true }
-hex = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
