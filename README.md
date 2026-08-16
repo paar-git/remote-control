@@ -60,6 +60,8 @@ on every single request.
 │  ├─ monitoring/              System metrics collection
 │  ├─ file-transfer/           Chunked, resumable transfers
 │  ├─ input/                   Physical keys, per-OS shortcut translation, displays
+│  ├─ keygrab/                 Taking Alt+Tab back from the operator's own desktop
+│  ├─ clipboard/               Loop-safe clipboard sharing between the two machines
 │  ├─ video/                   Screen capture, tile differencing, encode and decode
 │  ├─ updater/                 Signed release manifests and installation
 │  └─ host-agent/              The admission decision, and a standalone service
