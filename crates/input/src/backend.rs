@@ -12,3 +12,5 @@ pub mod displays;
 pub mod enigo;
 #[cfg(feature = "inject")]
 pub mod keymap;
+
+pub mod position;

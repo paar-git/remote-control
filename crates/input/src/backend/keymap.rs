@@ -1,22 +1,22 @@
 //! [`PhysicalKey`] to the backend's key type.
 //!
-//! # A known and deliberate compromise
+//! # Position first, character as the fallback
 //!
 //! [`PhysicalKey`] identifies a key by *position*, the way W3C `KeyboardEvent.code`
-//! does. Reproducing that exactly on the host would mean injecting raw scancodes,
-//! which every OS spells differently and which enigo exposes only through
-//! platform-specific escape hatches.
+//! does, so a character key is asked of [`position`] first — the per-OS tables this
+//! file's documentation used to name as the outstanding work.
 //!
-//! So character keys are injected by the character they bear on a US layout, and the
-//! non-character keys — modifiers, function keys, navigation, editing — are injected
-//! by name, which *is* position-independent. The consequence is precise and worth
-//! stating: if the **host** is set to a non-US layout, a letter key may produce that
-//! layout's character rather than the one in the same position. Modifiers, shortcuts,
-//! arrows and function keys are unaffected, because none of them go through the
-//! character path.
+//! Where that answers, the position travels and the host's own layout decides what it
+//! types, which is what every other remote-desktop protocol does at the scancode level.
+//! Where it does not — every named key, and every key at all on Linux, where
+//! `enigo::Key::Other` is a keysym rather than a position — the character path below is
+//! used instead.
 //!
-//! Fixing this properly means per-OS scancode tables. That is a contained change: this
-//! file is the only thing that would need to know.
+//! The remaining consequence is precise and worth stating: on **Linux hosts**, a letter
+//! key is still injected as the character a US layout bears, so a host set to another
+//! layout may produce a different one. Modifiers, shortcuts, arrows and function keys
+//! are unaffected on every platform, because none of them go through the character
+//! path.
 
 use enigo::Key;
 use rc_protocol::PhysicalKey;
@@ -38,6 +38,13 @@ use rc_protocol::PhysicalKey;
     reason = "distinct physical keys that happen to share a character today; merging them would erase the distinction the scancode work will need"
 )]
 pub fn to_enigo(key: PhysicalKey) -> Option<Key> {
+    // Position wins wherever this platform has one. `Key::Other` is a virtual-key code
+    // on Windows and a `CGKeyCode` on macOS; on Linux it is a keysym, so `position`
+    // reports nothing there and this falls through to the character table below.
+    if let Some(code) = super::position::position_code(key) {
+        return Some(Key::Other(code));
+    }
+
     Some(match key {
         // Character keys. Lowercase: shifting is the caller's business, expressed by
         // holding Shift, exactly as a physical keyboard does.
