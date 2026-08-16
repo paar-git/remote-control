@@ -26,6 +26,7 @@ vi.mock('./inputApi.js', async (importOriginal) => {
     sendPointerButton: vi.fn(() => Promise.resolve(null)),
     sendScroll: vi.fn(() => Promise.resolve(null)),
     listenInputAck: vi.fn(() => Promise.resolve(() => undefined)),
+    listenInputApplied: vi.fn(() => Promise.resolve(() => undefined)),
   };
 });
 
@@ -292,5 +293,63 @@ describe('VideoSurface display crossing', () => {
     await userEvent.click(canvas);
 
     expect(inputApi.sendPointerMove).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), 0);
+  });
+});
+
+describe('VideoSurface input lag', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.startStream).mockResolvedValue(STARTED);
+    vi.mocked(videoApi.listenStreamEnded).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.listenInputAck).mockResolvedValue(() => undefined);
+  });
+
+  /** Render a capturing surface and hand back the applied-watermark handler. */
+  async function surfaceWithWatermark(): Promise<(applied: inputApi.InputApplied) => void> {
+    let deliver: ((applied: inputApi.InputApplied) => void) | undefined;
+    vi.mocked(inputApi.listenInputApplied).mockImplementation((handler) => {
+      deliver = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        onPointerSample={() => null}
+      />,
+    );
+    await screen.findByTestId('video-surface');
+    await waitFor(() => {
+      expect(deliver).toBeDefined();
+    });
+    return deliver as (applied: inputApi.InputApplied) => void;
+  }
+
+  it('says the remote machine is behind when it stops keeping up', async () => {
+    // A host too busy to apply input looks, from here, exactly like one that has
+    // stopped — and the link's own ping stays healthy throughout.
+    const deliver = await surfaceWithWatermark();
+
+    act(() => {
+      deliver({ watermark: 10, outstanding: 200 });
+    });
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/behind/i);
+  });
+
+  it('stays quiet while the host keeps up', async () => {
+    // A few events in flight is the normal state of a live session, not a warning.
+    const deliver = await surfaceWithWatermark();
+
+    act(() => {
+      deliver({ watermark: 100, outstanding: 2 });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/behind/i)).not.toBeInTheDocument();
+    });
   });
 });

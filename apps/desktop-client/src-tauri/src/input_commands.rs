@@ -35,7 +35,7 @@ use rc_protocol::{
 use serde::Serialize;
 
 use crate::AppState;
-use crate::connection::InputSink;
+use crate::connection::{ConnectionManager, InputSink};
 
 /// Event carrying an acknowledgement or a display-topology push from the input
 /// channel, out of band from the command that triggered it.
@@ -47,6 +47,25 @@ pub const INPUT_ACK_EVENT: &str = "input://ack";
 /// Event announcing the host's current display arrangement, pushed unprompted and
 /// again whenever it changes.
 pub const INPUT_DISPLAYS_EVENT: &str = "input://displays";
+
+/// Event reporting how far the host has got through the events sent to it.
+///
+/// Derived from [`InputAck::Applied`], which the host sends on its own schedule as a
+/// watermark rather than per event. The gap between what has been issued here and what
+/// the host has applied is the honest measure of input lag: a round-trip ping says the
+/// *link* is healthy, which is a different question from whether the remote machine is
+/// keeping up with the typing.
+pub const INPUT_APPLIED_EVENT: &str = "input://applied";
+
+/// How far the host has got through the input sent to it.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputAppliedDto {
+    /// Every event up to and including this sequence has been applied.
+    pub watermark: u32,
+    /// Events issued but not yet reported applied.
+    pub outstanding: u32,
+}
 
 /// One acknowledgement from the host, as told to the webview.
 #[derive(Debug, Clone, Serialize)]
@@ -121,7 +140,7 @@ pub async fn input_pointer_move(
     manager
         .send_input(
             &InputEvent::MouseMove { x, y, display, seq },
-            input_event_sink(app),
+            input_event_sink(app, &manager),
         )
         .await
         .map_err(|err| describe(&err))
@@ -149,7 +168,7 @@ pub async fn input_pointer_button(
         InputEvent::MouseUp { button, seq }
     };
     manager
-        .send_input(&event, input_event_sink(app))
+        .send_input(&event, input_event_sink(app, &manager))
         .await
         .map_err(|err| describe(&err))
 }
@@ -177,7 +196,7 @@ pub async fn input_scroll(
                 delta_y,
                 seq,
             },
-            input_event_sink(app),
+            input_event_sink(app, &manager),
         )
         .await
         .map_err(|err| describe(&err))
@@ -239,7 +258,7 @@ pub async fn input_key(
 
     if let Some(event) = event {
         manager
-            .send_input(&event, input_event_sink(app))
+            .send_input(&event, input_event_sink(app, &manager))
             .await
             .map_err(|err| describe(&err))?;
     }
@@ -262,9 +281,22 @@ fn intent_name(intent: Intent) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+/// How many issued events the host has not yet reported applying.
+///
+/// Saturating on purpose: the watermark is the host's own count, and a host claiming to
+/// have applied more than this connection ever issued means the two disagree. Reporting
+/// a wrapped-around lag of four billion would be worse than reporting none.
+const fn outstanding_after(issued: u32, watermark: u32) -> u32 {
+    issued.saturating_sub(watermark)
+}
+
 /// A sink that forwards acknowledgements and display topology to the webview as
 /// events, following the out-of-band convention documented at the top of this module.
-fn input_event_sink(app: tauri::AppHandle) -> InputSink {
+fn input_event_sink(app: tauri::AppHandle, manager: &Arc<ConnectionManager>) -> InputSink {
+    // Weak, deliberately: the sink outlives this call inside the channel reader task,
+    // and an owning handle would keep the manager alive for as long as that task runs.
+    let manager = Arc::downgrade(manager);
+
     Arc::new(move |message: InputMessage| {
         use tauri::Emitter as _;
 
@@ -289,6 +321,21 @@ fn input_event_sink(app: tauri::AppHandle) -> InputSink {
                     },
                 );
             }
+            InputMessage::Ack(InputAck::Applied { watermark }) => {
+                // Saturating: the watermark is the host's count, and a host that has
+                // applied more than this connection issued means the two disagree.
+                // Reporting a wrapped-around lag would be worse than reporting none.
+                let outstanding = manager.upgrade().map_or(0, |live| {
+                    outstanding_after(live.input_seq_issued(), watermark)
+                });
+                let _ = app.emit(
+                    INPUT_APPLIED_EVENT,
+                    InputAppliedDto {
+                        watermark,
+                        outstanding,
+                    },
+                );
+            }
             InputMessage::Displays { displays } => {
                 let _ = app.emit(
                     INPUT_DISPLAYS_EVENT,
@@ -298,18 +345,15 @@ fn input_event_sink(app: tauri::AppHandle) -> InputSink {
                         .collect::<Vec<_>>(),
                 );
             }
-            // Two things land here, both deliberately ignored. `InputAck::Applied`
-            // carries a watermark that drives a responsiveness indicator rather than a
-            // per-event outcome, and nothing consumes it yet. Anything else is a
-            // variant a newer agent knows and this build does not, ignored the same way
-            // `read_frames_inner` ignores an unrecognised video message.
+            // A variant a newer agent knows and this build does not; ignored the same
+            // way `read_frames_inner` ignores an unrecognised video message.
             _ => {}
         }
     })
 }
 
 /// The connection manager, or a message saying nothing is connected.
-fn connection(state: &AppState) -> Result<Arc<crate::connection::ConnectionManager>, String> {
+fn connection(state: &AppState) -> Result<Arc<ConnectionManager>, String> {
     state
         .connection
         .as_ref()
@@ -372,6 +416,19 @@ mod tests {
         assert_eq!(parse_button("left"), Ok(MouseButton::Left));
         assert_eq!(parse_button("forward"), Ok(MouseButton::Forward));
         assert!(parse_button("stylus").is_err());
+    }
+
+    #[test]
+    fn a_host_that_claims_more_than_was_sent_reports_no_lag_rather_than_wrapping() {
+        // u32 subtraction underflows to ~4 billion, which would render as a session
+        // billions of events behind rather than one that is simply keeping up.
+        assert_eq!(outstanding_after(3, 900), 0);
+    }
+
+    #[test]
+    fn outstanding_events_are_what_was_issued_beyond_the_watermark() {
+        assert_eq!(outstanding_after(120, 100), 20);
+        assert_eq!(outstanding_after(100, 100), 0);
     }
 
     #[test]

@@ -1017,6 +1017,14 @@ impl ConnectionManager {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// How many input events have been given a sequence number so far.
+    ///
+    /// Compared against the host's applied watermark to say how far behind the host is.
+    #[must_use]
+    pub fn input_seq_issued(&self) -> u32 {
+        self.input_seq.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Send one input event, opening the input channel first if this is the first
     /// event sent on this connection.
     ///

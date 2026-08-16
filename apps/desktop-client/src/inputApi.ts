@@ -104,3 +104,29 @@ export async function listenDisplays(
     if (parsed.success) handler(parsed.data);
   });
 }
+
+/** How far the host has got through the input sent to it. */
+export const inputAppliedSchema = z.object({
+  watermark: z.number().int().nonnegative(),
+  outstanding: z.number().int().nonnegative(),
+});
+
+export type InputApplied = z.infer<typeof inputAppliedSchema>;
+
+/**
+ * Subscribe to the host's applied watermark.
+ *
+ * A round-trip ping says the *link* is healthy, which is a different question from
+ * whether the remote machine is keeping up with the typing. A host busy enough to fall
+ * behind looks, from the operator's side, exactly like one that has stopped.
+ */
+export async function listenInputApplied(
+  handler: (applied: InputApplied) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('input://applied', (event) => {
+    const parsed = inputAppliedSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}

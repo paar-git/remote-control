@@ -36,6 +36,7 @@ import type { Crossing } from './displays';
 import { buttonName, modifierBits, pointerFraction } from './inputCapture.js';
 import {
   listenInputAck,
+  listenInputApplied,
   sendKey,
   sendPointerButton,
   sendPointerMove,
@@ -46,6 +47,15 @@ import { listenStreamEnded, startStream, stopStream, type StreamStarted } from '
 
 /** Frames requested per second. The agent may negotiate something slower. */
 const MAX_FPS = 30;
+
+/**
+ * How many unapplied events mean the host is genuinely behind rather than merely busy.
+ *
+ * A live session always has a few in flight — pointer motion alone issues a sequence
+ * number per sample — so a low threshold would warn constantly. This is roughly a
+ * second of continuous pointer movement.
+ */
+const LAG_THRESHOLD = 60;
 
 export function VideoSurface({
   displayIndex,
@@ -88,6 +98,7 @@ export function VideoSurface({
   const [error, setError] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [lagging, setLagging] = useState(false);
 
   // Codes currently held down, so they can be released if capture ends mid-chord.
   const heldKeys = useRef(new Set<string>());
@@ -199,6 +210,29 @@ export function VideoSurface({
     };
   }, [active]);
 
+  // Falling behind is not the same failure as being refused, and not the same as a dead
+  // link: the ping stays healthy while a busy host queues up everything sent to it.
+  useEffect(() => {
+    if (!active) return undefined;
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    listenInputApplied((applied) => {
+      if (!cancelled) setLagging(applied.outstanding > LAG_THRESHOLD);
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [active]);
+
   // `wheel` is attached natively rather than through React, which registers it passively
   // at the root: a passive listener cannot `preventDefault`, so the operator's own page
   // would scroll alongside the remote one.
@@ -263,6 +297,17 @@ export function VideoSurface({
     }).catch(() => undefined);
   };
 
+  // Most urgent first: a refusal means nothing is getting through, falling behind means
+  // it is but late, and passthrough is merely a mode the operator chose.
+  const status: { message: string; urgent: boolean } | null =
+    refusal !== null
+      ? { message: `Input refused: ${refusal}`, urgent: true }
+      : lagging
+        ? { message: 'The remote machine is behind on input', urgent: true }
+        : passthrough
+          ? { message: 'Shortcuts are sent literally', urgent: false }
+          : null;
+
   if (error !== null) {
     return (
       <div
@@ -326,20 +371,21 @@ export function VideoSurface({
           .join(' ')}
       />
 
-      {/* One status line, because a refusal is the more urgent of the two: an operator
-          whose input is being rejected does not need to be told how it was encoded. */}
-      {active && (refusal !== null || passthrough) && (
+      {/* One status line, most urgent wins. An operator whose input is being rejected
+          does not also need to be told how it was encoded, and one whose host has
+          stopped applying anything does not need to hear about the encoding either. */}
+      {active && status !== null && (
         <p
           role="status"
           className={
             'pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-lg ' +
             'border px-3 py-1.5 text-xs shadow-lg ' +
-            (refusal === null
-              ? 'border-(--color-border) bg-(--color-card) text-(--color-text-secondary)'
-              : 'border-(--color-danger) bg-(--color-card) text-(--color-text)')
+            (status.urgent
+              ? 'border-(--color-danger) bg-(--color-card) text-(--color-text)'
+              : 'border-(--color-border) bg-(--color-card) text-(--color-text-secondary)')
           }
         >
-          {refusal === null ? 'Shortcuts are sent literally' : `Input refused: ${refusal}`}
+          {status.message}
         </p>
       )}
     </div>
