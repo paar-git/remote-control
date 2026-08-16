@@ -1,6 +1,6 @@
 {
   "name": "@rc/shared-types",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Zod schemas and TypeScript types mirroring the Rust protocol crate.",

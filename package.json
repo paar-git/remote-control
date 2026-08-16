@@ -1,6 +1,6 @@
 {
   "name": "remote-control",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Private remote-access platform: host agent and desktop client.",

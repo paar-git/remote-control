@@ -4293,7 +4293,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rc-clipboard"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arboard",
  "blake3",
@@ -4303,7 +4303,7 @@ dependencies = [
 
 [[package]]
 name = "rc-desktop-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4340,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "rc-file-transfer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "parking_lot",
@@ -4353,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "rc-host-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "rc-input"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "display-info",
  "enigo",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "rc-keygrab"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "core-foundation",
  "core-graphics 0.24.0",
@@ -4414,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "rc-monitoring"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "parking_lot",
  "rc-protocol",
@@ -4425,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "rc-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "directories",
  "rc-protocol",
@@ -4439,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "rc-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "hex",
@@ -4452,7 +4452,7 @@ dependencies = [
 
 [[package]]
 name = "rc-security"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64 0.23.0",
@@ -4482,7 +4482,7 @@ dependencies = [
 
 [[package]]
 name = "rc-storage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "rc-platform",
@@ -4499,7 +4499,7 @@ dependencies = [
 
 [[package]]
 name = "rc-transport"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures",
@@ -4518,7 +4518,7 @@ dependencies = [
 
 [[package]]
 name = "rc-updater"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.23.0",
@@ -4544,7 +4544,7 @@ dependencies = [
 
 [[package]]
 name = "rc-video"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "postcard",
  "rc-protocol",
