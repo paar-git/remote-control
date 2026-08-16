@@ -4,7 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionToolbar, TOOLBAR_HIDE_MS, TOOLBAR_REVEAL_PX } from './SessionToolbar';
 
-const ALL = ['control_input', 'transfer_files', 'view_metrics'] as const;
+/** Every permission a session can hold, so `ALL` means what its name says. */
+const ALL = [
+  'view_screen',
+  'control_input',
+  'transfer_files',
+  'view_metrics',
+  'clipboard',
+] as const;
 
 function renderToolbar(permissions: readonly string[] = ALL) {
   const onDisconnect = vi.fn();
@@ -283,9 +290,7 @@ describe('SessionToolbar keyboard passthrough', () => {
 
 describe('SessionToolbar refresh screen', () => {
   it('asks its caller to refresh rather than reaching the stream itself', async () => {
-    // `ALL` predates the view_screen permission and does not include it, so this names
-    // the permission the button actually depends on rather than relying on that.
-    const { onRefreshScreen } = renderToolbar(['view_screen', ...ALL]);
+    const { onRefreshScreen } = renderToolbar();
 
     await userEvent.click(screen.getByRole('button', { name: /refresh screen/i }));
 
