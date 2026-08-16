@@ -21,6 +21,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 rc-host-agent = { workspace = true }
+# No `inject` feature: the client only needs the intent translation tables, never the
+# OS injection backend. Pulling `inject` in would drag enigo into a process that never
+# injects input locally.
+rc-input = { workspace = true }
 rc-platform = { workspace = true }
 rc-protocol = { workspace = true }
 rc-security = { workspace = true }

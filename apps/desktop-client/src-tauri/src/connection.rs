@@ -46,7 +46,7 @@ use rc_protocol::control::{
 use rc_protocol::desktop::{DesktopAgentMessage, DesktopClientMessage, DisplayInfo};
 use rc_protocol::files::{FileAgentMessage, FileClientMessage};
 use rc_protocol::system::MetricsAgentMessage;
-use rc_protocol::{RequestId, SessionId};
+use rc_protocol::{InputEvent, InputMessage, RequestId, SessionId};
 use rc_security::{DeviceIdentity, PermissionSet};
 use rc_transport::{
     ChannelReader, ChannelWriter, ClientConnector, PeerAddress, PinPolicy, TransportError,
@@ -96,6 +96,27 @@ fn spawn_metrics_reader(mut reader: ChannelReader, sink: MetricsSink) {
             sink(message);
         }
         tracing::debug!("the metrics channel closed");
+    });
+}
+
+/// Where acknowledgements and display topology pushed on the input channel are
+/// delivered.
+///
+/// A callback for the same reason as [`MetricsSink`]: the desktop client emits Tauri
+/// events, a test collects into a vector. This is also what keeps
+/// [`ConnectionManager::send_input`] honest about the constraint in this module's
+/// callers — a `Failed` acknowledgement (a revoked `control_input` grant, for instance)
+/// must reach the sink rather than being read and discarded, since this client does not
+/// enforce that permission itself.
+pub type InputSink = Arc<dyn Fn(InputMessage) + Send + Sync>;
+
+/// Forward acknowledgements and display topology to `sink` until the channel closes.
+fn spawn_input_reader(mut reader: ChannelReader, sink: InputSink) {
+    tokio::spawn(async move {
+        while let Ok(Some(message)) = reader.next_message::<InputMessage>().await {
+            sink(message);
+        }
+        tracing::debug!("the input channel closed");
     });
 }
 
@@ -325,6 +346,19 @@ pub struct ConnectionManager {
     /// keyframe itself when the decoder falls behind. `Arc` because both this struct
     /// and that task hold it at once.
     video: Mutex<Option<Arc<Mutex<ChannelWriter>>>>,
+    /// The write half of the input channel, once opened.
+    ///
+    /// Opened lazily on the first input command and kept for the life of the
+    /// connection, mirroring `metrics`: a mouse-move stream would otherwise pay for a
+    /// fresh QUIC stream on every sample.
+    input: Mutex<Option<ChannelWriter>>,
+    /// Monotonic counter for `InputEvent::seq`.
+    ///
+    /// Shared by every input command on this connection so the host's acknowledgements
+    /// and applied watermark stay unambiguous. Gaps are fine — an event this build
+    /// dropped locally (see `input_commands::classify`) simply never uses its number —
+    /// repeats are not.
+    input_seq: std::sync::atomic::AtomicU32,
     /// Who answered, once a connection is established.
     ///
     /// Arrives on `SessionAuthorization::Granted`, so it exists only for an admitted
@@ -376,6 +410,8 @@ impl ConnectionManager {
             files: Mutex::new(None),
             metrics: Mutex::new(None),
             video: Mutex::new(None),
+            input: Mutex::new(None),
+            input_seq: std::sync::atomic::AtomicU32::new(0),
             intentional_disconnect: std::sync::atomic::AtomicBool::new(false),
             backoff: BackoffPolicy::default(),
         }
@@ -974,6 +1010,53 @@ impl ConnectionManager {
         Ok(channel)
     }
 
+    /// The next sequence number for an input event on this connection.
+    #[must_use]
+    pub fn next_input_seq(&self) -> u32 {
+        self.input_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Send one input event, opening the input channel first if this is the first
+    /// event sent on this connection.
+    ///
+    /// # Errors
+    /// The connection is gone, or the transport failed.
+    pub async fn send_input(
+        &self,
+        event: &InputEvent,
+        sink: InputSink,
+    ) -> Result<(), TransportError> {
+        self.ensure_input_channel(sink).await?;
+        let mut slot = self.input.lock().await;
+        let writer = slot.as_mut().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+        writer.send(event).await
+    }
+
+    /// Open the input channel if it is not already open, and start draining
+    /// acknowledgements and display topology into `sink`.
+    async fn ensure_input_channel(&self, sink: InputSink) -> Result<(), TransportError> {
+        let mut slot = self.input.lock().await;
+        if slot.is_some() {
+            return Ok(());
+        }
+
+        let guard = self.active.lock().await;
+        let active = guard.as_ref().ok_or(TransportError::Closed {
+            reason: "not connected".to_owned(),
+        })?;
+
+        let (writer, reader) =
+            rc_transport::open_channel(&active.connection, rc_protocol::Channel::Input).await?;
+        drop(guard);
+
+        spawn_input_reader(reader, sink);
+        *slot = Some(writer);
+        Ok(())
+    }
+
     /// Read one message off the video channel, mapping a closed stream to an error.
     async fn next_video_message(
         reader: &mut ChannelReader,
@@ -1000,6 +1083,7 @@ impl ConnectionManager {
         *self.files.lock().await = None;
         *self.metrics.lock().await = None;
         *self.video.lock().await = None;
+        *self.input.lock().await = None;
 
         if let Some(mut active) = self.active.lock().await.take() {
             // Best-effort: tell the agent why, so its audit trail records an intentional

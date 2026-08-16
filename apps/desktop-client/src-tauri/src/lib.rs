@@ -17,6 +17,7 @@ mod file_commands;
 mod host;
 mod host_commands;
 mod host_events;
+mod input_commands;
 mod session_commands;
 mod trust_commands;
 mod update_commands;
@@ -372,6 +373,10 @@ pub fn run() {
             video_commands::video_start_stream,
             video_commands::video_stop_stream,
             video_commands::video_request_keyframe,
+            input_commands::input_pointer_move,
+            input_commands::input_pointer_button,
+            input_commands::input_scroll,
+            input_commands::input_key,
         ])
         .run(tauri::generate_context!());
 
