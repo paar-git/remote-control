@@ -32,7 +32,9 @@ sections, not more navigation.
 
 **A session holds exactly what it was granted.** Fixed at admission, carried on the
 session, and re-checked on every request rather than once at connect. Both machines
-enforce it; the one being controlled is the authority.
+enforce it; the one being controlled is the authority. Six permissions, five of them
+offered on the Accept dialog; `Administer` is reachable only from a trusted device's own
+settings.
 
 **Over a live session:** the remote screen, file browsing and chunked, resumable
 transfer in both directions, and live system metrics. Each is gated on the permission
@@ -57,31 +59,64 @@ picture for a human to spot.
 **Watching a screen is its own permission.** Not implied by being allowed to move the
 pointer, and not granted by unattended access that was given for something else.
 
+**The remote machine can be driven.** The surface forwards keys, pointer motion, clicks
+and the wheel while it holds focus — only while focused, so the operator can still use
+their own machine during a session. Shortcuts cross by *meaning* rather than by key: the
+controller recognises the chord its own OS taught the operator, and the host spells that
+meaning in its own chord, so Copy is Copy in either direction. A toggle sends a chord
+literally where a program needs the raw keys instead, because `Ctrl+C` in a remote
+terminal is SIGINT rather than Copy. Keys still held are released explicitly on blur and
+on unmount, since the host has no other way to learn a key came up.
+
+**A refusal is visible, and so is a host that falls behind.** A revoked `control_input`
+grant reads as a refusal naming its reason rather than as a frozen screen, and a host too
+busy to apply input says so — a round-trip ping stays healthy while the machine at the
+other end does not.
+
+**Multi-monitor hosts are navigable.** The picker draws the host's real arrangement from
+its reported geometry, and the pointer reaching an edge with a monitor beyond it carries
+across to the corresponding point rather than stopping at the seam. The layout is kept
+current by the host's own unsolicited pushes, because a monitor plugged in mid-session
+moves where every later coordinate lands.
+
+**Clipboard text is shared, and it is its own permission.** A clipboard carries whatever
+its owner last copied — routinely a password or a key that was never on screen — so it
+is not implied by being allowed to type. Both ends hold the state that stops the two
+echoing a value back and forth forever, and the relaying side keeps a digest rather than
+the text.
+
 **The application updates itself** from a signed release manifest, verifying a SHA-256
 checksum before anything is installed and never installing without confirmation.
 
 ## What does not work yet
 
-**Some chords never reach the remote machine.** `Alt+Tab`, `Ctrl+Alt+Del` and the rest
-of what an operating system reserves for itself are intercepted by the *operator's* own
-OS before this app sees the keystroke. Forwarding them needs low-level keyboard hooking,
-which is not built. Everything else about driving the screen works: the surface captures
-keys, pointer motion, clicks and the wheel while it holds focus, and `control_input` is
-now granted, enforced *and* consumed.
+**Desktop shortcut grabbing is written but has never run on a real desktop.** `Alt+Tab`
+and its kin are intercepted by the *operator's* own OS before this app sees them, so a
+low-level keyboard hook takes them back and forwards each as the intent it means —
+`SwitchApp`, `ShowDesktop`, `LockScreen`. The policy deciding which chords to take, when
+to hold the grab, and what to do with one that was caught is pure and tested on every
+platform. The hook itself exists for **Windows only**, compiles, and has never been
+installed on a running desktop. macOS and Linux report `Unsupported` rather than taking
+nothing quietly: macOS needs a `CGEventTap` with the Accessibility grant, X11 needs
+`XGrabKey`, and Wayland has no portable equivalent at all.
 
-**Character keys are injected by US-layout character.** A letter key is delivered to the
-host as the character a US layout would produce, so a host running a non-US layout may
-type a different character than the operator pressed. Chords and intents are unaffected;
-this is a property of the injection backend, not of the translation layer.
+**`Ctrl+Alt+Del` cannot be forwarded, and says so.** It is dispatched on the Secure
+Desktop, above every hook an ordinary process may install. It is named unreachable
+rather than offered, because a switch that quietly did nothing would leave an operator
+believing they had sent it to a machine they cannot see.
 
-**Clipboard sync does not exist.** Copy on one machine does not make the text available
-on the other. The `Copy` intent presses the host's own Copy chord, which fills the
-*host's* clipboard — there is no channel carrying its contents back.
+**Character keys are injected by position on Windows and macOS, by character on Linux.**
+Windows uses virtual-key codes and macOS `kVK_ANSI_*` `CGKeyCode`s, so the physical key
+travels and the host's own layout decides what it types. Linux still goes by character,
+because enigo's escape hatch there is a *keysym*, which names a character rather than a
+position — so a Linux host on a non-US layout may still type something other than what
+the operator pressed. None of these tables has injected a keystroke on real hardware.
 
 Also absent from the video path: H.264 and every other lossy codec (the variants exist
-and negotiation refuses them), clipboard sync, adaptive quality, and viewing more than
-one display at a time. `QualityPreset` is accepted and reported back but changes nothing,
-because the only codecs implemented are lossless.
+and negotiation refuses them), adaptive quality, and viewing more than one display at
+once — a session shows one display at a time, though it can now switch between them and
+carry the pointer across their edges. `QualityPreset` is accepted and reported back but
+changes nothing, because the only codecs implemented are lossless.
 
 **Screen capture is verified on Windows only.** macOS and Linux compile and are covered
 by CI, but no frame has ever been captured on either. Wayland is refused outright rather
@@ -124,10 +159,10 @@ Run against the current tree. Reproduce with `pnpm verify`.
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace` | **662 passed**, 0 failed |
+| `cargo test --workspace` | **876 passed**, 0 failed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean, exit 0 |
 | `cargo fmt --all --check` | clean |
-| `pnpm -r test:run` | **265 passed**, 0 failed (214 desktop + 51 shared-types) |
+| `pnpm -r test:run` | **388 passed**, 0 failed (337 desktop + 51 shared-types) |
 | `pnpm -r typecheck` | clean |
 | `pnpm run lint` | clean |
 | `pnpm run format:check` | clean |

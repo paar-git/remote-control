@@ -18,10 +18,17 @@ third-party cloud in the path.
 > literally when a program needs the raw keys instead — `Ctrl+C` in a remote terminal is
 > SIGINT, not Copy.
 >
-> Still missing: `Alt+Tab` and the other chords the operator's own OS swallows before
-> this app sees them, clipboard sync, and any lossy codec. Screen capture is verified on
-> Windows; macOS and Linux compile and are tested in CI but have never captured a frame.
-> See [`PROGRESS.md`](PROGRESS.md) for exactly what works today.
+> Multi-monitor hosts are navigable — the picker draws the real arrangement and the
+> pointer crosses between screens — and clipboard text is shared, gated on a permission
+> of its own because a clipboard carries what its owner last copied rather than what is
+> on screen.
+>
+> `Alt+Tab` and its kin are taken back from the operator's own desktop and forwarded as
+> the action they mean, but that hook exists for Windows only and has never run on a real
+> desktop. `Ctrl+Alt+Del` cannot be forwarded at all and says so. No lossy codec exists.
+> Screen capture is verified on Windows; macOS and Linux compile and are tested in CI but
+> have never captured a frame. See [`PROGRESS.md`](PROGRESS.md) for exactly what works
+> today.
 
 ## Design in one paragraph
 
