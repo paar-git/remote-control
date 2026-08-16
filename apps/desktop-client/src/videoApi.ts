@@ -2,9 +2,10 @@
  * Tauri command wrappers for the video stream — Task 10's Rust surface, typed for the
  * frontend that consumes it.
  *
- * Kept out of `api.ts` deliberately: starting a stream hands the backend a `Channel`,
- * which crosses the IPC boundary by reference rather than as a plain JSON argument, so
- * it does not fit the schema-in / schema-out shape everything in `api.ts` follows.
+ * Kept out of `api.ts` rather than added to it: `api.ts` carries the repo owner's own
+ * uncommitted, in-flight work, and this task was told not to touch it. `call()` itself
+ * would happily accept a `Channel` argument alongside the rest — nothing about the
+ * `Channel` demanded a separate file.
  */
 
 import { Channel } from '@tauri-apps/api/core';

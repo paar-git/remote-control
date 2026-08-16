@@ -27,6 +27,12 @@ vi.mock('@tauri-apps/api/event', () => ({
  * constructor, which does not touch a canvas itself. The video pipeline's tests
  * construct one to hand to `putImageData`, so a minimal stand-in is provided here
  * rather than in each test file.
+ *
+ * This stand-in is looser than a real browser's: it does not throw when `data.length`
+ * disagrees with `width * height * 4`, as a real `ImageData` constructor does. That gap
+ * is harmless today only because `video.ts`'s `parseRegion` already enforces that exact
+ * invariant before an `ImageData` is ever constructed — this polyfill must not be relied
+ * on to catch it, because it will not.
  */
 if (typeof globalThis.ImageData === 'undefined') {
   class ImageDataPolyfill {

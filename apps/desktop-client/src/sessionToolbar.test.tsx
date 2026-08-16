@@ -10,16 +10,19 @@ function renderToolbar(permissions: readonly string[] = ALL) {
   const onDisconnect = vi.fn();
   const onOpenFiles = vi.fn();
   const onOpenMonitoring = vi.fn();
+  const onToggleFitted = vi.fn();
   render(
     <SessionToolbar
       permissions={permissions}
       machineName="WORK-LAPTOP"
+      fitted
+      onToggleFitted={onToggleFitted}
       onDisconnect={onDisconnect}
       onOpenFiles={onOpenFiles}
       onOpenMonitoring={onOpenMonitoring}
     />,
   );
-  return { onDisconnect, onOpenFiles, onOpenMonitoring };
+  return { onDisconnect, onOpenFiles, onOpenMonitoring, onToggleFitted };
 }
 
 /** Move the pointer to `clientY`, as the window listener sees it. */
@@ -140,15 +143,54 @@ describe('SessionToolbar', () => {
 
   it('calls back the tool that was pressed', async () => {
     const user = userEvent.setup();
-    const { onDisconnect, onOpenFiles, onOpenMonitoring } = renderToolbar();
+    const { onDisconnect, onOpenFiles, onOpenMonitoring, onToggleFitted } = renderToolbar();
 
     await user.click(screen.getByRole('button', { name: /files/i }));
     await user.click(screen.getByRole('button', { name: /monitoring/i }));
+    await user.click(screen.getByRole('button', { name: /fit to window/i }));
     await user.click(screen.getByRole('button', { name: /disconnect/i }));
 
     expect(onOpenFiles).toHaveBeenCalledOnce();
     expect(onOpenMonitoring).toHaveBeenCalledOnce();
+    expect(onToggleFitted).toHaveBeenCalledOnce();
     expect(onDisconnect).toHaveBeenCalledOnce();
+  });
+
+  it('reflects the fitted prop it is given rather than tracking its own', () => {
+    // This is a controlled toggle now on purpose (see SessionToolbar's doc comment):
+    // the button's pressed state must follow the prop, not a `useState` of its own,
+    // which is exactly what let the original toggle look healthy while doing nothing.
+    const { rerender } = render(
+      <SessionToolbar
+        permissions={ALL}
+        machineName="WORK-LAPTOP"
+        fitted={false}
+        onToggleFitted={vi.fn()}
+        onDisconnect={vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenMonitoring={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /fit to window/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+
+    rerender(
+      <SessionToolbar
+        permissions={ALL}
+        machineName="WORK-LAPTOP"
+        fitted
+        onToggleFitted={vi.fn()}
+        onDisconnect={vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenMonitoring={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /fit to window/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 
   it('renders an untrusted machine name as inert text', () => {
@@ -156,6 +198,8 @@ describe('SessionToolbar', () => {
       <SessionToolbar
         permissions={ALL}
         machineName="<img src=x onerror=alert(1)>"
+        fitted
+        onToggleFitted={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
