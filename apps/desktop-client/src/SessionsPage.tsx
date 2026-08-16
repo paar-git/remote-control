@@ -4,44 +4,27 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-import {
-  disconnectInbound,
-  listInboundSessions,
-  listSessionHistory,
-  type InboundSession,
-  type SessionRecord,
-} from './api.js';
+import { listSessionHistory, type InboundSession, type SessionRecord } from './api.js';
+import { Activity } from 'lucide-react';
+
 import { formatDuration, formatRelative, humanise } from './format.js';
 import { permissionLabel } from './labels.js';
 import { Button, EmptyState, PageHeader, type Toast } from './ui';
 
-const POLL_MS = 2000;
+const HISTORY_POLL_MS = 2000;
 
 export function SessionsPage({
+  inbound,
+  onDisconnectInbound,
   onToast,
 }: {
+  readonly inbound: readonly InboundSession[];
+  readonly onDisconnectInbound: (sessionId: string) => void;
   readonly onToast: (toast: Toast) => void;
 }): React.JSX.Element {
-  const [inbound, setInbound] = useState<readonly InboundSession[] | null>(null);
   const [history, setHistory] = useState<readonly SessionRecord[] | null>(null);
 
-  const refreshInbound = useCallback(() => {
-    listInboundSessions()
-      .then(setInbound)
-      .catch(() => {
-        setInbound((current) => current ?? []);
-      });
-  }, []);
-
-  useEffect(() => {
-    refreshInbound();
-    const timer = window.setInterval(refreshInbound, POLL_MS);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [refreshInbound]);
-
-  useEffect(() => {
+  const refreshHistory = useCallback(() => {
     listSessionHistory()
       .then(setHistory)
       .catch((error: unknown) => {
@@ -49,28 +32,22 @@ export function SessionsPage({
           kind: 'error',
           message: error instanceof Error ? error.message : 'Could not load session history.',
         });
-        setHistory([]);
+        setHistory((current) => current ?? []);
       });
   }, [onToast]);
 
-  const disconnect = (sessionId: string): void => {
-    disconnectInbound(sessionId)
-      .then(() => {
-        refreshInbound();
-      })
-      .catch((error: unknown) => {
-        onToast({
-          kind: 'error',
-          message: error instanceof Error ? error.message : 'Could not disconnect that session.',
-        });
-      });
-  };
+  useEffect(() => {
+    refreshHistory();
+    const timer = window.setInterval(refreshHistory, HISTORY_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [refreshHistory, inbound]);
 
-  const empty =
-    inbound !== null && history !== null && inbound.length === 0 && history.length === 0;
+  const empty = history !== null && inbound.length === 0 && history.length === 0;
 
   return (
-    <div className="mx-auto w-full max-w-3xl">
+    <div className="w-full">
       <PageHeader
         title="Sessions"
         description="Who is connected now, and what has already happened."
@@ -78,40 +55,45 @@ export function SessionsPage({
 
       {empty ? (
         <EmptyState
+          icon={Activity}
           title="No sessions yet"
           body="Incoming and outgoing connections will be listed here."
         />
       ) : (
-        <div className="flex flex-col gap-8">
-          {inbound !== null && inbound.length > 0 && (
+        <div className="flex flex-col gap-6">
+          {inbound.length > 0 && (
             <section data-testid="active-sessions">
-              <h2 className="mb-3 text-base font-semibold">Active Sessions</h2>
-              <ul className="flex flex-col gap-3">
-                {inbound.map((session) => (
-                  <li
-                    key={session.sessionId}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-(--color-border) bg-(--color-card) px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-medium">{session.deviceName}</p>
-                      <p className="flex flex-wrap items-center gap-x-2 text-xs text-(--color-text-secondary)">
-                        <span>Incoming</span>
-                        <span>Direct QUIC</span>
-                        <span>
-                          {formatDuration(Math.max(0, (Date.now() - session.startedMs) / 1000))}
-                        </span>
+              <h2 className="mb-2 text-[17px] font-medium">Active Sessions</h2>
+              <ul className="overflow-hidden rounded-[4px] border border-(--color-border) bg-(--color-card)">
+                {inbound.map((session, index) => (
+                  <li key={session.sessionId}>
+                    {index > 0 && <div className="mx-4 h-px bg-(--color-separator)" />}
+                    <div className="flex min-h-12 items-center gap-4 px-4 py-2.5">
+                      <p className="min-w-[140px] flex-1 truncate text-[14px] font-medium">
+                        {session.deviceName}
+                      </p>
+                      <p className="w-[88px] shrink-0 text-[13px] text-(--color-text-secondary)">
+                        Incoming
+                      </p>
+                      <p className="w-[72px] shrink-0 text-[13px] text-(--color-text-secondary)">
+                        Active
+                      </p>
+                      <p className="w-[72px] shrink-0 font-mono text-[13px] text-(--color-text-secondary)">
+                        {formatDuration(Math.max(0, (Date.now() - session.startedMs) / 1000))}
+                      </p>
+                      <p className="flex min-w-0 flex-1 flex-wrap gap-x-2 truncate text-[13px] text-(--color-text-muted)">
                         {session.permissions.map((permission) => (
                           <span key={permission}>{permissionLabel(permission)}</span>
                         ))}
                       </p>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={() => onDisconnectInbound(session.sessionId)}
+                      >
+                        Disconnect
+                      </Button>
                     </div>
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      onClick={() => disconnect(session.sessionId)}
-                    >
-                      Disconnect
-                    </Button>
                   </li>
                 ))}
               </ul>
@@ -120,36 +102,34 @@ export function SessionsPage({
 
           {history !== null && history.length > 0 && (
             <section data-testid="recent-sessions">
-              <h2 className="mb-3 text-base font-semibold">Recent Sessions</h2>
-              <ul className="flex flex-col gap-2">
-                {history.map((record) => (
-                  <li
-                    key={record.id}
-                    className="flex items-center justify-between gap-3 rounded-xl border border-(--color-border) bg-(--color-card) px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-medium">{record.deviceName}</p>
-                      <p className="text-xs text-(--color-text-secondary)">
-                        <span>{humanise(record.direction)}</span>
-                        {' · '}
-                        <span>{humanise(record.outcome)}</span>
-                        {record.endedMs !== null && (
-                          <>
-                            {' · '}
-                            {formatDuration(
-                              Math.max(0, (record.endedMs - record.startedMs) / 1000),
-                            )}
-                          </>
-                        )}
-                        {' · '}
-                        {formatRelative(record.startedMs)}
-                        {record.endReason !== null && record.endReason !== '' && (
-                          <>
-                            {' · '}
-                            {humanise(record.endReason)}
-                          </>
-                        )}
+              <h2 className="mb-2 text-[17px] font-medium">Recent Sessions</h2>
+              <ul className="overflow-hidden rounded-[4px] border border-(--color-border) bg-(--color-card)">
+                {history.map((record, index) => (
+                  <li key={record.id}>
+                    {index > 0 && <div className="mx-4 h-px bg-(--color-separator)" />}
+                    <div className="flex min-h-12 items-center gap-4 px-4 py-2.5">
+                      <p className="min-w-[140px] flex-1 truncate text-[14px] font-medium">
+                        {record.deviceName}
                       </p>
+                      <p className="w-[88px] shrink-0 text-[13px] text-(--color-text-secondary)">
+                        {humanise(record.direction)}
+                      </p>
+                      <p className="w-[72px] shrink-0 text-[13px] text-(--color-text-secondary)">
+                        {humanise(record.outcome)}
+                      </p>
+                      <p className="hidden w-[120px] shrink-0 text-[13px] text-(--color-text-muted) sm:block">
+                        {formatRelative(record.startedMs)}
+                      </p>
+                      <p className="w-[72px] shrink-0 font-mono text-[13px] text-(--color-text-secondary)">
+                        {record.endedMs === null
+                          ? '—'
+                          : formatDuration(Math.max(0, (record.endedMs - record.startedMs) / 1000))}
+                      </p>
+                      {record.endReason !== null && record.endReason !== '' && (
+                        <p className="truncate text-[13px] text-(--color-text-muted)">
+                          {humanise(record.endReason)}
+                        </p>
+                      )}
                     </div>
                   </li>
                 ))}

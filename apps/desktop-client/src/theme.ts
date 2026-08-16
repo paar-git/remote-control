@@ -1,5 +1,5 @@
 /**
- * Colour theme. Light, dark, or follow the OS.
+ * Colour theme. Dark is the product default; light and system remain available.
  *
  * Stored locally so the choice survives a restart. The document `data-theme` attribute
  * is the only thing CSS reads; this module is the only writer.
@@ -12,7 +12,7 @@ const STORAGE_KEY = 'rc-theme';
 export function loadTheme(): ThemePreference {
   const stored = window.localStorage.getItem(STORAGE_KEY);
   if (stored === 'light' || stored === 'dark' || stored === 'system') return stored;
-  return 'system';
+  return 'dark';
 }
 
 export function resolvedTheme(preference: ThemePreference): 'light' | 'dark' {

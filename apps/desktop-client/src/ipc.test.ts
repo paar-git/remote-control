@@ -43,9 +43,14 @@ describe('call', () => {
   });
 
   it('handles a non-Error rejection without losing the message', async () => {
-    // Tauri rejects with a plain string when a command returns Err(String).
     mockInvoke.mockRejectedValue('permission denied');
     await expect(call('demo', schema)).rejects.toThrow('permission denied');
+  });
+
+  it('reads the message field from a Tauri command-error object', async () => {
+    mockInvoke.mockRejectedValue({ code: 'not_authorized', message: 'That machine refused.' });
+    await expect(call('demo', schema)).rejects.toThrow('That machine refused.');
+    await expect(call('demo', schema)).rejects.not.toThrow(/object Object/);
   });
 
   it('rejects a response that does not match the schema', async () => {

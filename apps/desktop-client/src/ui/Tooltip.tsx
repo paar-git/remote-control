@@ -2,8 +2,7 @@
  * Tooltips.
  *
  * Rendered into `document.body` and positioned with fixed coordinates, so a tooltip on
- * an item inside a scrolling sidebar is never clipped by its container — the case that
- * matters most here, since the collapsed sidebar depends on tooltips for its labels.
+ * a compact control is never clipped by its container.
  *
  * A tooltip is supplementary. It appears after a short delay on hover, immediately on
  * keyboard focus, and it never carries information that is not also available elsewhere.

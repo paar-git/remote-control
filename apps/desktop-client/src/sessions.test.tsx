@@ -6,6 +6,7 @@ import * as api from './api.js';
 import type { InboundSession, SessionRecord } from './api.js';
 import { InboundSessionBanner } from './InboundSessionBanner';
 import { SessionsPage } from './SessionsPage';
+import type { Toast } from './ui';
 
 vi.mock('./api.js', async (importOriginal) => {
   const actual: typeof api = await importOriginal();
@@ -17,6 +18,20 @@ vi.mock('./api.js', async (importOriginal) => {
     emergencyDisconnect: vi.fn(),
   };
 });
+
+function renderPage({
+  inbound = [],
+  onDisconnectInbound = vi.fn(),
+  onToast = vi.fn(),
+}: {
+  readonly inbound?: readonly InboundSession[];
+  readonly onDisconnectInbound?: (sessionId: string) => void;
+  readonly onToast?: (toast: Toast) => void;
+} = {}): void {
+  render(
+    <SessionsPage inbound={inbound} onDisconnectInbound={onDisconnectInbound} onToast={onToast} />,
+  );
+}
 
 function inboundSession(overrides: Partial<InboundSession> = {}): InboundSession {
   return {
@@ -47,10 +62,6 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
-function mockInbound(sessions: InboundSession[]): void {
-  vi.mocked(api.listInboundSessions).mockResolvedValue(sessions);
-}
-
 function mockHistory(records: SessionRecord[]): void {
   vi.mocked(api.listSessionHistory).mockResolvedValue(records);
 }
@@ -63,9 +74,8 @@ describe('SessionsPage', () => {
   });
 
   it('separates what is happening now from what already happened', async () => {
-    mockInbound([inboundSession({ deviceName: 'Gaming PC' })]);
     mockHistory([record({ deviceName: 'Laptop', outcome: 'completed' })]);
-    render(<SessionsPage onToast={vi.fn()} />);
+    renderPage({ inbound: [inboundSession({ deviceName: 'Gaming PC' })] });
 
     expect(await screen.findByRole('heading', { name: 'Active Sessions' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Recent Sessions' })).toBeInTheDocument();
@@ -76,41 +86,53 @@ describe('SessionsPage', () => {
   });
 
   it('shows what an active session is permitted to do', async () => {
-    mockInbound([inboundSession({ permissions: ['view_metrics', 'transfer_files'] })]);
     mockHistory([]);
-    render(<SessionsPage onToast={vi.fn()} />);
+    renderPage({
+      inbound: [inboundSession({ permissions: ['view_metrics', 'transfer_files'] })],
+    });
 
     expect(await screen.findByText('System Metrics')).toBeInTheDocument();
     expect(screen.getByText('File Transfer')).toBeInTheDocument();
   });
 
-  it('disconnects an active session', async () => {
-    const disconnectInbound = vi.mocked(api.disconnectInbound);
-    mockInbound([inboundSession({ sessionId: 'ses-1' })]);
+  it('disconnects an active session through the list the app already owns', async () => {
+    const onDisconnectInbound = vi.fn();
     mockHistory([]);
-    render(<SessionsPage onToast={vi.fn()} />);
+    renderPage({
+      inbound: [inboundSession({ sessionId: 'ses-1' })],
+      onDisconnectInbound,
+    });
 
     await userEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
 
-    expect(disconnectInbound).toHaveBeenCalledWith('ses-1');
+    expect(onDisconnectInbound).toHaveBeenCalledWith('ses-1');
+    expect(api.listInboundSessions).not.toHaveBeenCalled();
+    expect(api.disconnectInbound).not.toHaveBeenCalled();
   });
 
   it('shows a failed connection as failed rather than omitting it', async () => {
-    mockInbound([]);
     mockHistory([record({ deviceName: 'Office PC', outcome: 'refused', endReason: null })]);
-    render(<SessionsPage onToast={vi.fn()} />);
+    renderPage();
 
     expect(await screen.findByText('Refused')).toBeInTheDocument();
     expect(screen.getByText('Incoming')).toBeInTheDocument();
   });
 
+  it('shows an outgoing session as outgoing', async () => {
+    mockHistory([record({ deviceName: 'Office PC', direction: 'outgoing' })]);
+    renderPage();
+
+    expect(await screen.findByText('Outgoing')).toBeInTheDocument();
+    expect(screen.getByText('Office PC')).toBeInTheDocument();
+  });
+
   it('uses a compact empty state rather than a large empty container', async () => {
-    mockInbound([]);
     mockHistory([]);
-    render(<SessionsPage onToast={vi.fn()} />);
+    renderPage();
 
     expect(await screen.findByText(/no sessions yet/i)).toBeInTheDocument();
     expect(screen.queryByTestId('recent-sessions')).not.toBeInTheDocument();
+    expect(api.listInboundSessions).not.toHaveBeenCalled();
   });
 });
 

@@ -34,7 +34,7 @@ export function CopyButton({
             setCopied(true);
             setTimeout(() => {
               setCopied(false);
-            }, 2000);
+            }, 1200);
           })
           .catch(() => {
             // Clipboard access can be refused; saying so beats failing silently.

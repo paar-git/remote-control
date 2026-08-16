@@ -1,18 +1,16 @@
 /**
- * This machine: name, readiness, the permanent device ID, and the incoming switch.
- *
- * IPv4, IPv6 and hostname sit behind a disclosure. Nobody should need to understand
- * IPv6 to use this.
+ * This machine: readiness, name, and a dense settings table.
  */
 
-import { Share2 } from 'lucide-react';
+import { Check, ChevronRight, Copy, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 
 import { displayAddress } from './address.js';
 import type { HostStatus, LocalIdentity } from './api.js';
+import { displayIpv4, displayIpv6, isIpv6, Panel, PanelHeader, primaryAddress } from './chrome';
 import { DeviceAvatar } from './DeviceAvatar';
 import { formatDeviceId } from './format.js';
-import { Button, CopyButton, StatusBadge, Toggle } from './ui';
+import { Toggle } from './ui';
 
 export function ThisDevice({
   status,
@@ -30,147 +28,172 @@ export function ThisDevice({
   readonly toggling?: boolean | undefined;
 }): React.JSX.Element {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [shared, setShared] = useState(false);
   const primary = primaryAddress(status.addresses);
   const ipv6 = status.addresses.filter(isIpv6);
   const deviceId = identity === null ? '—' : formatDeviceId(identity.identityFingerprint);
 
-  const share = (): void => {
-    const lines = [
-      status.machineName,
-      `Device ID: ${deviceId}`,
-      ...(primary === null ? [] : [`Address: ${primary}`]),
-    ];
-    void navigator.clipboard.writeText(lines.join('\n')).then(
-      () => {
-        setShared(true);
-        window.setTimeout(() => {
-          setShared(false);
-        }, 2000);
-      },
-      () => {
-        setShared(false);
-      },
-    );
-  };
-
   return (
-    <section className="rounded-[var(--radius-card)] border border-(--color-border) bg-(--color-card) p-6 shadow-(--shadow-card)">
-      <div className="mb-5 flex items-start justify-between gap-3">
-        <h2 className="text-xl font-semibold tracking-tight">This Device</h2>
-        <Toggle
-          label="Allow incoming connections"
-          checked={status.accepting}
-          disabled={toggling}
-          onChange={onToggleAccepting}
-        />
+    <Panel>
+      <PanelHeader
+        title="This Device"
+        trailing={
+          <div className="flex items-center gap-3">
+            <span className="text-[13px] text-(--color-text-secondary)">Accept connections</span>
+            <Toggle
+              label="Accept connections"
+              checked={status.accepting}
+              disabled={toggling}
+              onChange={onToggleAccepting}
+            />
+          </div>
+        }
+      />
+
+      <div className="flex items-center gap-3 px-[22px] pb-4">
+        <DeviceAvatar name={status.machineName} os={os} size="sm" />
+        <div className="min-w-0">
+          <p className="truncate text-[15px] font-medium" title={status.machineName}>
+            {status.machineName}
+          </p>
+          <p role="status" className="mt-0.5 flex items-center gap-1.5 text-[13px] text-(--color-text-secondary)">
+            <span
+              aria-hidden="true"
+              className={
+                'size-1.5 rounded-full ' +
+                (status.accepting ? 'bg-(--color-success)' : 'bg-(--color-text-muted)')
+              }
+            />
+            {status.accepting ? 'Ready for connections' : 'Connections disabled'}
+          </p>
+        </div>
       </div>
 
-      <div className="flex flex-col gap-4">
-        <div className="flex items-start gap-3">
-          <DeviceAvatar name={status.machineName} os={os} />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-lg font-semibold" title={status.machineName}>
-              {status.machineName}
-            </p>
-            <p role="status" className="mt-1">
-              <StatusBadge tone={status.accepting ? 'ready' : 'idle'}>
-                {status.accepting ? 'Ready for connections' : 'Not accepting connections'}
-              </StatusBadge>
-            </p>
-          </div>
-        </div>
+      <div className="mx-[22px] h-px bg-(--color-separator)" />
 
-        <div>
-          <p className="mb-1 text-sm text-(--color-text-secondary)">Device ID</p>
-          <p aria-label="Device ID" className="font-mono text-2xl tracking-wide">
-            {deviceId}
-          </p>
-          <p className="mt-1 text-xs text-(--color-text-secondary)">
-            Identity — verify this on the other machine
-          </p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <CopyButton value={deviceId} label="device ID" size="sm" />
-            <Button variant="default" size="sm" icon={Share2} onClick={share}>
-              {shared ? 'Copied' : 'Share'}
-            </Button>
-          </div>
-        </div>
-
-        <div>
-          <p className="mb-1 text-sm text-(--color-text-secondary)">Connect using</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <p aria-label="Connect using" className="font-mono text-base tracking-tight">
-              {primary ?? '—'}
-            </p>
-            {primary !== null && <CopyButton value={primary} label="address" size="sm" />}
-          </div>
-        </div>
-
-        <div>
-          <button
-            type="button"
-            className="text-sm font-medium text-(--color-text-secondary) hover:text-(--color-text)"
-            aria-expanded={advancedOpen}
-            onClick={() => {
-              setAdvancedOpen((open) => !open);
-            }}
-          >
-            Advanced network information
-          </button>
-          {advancedOpen && (
-            <dl className="mt-3 flex flex-col gap-2 text-sm">
-              <InfoRow label="IPv4" value={displayIpv4(status.addresses)} />
-              {ipv6.map((address) => (
-                <InfoRow key={address} label="IPv6" value={displayIpv6(address)} />
-              ))}
-              <InfoRow label="Hostname" value={hostname ?? '—'} />
-              <InfoRow label="Listen port" value={String(status.listenPort)} />
-              <InfoRow label="Connection method" value="Direct QUIC / TLS 1.3" />
-              <InfoRow
-                label="Local network"
-                value={
-                  status.accepting
-                    ? `Listening on ${String(status.listenPort)}`
-                    : 'Not accepting connections'
+      <dl className="px-[22px] py-2">
+        <DeviceInfoRow
+          label="Device ID"
+          value={
+            <span className="flex items-center gap-2">
+              <span aria-label="Device ID" className="font-mono text-[14px] tracking-wide">
+                {deviceId}
+              </span>
+              {deviceId !== '—' && <InlineCopy value={deviceId} label="device ID" />}
+            </span>
+          }
+        />
+        <DeviceInfoRow
+          label="Network address"
+          value={
+            <span className="flex items-center gap-2">
+              <span aria-label="Network address" className="font-mono text-[14px]">
+                {primary ?? '—'}
+              </span>
+              {primary !== null && <InlineCopy value={primary} label="address" />}
+            </span>
+          }
+        />
+        <div className="flex min-h-9 items-center justify-between gap-4">
+          <dt className="text-[14px] text-(--color-text-secondary)">Identity</dt>
+          <dd>
+            <button
+              type="button"
+              aria-expanded={advancedOpen}
+              onClick={() => {
+                setAdvancedOpen((open) => !open);
+              }}
+              className="flex items-center gap-1.5 text-[14px] text-(--color-text)"
+            >
+              <ShieldCheck aria-hidden="true" className="size-4 shrink-0 text-(--color-success)" />
+              Verified
+              <ChevronRight
+                aria-hidden="true"
+                className={
+                  'size-4 text-(--color-text-muted) transition-transform duration-125 ' +
+                  (advancedOpen ? 'rotate-90' : '')
                 }
               />
-              <InfoRow label="Relay" value="Not used — this build connects directly" />
-            </dl>
-          )}
+            </button>
+          </dd>
         </div>
-      </div>
-    </section>
+      </dl>
+
+      {advancedOpen && (
+        <dl className="border-t border-(--color-separator) px-[22px] py-2">
+          <DeviceInfoRow
+            label="IPv4"
+            value={
+              displayIpv4(status.addresses) === '—'
+                ? '—'
+                : displayAddress(displayIpv4(status.addresses))
+            }
+          />
+          {ipv6.map((address) => (
+            <DeviceInfoRow key={address} label="IPv6" value={displayIpv6(address)} />
+          ))}
+          <DeviceInfoRow label="Hostname" value={hostname ?? '—'} />
+          <DeviceInfoRow label="Listen port" value={String(status.listenPort)} />
+          <DeviceInfoRow label="Connection method" value="Direct QUIC / TLS 1.3" />
+          <DeviceInfoRow
+            label="Local network"
+            value={
+              status.accepting
+                ? `Listening on ${String(status.listenPort)}`
+                : 'Not accepting connections'
+            }
+          />
+          <DeviceInfoRow label="Relay" value="Not used — this build connects directly" />
+        </dl>
+      )}
+    </Panel>
   );
 }
 
-function InfoRow({ label, value }: { readonly label: string; readonly value: string }) {
+function DeviceInfoRow({
+  label,
+  value,
+}: {
+  readonly label: string;
+  readonly value: React.ReactNode;
+}): React.JSX.Element {
   return (
-    <div className="flex gap-3">
-      <dt className="w-36 shrink-0 text-(--color-text-secondary)">{label}</dt>
-      <dd className="min-w-0 flex-1 font-mono text-xs break-all">{value}</dd>
+    <div className="flex min-h-9 items-center justify-between gap-4">
+      <dt className="text-[14px] text-(--color-text-secondary)">{label}</dt>
+      <dd className="min-w-0 text-right font-mono text-[13px]">{value}</dd>
     </div>
   );
 }
 
-function isIpv6(address: string): boolean {
-  return address.startsWith('[');
-}
+function InlineCopy({
+  value,
+  label,
+}: {
+  readonly value: string;
+  readonly label: string;
+}): React.JSX.Element {
+  const [copied, setCopied] = useState(false);
 
-function displayIpv6(address: string): string {
-  const close = address.indexOf(']');
-  return close === -1 ? address : address.slice(1, close);
-}
-
-function ipv4Of(addresses: readonly string[]): string | undefined {
-  return addresses.find((address) => !isIpv6(address));
-}
-
-function displayIpv4(addresses: readonly string[]): string {
-  const found = ipv4Of(addresses);
-  return found === undefined ? '—' : displayAddress(found);
-}
-
-function primaryAddress(addresses: readonly string[]): string | null {
-  return ipv4Of(addresses) ?? addresses[0] ?? null;
+  return (
+    <button
+      type="button"
+      title={`Copy ${label}`}
+      aria-label={`Copy ${label}`}
+      onClick={() => {
+        navigator.clipboard
+          .writeText(value)
+          .then(() => {
+            setCopied(true);
+            window.setTimeout(() => {
+              setCopied(false);
+            }, 1200);
+          })
+          .catch(() => {
+            setCopied(false);
+          });
+      }}
+      className="text-(--color-text-muted) hover:text-(--color-text)"
+    >
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    </button>
+  );
 }

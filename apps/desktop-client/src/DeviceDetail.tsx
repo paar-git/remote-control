@@ -117,7 +117,7 @@ export function DeviceDetail({
         role="dialog"
         aria-modal="true"
         aria-labelledby="device-detail-title"
-        className="w-full max-w-lg rounded-xl border border-(--color-border) bg-(--color-page) p-5 shadow-lg"
+        className="w-full max-w-lg rounded-[4px] border border-(--color-border) bg-(--color-page) p-5"
       >
         <header className="mb-5 flex items-start justify-between gap-3">
           <div>
@@ -261,7 +261,7 @@ export function DeviceDetail({
             role="dialog"
             aria-modal="true"
             aria-label="Administrator access"
-            className="w-full max-w-sm rounded-xl border border-(--color-border) bg-(--color-card) p-5"
+            className="w-full max-w-sm rounded-[4px] border border-(--color-border) bg-(--color-card) p-5"
           >
             <p className="text-sm">
               Administrator access lets {device.displayName} manage this machine’s trusted devices:

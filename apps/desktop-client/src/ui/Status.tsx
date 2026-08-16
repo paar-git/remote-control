@@ -81,7 +81,7 @@ export function StatusBadge({
 }): React.JSX.Element {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${TONES[tone].badge}`}
+      className={`inline-flex items-center gap-1.5 rounded-[3px] border px-1.5 py-0.5 text-xs font-medium ${TONES[tone].badge}`}
     >
       {icon &&
         (tone === 'unavailable' ? (
@@ -116,7 +116,7 @@ export function Badge({
   };
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${tones[tone] ?? ''}`}
+      className={`inline-flex items-center rounded-[3px] border px-1.5 py-0.5 text-[11px] font-medium ${tones[tone] ?? ''}`}
     >
       {children}
     </span>

@@ -91,7 +91,7 @@ export default function FilesScreen({
   // an explanation rather than on a spinner that would never resolve.
   const [remote, setRemote] = useState<PaneState>({
     status: 'idle',
-    hint: 'Connect to a paired server from Devices, then type a path above to browse it.',
+    hint: 'Connect to a machine from Remote Control or My Devices, then type a path above to browse it.',
   });
 
   const [selected, setSelected] = useState<{ side: Side; entry: FileEntry } | null>(null);

@@ -40,26 +40,24 @@ function renderThisDevice(
 }
 
 describe('ThisDevice', () => {
-  it('shows a grouped device id with copy and share', () => {
+  it('shows a grouped device id with copy', () => {
     renderThisDevice();
     const id = screen.getByLabelText('Device ID');
     expect(id.textContent).toMatch(/^\d{3} \d{3} \d{3}$/);
-    expect(screen.getAllByRole('button', { name: 'Copy' }).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTitle('Copy device ID')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
-    expect(screen.getByText(/verify this on the other machine/i)).toBeInTheDocument();
+    expect(screen.getByText('Verified')).toBeInTheDocument();
   });
 
   it('still shows the address, because that is what the other machine dials', () => {
     renderThisDevice();
-    expect(screen.getByLabelText('Connect using')).toHaveTextContent('192.168.1.77:7443');
+    expect(screen.getByLabelText('Network address')).toHaveTextContent('192.168.1.77:7443');
   });
 
   it('keeps IPv6 and hostname out of the way until they are asked for', async () => {
     renderThisDevice();
     expect(screen.queryByText('fe80::1')).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /advanced network information/i }));
+    await userEvent.click(screen.getByRole('button', { name: /verified/i }));
 
     expect(screen.getByText('fe80::1')).toBeInTheDocument();
     expect(screen.getByText('Direct QUIC / TLS 1.3')).toBeInTheDocument();
@@ -70,13 +68,13 @@ describe('ThisDevice', () => {
     const onToggleAccepting = vi.fn();
     renderThisDevice({ onToggleAccepting });
 
-    await userEvent.click(screen.getByRole('switch', { name: 'Allow incoming connections' }));
+    await userEvent.click(screen.getByRole('switch', { name: 'Accept connections' }));
 
     expect(onToggleAccepting).toHaveBeenCalledWith(false);
   });
 
   it('says it is not reachable when incoming connections are off', () => {
     renderThisDevice({ status: { accepting: false } });
-    expect(screen.getByRole('status')).toHaveTextContent('Not accepting connections');
+    expect(screen.getByRole('status')).toHaveTextContent('Connections disabled');
   });
 });

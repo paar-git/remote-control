@@ -48,8 +48,7 @@ export async function call<Schema extends z.ZodType>(
   try {
     raw = await tauriInvoke(command, args);
   } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    throw new IpcError(command, message, cause);
+    throw new IpcError(command, messageFromIpc(cause), cause);
   }
 
   const parsed = schema.safeParse(raw);
@@ -57,6 +56,17 @@ export async function call<Schema extends z.ZodType>(
     throw new IpcValidationError(command, parsed.error.issues.map((i) => i.message).join('; '));
   }
   return parsed.data;
+}
+
+/** Pull a human sentence out of whatever Tauri rejected with. */
+function messageFromIpc(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === 'string' && cause !== '') return cause;
+  if (cause !== null && typeof cause === 'object' && 'message' in cause) {
+    const message = (cause as { readonly message: unknown }).message;
+    if (typeof message === 'string' && message !== '') return message;
+  }
+  return 'The backend rejected the command.';
 }
 
 /** Whether the app is running inside Tauri rather than a plain browser. */

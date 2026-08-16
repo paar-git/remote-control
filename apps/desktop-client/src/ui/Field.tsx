@@ -69,9 +69,10 @@ export function TextField({
           aria-invalid={invalid || undefined}
           aria-describedby={help !== undefined || invalid ? helpId : undefined}
           className={
-            'h-11 w-full min-w-0 rounded-xl border bg-(--color-page) px-3.5 text-[15px] ' +
-            'transition-[border-color,background-color] duration-150 ease-(--ease-ui) ' +
-            'placeholder:text-(--color-text-secondary) hover:border-(--color-border-hover) ' +
+            'h-12 w-full min-w-0 rounded-[4px] border bg-(--color-input) px-4 text-[14px] ' +
+            'transition-[border-color,background-color] duration-125 ease-(--ease-ui) ' +
+            'placeholder:text-(--color-text-muted) hover:border-(--color-border-hover) ' +
+            'focus:border-(--color-accent) focus:outline-none ' +
             (invalid ? 'border-(--color-danger) ' : 'border-(--color-border) ') +
             (mono ? 'font-mono ' : '') +
             (uppercase ? 'tracking-[0.12em] uppercase ' : '')

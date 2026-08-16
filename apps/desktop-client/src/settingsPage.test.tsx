@@ -15,6 +15,7 @@ vi.mock('./api.js', async (importOriginal) => {
     ...actual,
     getHostSettings: vi.fn(),
     getHostStatus: vi.fn(),
+    getClientInfo: vi.fn(),
     setUnattendedPassword: vi.fn(() => Promise.resolve(null)),
     setAccepting: vi.fn(),
     probeDevice: vi.fn(),
@@ -37,12 +38,22 @@ describe('SettingsPage', () => {
       listenPort: 7443,
     });
     vi.mocked(api.setUnattendedPassword).mockClear();
+    vi.mocked(api.getClientInfo).mockResolvedValue({
+      appVersion: '0.2.0',
+      protocolVersion: { major: 1, minor: 0 },
+      hostname: 'KOREN-PC',
+      osFamily: 'windows',
+      osVersion: '10.0',
+      architecture: 'x64',
+      elevated: false,
+      databaseReady: true,
+    });
   });
 
   it('organises settings into sections rather than more navigation', async () => {
     render(<SettingsPage onToast={vi.fn()} onViewDevices={vi.fn()} />);
 
-    for (const section of ['Remote Access', 'Security', 'Network', 'Appearance']) {
+    for (const section of ['Remote Access', 'Security', 'Network', 'Appearance', 'About']) {
       expect(await screen.findByRole('heading', { name: section })).toBeInTheDocument();
     }
   });

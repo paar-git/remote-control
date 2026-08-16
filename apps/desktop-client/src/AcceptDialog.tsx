@@ -130,7 +130,7 @@ export function AcceptDialog({ onToast }: { readonly onToast: (toast: Toast) => 
         role="dialog"
         aria-modal="true"
         aria-labelledby="accept-title"
-        className="w-full max-w-md rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-lg"
+        className="w-full max-w-md rounded-[4px] border border-(--color-border) bg-(--color-card) p-5"
       >
         <div className="mb-3 flex items-center gap-2.5">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-(--color-warning-soft) text-(--color-warning)">
@@ -187,7 +187,7 @@ export function AcceptDialog({ onToast }: { readonly onToast: (toast: Toast) => 
         </fieldset>
 
         {trustStep ? (
-          <div className="mb-4 rounded-xl border border-(--color-border) bg-(--color-page) p-3">
+          <div className="mb-4 rounded-[4px] border border-(--color-border) bg-(--color-page) p-3">
             <label className="flex items-start gap-2.5 text-sm">
               <input
                 type="checkbox"

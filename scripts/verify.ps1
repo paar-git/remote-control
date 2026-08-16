@@ -1,11 +1,10 @@
 <#
 .SYNOPSIS
-    Runs every check that must pass before a phase is considered complete.
+    Runs every check that must pass before a change is considered complete.
 
 .DESCRIPTION
-    Formatting, linting, type checking and tests for both the Rust and TypeScript
-    halves of the workspace. Exits non-zero if any step fails, so it can be used as a
-    pre-commit hook or a CI entry point.
+    Invokes `pnpm verify` so the scripted path and the npm script stay the same
+    set of steps. Pass -Fix to rewrite formatted and linted files first.
 #>
 [CmdletBinding()]
 param(
@@ -19,41 +18,20 @@ param(
 $ErrorActionPreference = 'Continue'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-$failures = @()
-
-function Invoke-Step {
-    param([string]$Name, [scriptblock]$Body)
-
-    Write-Host "==> $Name" -ForegroundColor Cyan
-    $global:LASTEXITCODE = 0
-    & $Body
-    if ($LASTEXITCODE -ne 0) {
-        $script:failures += $Name
-        Write-Host "    FAILED: $Name" -ForegroundColor Red
-    }
-}
-
 if ($Fix) {
-    Invoke-Step 'rust format (write)' { cargo fmt --all }
-    Invoke-Step 'js format (write)'   { pnpm format }
-    Invoke-Step 'js lint (fix)'       { pnpm lint:fix }
-} else {
-    Invoke-Step 'rust format'  { cargo fmt --all -- --check }
-    Invoke-Step 'js format'    { pnpm format:check }
-    Invoke-Step 'js lint'      { pnpm lint }
+    Write-Host '==> rust format (write)' -ForegroundColor Cyan
+    cargo fmt --all
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host '==> js format (write)' -ForegroundColor Cyan
+    pnpm format
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host '==> js lint (fix)' -ForegroundColor Cyan
+    pnpm lint:fix
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-Invoke-Step 'rust clippy'   { cargo clippy --workspace --all-targets --all-features -- -D warnings }
-Invoke-Step 'rust tests'    { cargo test --workspace }
-Invoke-Step 'js typecheck'  { pnpm -r typecheck }
-Invoke-Step 'js tests'      { pnpm -r test:run }
-Invoke-Step 'frontend build' { pnpm --filter '@rc/desktop-client' build }
-
-Write-Host ''
-if ($failures.Count -gt 0) {
-    Write-Host "$($failures.Count) step(s) failed:" -ForegroundColor Red
-    $failures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-    exit 1
-}
-
-Write-Host 'All checks passed.' -ForegroundColor Green
+Write-Host '==> pnpm verify' -ForegroundColor Cyan
+pnpm verify
+exit $LASTEXITCODE

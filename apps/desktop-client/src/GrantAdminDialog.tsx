@@ -38,7 +38,7 @@ export function GrantAdminDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Grant Administrator Access?"
-        className="w-full max-w-md rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-xl"
+        className="w-full max-w-md rounded-[4px] border border-(--color-border) bg-(--color-card) p-5"
       >
         <h2 className="mb-2 text-base font-semibold">Grant Administrator Access?</h2>
         <p className="mb-3 text-sm text-(--color-text-secondary)">

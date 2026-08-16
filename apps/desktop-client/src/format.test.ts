@@ -5,6 +5,8 @@ import {
   compactDeviceId,
   formatDeviceId,
   formatFingerprintGroups,
+  formatClockDuration,
+  formatDayTime,
   formatRelative,
   formatTimestamp,
   humanise,
@@ -74,6 +76,19 @@ describe('timestamps', () => {
   it('reports recent times as just now', () => {
     const now = 1_700_000_000_000;
     expect(formatRelative(now - 5_000, now)).toBe('Just now');
+  });
+
+  it('formats a clock duration with tabular hours', () => {
+    expect(formatClockDuration(381)).toBe('00:06:21');
+    expect(formatClockDuration(0)).toBe('00:00:00');
+  });
+
+  it('labels today and yesterday explicitly', () => {
+    const now = new Date(2026, 7, 15, 18, 0, 0).getTime();
+    const today = new Date(2026, 7, 15, 10, 42, 0).getTime();
+    const yesterday = new Date(2026, 7, 14, 18, 18, 0).getTime();
+    expect(formatDayTime(today, now)).toMatch(/^Today,/);
+    expect(formatDayTime(yesterday, now)).toMatch(/^Yesterday,/);
   });
 
   it('reports older times in coarse units', () => {

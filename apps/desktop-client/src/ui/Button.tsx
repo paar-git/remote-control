@@ -20,16 +20,17 @@ export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost' | 'subtle
  * not enough to shift the layout around it.
  */
 const BASE =
-  'inline-flex select-none items-center justify-center gap-2 rounded-lg font-medium ' +
-  'whitespace-nowrap transition-[background-color,border-color,color,opacity] duration-150 ' +
-  'ease-(--ease-ui) active:translate-y-px disabled:pointer-events-none disabled:opacity-45 ' +
-  'disabled:active:translate-y-0';
+  'inline-flex select-none items-center justify-center gap-2 rounded-[4px] font-medium ' +
+  'whitespace-nowrap transition-[background-color,border-color,color,opacity] duration-125 ' +
+  'ease-(--ease-ui) disabled:pointer-events-none disabled:opacity-45';
 
 const VARIANTS: Record<ButtonVariant, string> = {
   default:
     'border border-(--color-border) bg-(--color-card) text-(--color-text) ' +
     'hover:border-(--color-text-secondary) hover:bg-(--color-hover)',
-  primary: 'bg-(--color-accent) text-(--color-accent-text) hover:bg-(--color-accent-hover)',
+  primary:
+    'bg-(--color-accent) text-(--color-accent-text) hover:bg-(--color-accent-hover) ' +
+    'active:bg-(--color-accent-pressed)',
   danger:
     'border border-(--color-danger)/45 bg-(--color-danger-soft) text-(--color-danger) ' +
     'hover:border-(--color-danger) hover:bg-(--color-danger)/20',
@@ -42,7 +43,7 @@ export type ButtonSize = 'sm' | 'md' | 'lg';
 const SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs',
   md: 'h-8 px-3 text-sm',
-  lg: 'h-11 px-5 text-[15px]',
+  lg: 'h-12 px-5 text-[15px] font-semibold',
 };
 
 /** A labelled button with a consistent focus ring and disabled treatment. */

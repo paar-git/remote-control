@@ -243,12 +243,25 @@ pub async fn set_device_suspended(
     suspended: bool,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> CommandResult<()> {
-    let identity = identity_of(&identity)?;
+    let parsed = identity_of(&identity)?;
     write(
         rc_storage::TrustRepository::new(database(&state)?)
-            .set_suspended(identity, suspended)
+            .set_suspended(parsed, suspended)
             .await,
-    )
+    )?;
+
+    if suspended {
+        for session in state.host_runtime.inbound_sessions().await {
+            if session.identity_fingerprint.ct_eq(&parsed) {
+                state
+                    .host_runtime
+                    .disconnect_inbound(session.session_id)
+                    .await;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Forget a device entirely.

@@ -1,6 +1,6 @@
 [package]
 name = "rc-security"
-description = "Device identity, secure keystore, pairing, owner authentication and the permission model."
+description = "Device identity, secure keystore, passwords and the permission model."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -5,8 +5,6 @@ doc-valid-idents = [
     "..",
     "SQLite",
     "PowerShell",
-    "ConPTY",
-    "WebRTC",
     "QUIC",
     "TypeScript",
     "JavaScript",
@@ -15,8 +13,6 @@ doc-valid-idents = [
     "GitHub",
     "OpenSSL",
     "Wake-on-LAN",
-    "DirectX",
-    "Direct3D",
 ]
 
 # The agent handles untrusted input on every path; keep functions small enough to

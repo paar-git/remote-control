@@ -84,7 +84,10 @@ export default tseslint.config(
   },
 
   {
-    files: ['scripts/**/*.mjs'],
+    // Any package's build scripts, not just the repository root's: these are plain Node
+    // modules outside every tsconfig, so type-aware linting has no project to resolve
+    // them against and reports a parse error rather than a finding.
+    files: ['**/scripts/**/*.mjs'],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       parserOptions: {
