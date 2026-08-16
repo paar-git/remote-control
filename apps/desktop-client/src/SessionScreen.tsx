@@ -27,9 +27,10 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { disconnectFromServer, isConnected, pingServer, type ConnectionState } from './api.js';
 import FilesScreen from './FilesScreen';
-import { MonitoringStrip } from './MonitoringScreen';
+import MonitoringScreen from './MonitoringScreen';
 import { SessionToolbar } from './SessionToolbar';
 import { Button, type Toast } from './ui';
+import { VideoSurface } from './VideoSurface';
 
 /** How often the round trip to the machine is measured, in milliseconds. */
 const PING_MS = 5000;
@@ -53,7 +54,9 @@ export function SessionScreen({
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [filesOpen, setFilesOpen] = useState(false);
   const [monitoringOpen, setMonitoringOpen] = useState(false);
+  const [fitted, setFitted] = useState(true);
   const live = isConnected(connection);
+  const canViewScreen = permissions.includes('view_screen');
 
   // Measured rather than assumed: this is the one number that says whether the link is
   // healthy, and it is cheap to obtain.
@@ -106,6 +109,10 @@ export function SessionScreen({
       <SessionToolbar
         permissions={permissions}
         machineName={deviceName ?? 'Connected machine'}
+        fitted={fitted}
+        onToggleFitted={() => {
+          setFitted((current) => !current);
+        }}
         onDisconnect={disconnect}
         onOpenFiles={() => {
           setFilesOpen(true);
@@ -115,25 +122,36 @@ export function SessionScreen({
         }}
       />
 
-      <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-        <div className="max-w-md text-center">
-          <span className="mx-auto mb-3 flex size-11 items-center justify-center rounded-2xl bg-(--color-card) text-(--color-text-secondary)">
-            <MonitorOff aria-hidden="true" className="size-5" />
-          </span>
-          <p className="mb-1 text-sm font-medium">The remote display is not in this version.</p>
-          <p className="text-sm text-(--color-text-secondary)">
-            The session is live — files, system information and disconnect all work from the bar
-            above.
-          </p>
-          {latencyMs !== null && (
-            <p className="mt-3 text-xs text-(--color-text-secondary)">Round trip {latencyMs} ms</p>
-          )}
-        </div>
+      <div className="min-h-0 flex-1">
+        {canViewScreen ? (
+          // Display 0: this build does not yet offer a picker for which of the
+          // agent's displays to show, so the primary one is what a session opens on.
+          <VideoSurface displayIndex={0} fitted={fitted} />
+        ) : (
+          <div className="flex h-full items-center justify-center p-6">
+            <div className="max-w-md text-center">
+              <span className="mx-auto mb-3 flex size-11 items-center justify-center rounded-2xl bg-(--color-card) text-(--color-text-secondary)">
+                <MonitorOff aria-hidden="true" className="size-5" />
+              </span>
+              <p className="mb-1 text-sm font-medium">
+                The other machine did not grant screen viewing.
+              </p>
+              <p className="text-sm text-(--color-text-secondary)">
+                The session is live — the tools granted to it work from the bar above.
+              </p>
+              {latencyMs !== null && (
+                <p className="mt-3 text-xs text-(--color-text-secondary)">
+                  Round trip {latencyMs} ms
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {monitoringOpen && (
         <div className="border-t border-(--color-border) bg-(--color-card) px-4 py-3">
-          <MonitoringStrip />
+          <MonitoringScreen />
         </div>
       )}
 

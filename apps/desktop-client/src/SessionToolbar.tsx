@@ -48,6 +48,8 @@ export const TOOLBAR_REVEAL_PX = 80;
 export function SessionToolbar({
   permissions,
   machineName,
+  fitted: fittedProp,
+  onToggleFitted,
   onDisconnect,
   onOpenFiles,
   onOpenMonitoring,
@@ -56,12 +58,25 @@ export function SessionToolbar({
   readonly permissions: readonly string[];
   /** Untrusted: chosen by the other machine. Rendered as text. */
   readonly machineName: string;
+  /**
+   * Whether the remote display fits the pane. Uncontrolled when omitted, so this bar
+   * still stands alone in isolation (and in its existing tests) rather than requiring
+   * a video surface to exist just to press the button.
+   */
+  readonly fitted?: boolean;
+  readonly onToggleFitted?: () => void;
   readonly onDisconnect: () => void;
   readonly onOpenFiles: () => void;
   readonly onOpenMonitoring: () => void;
 }): React.JSX.Element {
   const [visible, setVisible] = useState(true);
-  const [fitted, setFitted] = useState(true);
+  const [fittedState, setFittedState] = useState(true);
+  const fitted = fittedProp ?? fittedState;
+  const toggleFitted =
+    onToggleFitted ??
+    (() => {
+      setFittedState((current) => !current);
+    });
   const [passthrough, setPassthrough] = useState(false);
   const hideAt = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -124,14 +139,7 @@ export function SessionToolbar({
       {may('transfer_files') && <Tool icon={FolderOpen} label="Files" onClick={onOpenFiles} />}
       {may('view_metrics') && <Tool icon={Gauge} label="Monitoring" onClick={onOpenMonitoring} />}
 
-      <Tool
-        icon={Scaling}
-        label="Fit to window"
-        pressed={fitted}
-        onClick={() => {
-          setFitted((current) => !current);
-        }}
-      />
+      <Tool icon={Scaling} label="Fit to window" pressed={fitted} onClick={toggleFitted} />
       <Tool
         icon={Keyboard}
         label="Keyboard passthrough"
