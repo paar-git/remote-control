@@ -32,6 +32,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { Crossing } from './displays';
 import { buttonName, modifierBits, pointerFraction } from './inputCapture.js';
 import {
   listenInputAck,
@@ -51,6 +52,7 @@ export function VideoSurface({
   fitted,
   capturing,
   passthrough,
+  onPointerSample,
 }: {
   /** Which of the agent's displays to capture. */
   readonly displayIndex: number;
@@ -71,6 +73,15 @@ export function VideoSurface({
    * this escape hatch already had once.
    */
   readonly passthrough: boolean;
+  /**
+   * Report where the pointer landed, as a fraction of the display being viewed.
+   *
+   * Returns a crossing when that position means the view should move to another
+   * monitor, and `null` otherwise. The decision lives in `useDisplayNavigation`, which
+   * owns the arrangement and the operator's preference; this surface only knows where
+   * the pointer is.
+   */
+  readonly onPointerSample: (x: number, y: number) => Crossing | null;
 }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [started, setStarted] = useState<StreamStarted | null>(null);
@@ -210,6 +221,16 @@ export function VideoSurface({
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     if (!active) return;
     const { x, y } = pointerFraction(event, event.currentTarget.getBoundingClientRect());
+
+    // Reaching an edge with a monitor beyond it moves the pointer onto that monitor
+    // instead, at the point that continues the same motion — so the operator's hand
+    // does not have to stop at a seam.
+    const crossing = onPointerSample(x, y);
+    if (crossing !== null) {
+      void sendPointerMove(crossing.x, crossing.y, crossing.display).catch(() => undefined);
+      return;
+    }
+
     void sendPointerMove(x, y, displayIndex).catch(() => undefined);
   };
 

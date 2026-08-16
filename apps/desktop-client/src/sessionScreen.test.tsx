@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -6,7 +6,7 @@ import type * as api from './api.js';
 import type { ConnectionState } from './api.js';
 import { SessionScreen } from './SessionScreen';
 import * as inputApi from './inputApi.js';
-import type * as videoApi from './videoApi.js';
+import * as videoApi from './videoApi.js';
 
 vi.mock('./api.js', async (importOriginal) => {
   const actual: typeof api = await importOriginal();
@@ -32,6 +32,7 @@ vi.mock('./videoApi.js', async (importOriginal) => {
     ),
     stopStream: vi.fn(() => Promise.resolve(null)),
     listenStreamEnded: vi.fn(() => Promise.resolve(() => undefined)),
+    listDisplays: vi.fn(() => Promise.resolve([])),
   };
 });
 
@@ -43,6 +44,8 @@ vi.mock('./inputApi.js', async (importOriginal) => {
     sendPointerMove: vi.fn(() => Promise.resolve(null)),
     sendPointerButton: vi.fn(() => Promise.resolve(null)),
     sendScroll: vi.fn(() => Promise.resolve(null)),
+    listenInputAck: vi.fn(() => Promise.resolve(() => undefined)),
+    listenDisplays: vi.fn(() => Promise.resolve(() => undefined)),
   };
 });
 
@@ -146,5 +149,93 @@ describe('SessionScreen keyboard passthrough', () => {
     await userEvent.click(screen.getByRole('button', { name: /keyboard passthrough/i }));
 
     expect(await screen.findByText(/sent literally/i)).toBeInTheDocument();
+  });
+});
+
+/** Two side-by-side monitors, the second to the right of the first. */
+const TWO_DISPLAYS = [
+  {
+    index: 0,
+    name: 'Built-in',
+    width: 1920,
+    height: 1080,
+    scaleFactor: 1,
+    originX: 0,
+    originY: 0,
+    primary: true,
+    refreshHz: 60,
+  },
+  {
+    index: 1,
+    name: 'DELL U2720Q',
+    width: 3840,
+    height: 2160,
+    scaleFactor: 2,
+    originX: 1920,
+    originY: 0,
+    primary: false,
+    refreshHz: 60,
+  },
+];
+
+describe('SessionScreen display picker', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.listDisplays).mockResolvedValue(TWO_DISPLAYS);
+    vi.mocked(inputApi.listenDisplays).mockResolvedValue(() => undefined);
+  });
+
+  it('offers a picker once the host reports more than one display', async () => {
+    // listDisplays, DisplaySelector and useDisplayNavigation were all built, tested and
+    // reachable from nothing. A session on a two-monitor host could only ever see one.
+    renderSession();
+
+    await userEvent.click(await screen.findByRole('button', { name: /displays/i }));
+
+    expect(await screen.findByRole('group', { name: /remote displays/i })).toBeInTheDocument();
+  });
+
+  it('choosing a display streams that display', async () => {
+    // The picker must reach the stream, not just its own pressed state — the same
+    // defect Fit to window and Keyboard passthrough both shipped with.
+    renderSession();
+    await userEvent.click(await screen.findByRole('button', { name: /displays/i }));
+
+    await userEvent.click(await screen.findByRole('button', { name: /DELL U2720Q/i }));
+
+    await waitFor(() => {
+      expect(videoApi.startStream).toHaveBeenCalledWith(1, expect.any(Number), expect.any(Function));
+    });
+  });
+
+  it('offers no picker when the host has a single display', async () => {
+    // A picker that can only pick the thing already showing is chrome that never acts.
+    vi.mocked(videoApi.listDisplays).mockResolvedValue([TWO_DISPLAYS[0]!]);
+    renderSession();
+    await screen.findByTestId('video-surface');
+
+    expect(screen.queryByRole('button', { name: /displays/i })).not.toBeInTheDocument();
+  });
+
+  it('follows the host rearranging its monitors mid-session', async () => {
+    // A monitor unplugged while a session is live changes where every later coordinate
+    // lands; a picker that had to be reopened would aim at a layout that is gone.
+    let push: ((displays: typeof TWO_DISPLAYS) => void) | undefined;
+    vi.mocked(inputApi.listenDisplays).mockImplementation((handler) => {
+      push = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    renderSession();
+    await userEvent.click(await screen.findByRole('button', { name: /displays/i }));
+    await screen.findByRole('group', { name: /remote displays/i });
+
+    act(() => {
+      push?.([TWO_DISPLAYS[0]!]);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /displays/i })).not.toBeInTheDocument();
+    });
   });
 });

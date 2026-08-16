@@ -34,6 +34,7 @@ import {
   Keyboard,
   LogOut,
   Maximize2,
+  MonitorSmartphone,
   Scaling,
   type LucideIcon,
 } from 'lucide-react';
@@ -52,6 +53,9 @@ export function SessionToolbar({
   onToggleFitted,
   passthrough,
   onTogglePassthrough,
+  hasDisplayPicker,
+  displaysOpen,
+  onToggleDisplays,
   onDisconnect,
   onOpenFiles,
   onOpenMonitoring,
@@ -80,6 +84,15 @@ export function SessionToolbar({
    */
   readonly passthrough: boolean;
   readonly onTogglePassthrough: () => void;
+  /**
+   * Whether the host reported more than one display.
+   *
+   * The button is absent below two, following the same rule as an ungranted tool: a
+   * picker that can only pick the monitor already showing is chrome that never acts.
+   */
+  readonly hasDisplayPicker: boolean;
+  readonly displaysOpen: boolean;
+  readonly onToggleDisplays: () => void;
   readonly onDisconnect: () => void;
   readonly onOpenFiles: () => void;
   readonly onOpenMonitoring: () => void;
@@ -146,6 +159,14 @@ export function SessionToolbar({
       {may('transfer_files') && <Tool icon={FolderOpen} label="Files" onClick={onOpenFiles} />}
       {may('view_metrics') && <Tool icon={Gauge} label="Monitoring" onClick={onOpenMonitoring} />}
 
+      {hasDisplayPicker && (
+        <Tool
+          icon={MonitorSmartphone}
+          label="Displays"
+          pressed={displaysOpen}
+          onClick={onToggleDisplays}
+        />
+      )}
       <Tool icon={Scaling} label="Fit to window" pressed={fitted} onClick={onToggleFitted} />
       <Tool
         icon={Keyboard}

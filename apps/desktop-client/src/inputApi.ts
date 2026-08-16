@@ -15,6 +15,7 @@
 
 import { z } from 'zod';
 
+import { displaySchema, type RemoteDisplay } from './displays';
 import { call } from './ipc.js';
 
 /** What `sendKey` actually sent, so the interface can say when a chord was translated. */
@@ -81,6 +82,25 @@ export async function listenInputAck(handler: (ack: InputAck) => void): Promise<
 
   return listen('input://ack', (event) => {
     const parsed = inputAckSchema.safeParse(event.payload);
+    if (parsed.success) handler(parsed.data);
+  });
+}
+
+/**
+ * Subscribe to the host's display arrangement.
+ *
+ * Pushed unprompted whenever it changes, not only on request. A monitor plugged in,
+ * unplugged, rearranged or rescaled while a session is live changes where every
+ * subsequent coordinate lands, and a viewer that had to poll would aim at a stale
+ * layout in between.
+ */
+export async function listenDisplays(
+  handler: (displays: RemoteDisplay[]) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('input://displays', (event) => {
+    const parsed = z.array(displaySchema).safeParse(event.payload);
     if (parsed.success) handler(parsed.data);
   });
 }

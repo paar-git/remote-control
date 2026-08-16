@@ -72,6 +72,11 @@ pub struct StreamEnded {
 }
 
 /// A capturable display, as reported to the webview.
+///
+/// Carries the display's *position* as well as its size. Without an origin the webview
+/// knows a machine has three monitors but not which one is on the left, which is the
+/// only thing needed to draw the real arrangement or to decide which display the
+/// pointer reaches when it leaves an edge.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayInfoDto {
@@ -85,8 +90,14 @@ pub struct DisplayInfoDto {
     pub height: u32,
     /// Scale factor, e.g. `1.5` for 150% DPI.
     pub scale_factor: f32,
+    /// X offset in the remote virtual desktop. Negative for a display left of the main.
+    pub origin_x: i32,
+    /// Y offset in the remote virtual desktop. Negative for a display above the main.
+    pub origin_y: i32,
     /// Whether this is the primary display.
     pub primary: bool,
+    /// Refresh rate in Hz, when the platform reported one.
+    pub refresh_hz: Option<u32>,
 }
 
 impl From<DisplayInfo> for DisplayInfoDto {
@@ -97,7 +108,10 @@ impl From<DisplayInfo> for DisplayInfoDto {
             width: display.width,
             height: display.height,
             scale_factor: display.scale_factor,
+            origin_x: display.origin_x,
+            origin_y: display.origin_y,
             primary: display.primary,
+            refresh_hz: display.refresh_hz,
         }
     }
 }
@@ -164,8 +178,15 @@ pub async fn video_start_stream(
         accepted_codecs: vec![VideoCodec::TiledZstd, VideoCodec::RawRgba],
         quality: QualityPreset::Balanced,
         max_fps,
-        // This task is the receive path only; input injection is a separate concern.
-        interaction: InteractionMode::ViewOnly,
+        // Declared honestly from what the session actually holds. Input travels on its
+        // own channel and this build's host gates it on the `control_input` permission
+        // rather than on this field, so claiming `ViewOnly` while sending keystrokes
+        // works today — but it is a lie a stricter host would be right to enforce.
+        interaction: if state.authorization().contains(Permission::ControlInput) {
+            InteractionMode::Control
+        } else {
+            InteractionMode::ViewOnly
+        },
     };
 
     let (reply, writer, reader) = manager
@@ -556,5 +577,61 @@ mod tests {
         ] {
             assert!(!codec_name(codec).is_empty());
         }
+    }
+
+    #[test]
+    fn a_display_keeps_its_position_on_the_way_to_the_webview() {
+        // Dropping the origin here is what kept the display picker and edge-crossing
+        // unwired: the webview could count monitors but not lay them out.
+        let dto = DisplayInfoDto::from(DisplayInfo {
+            index: 1,
+            name: "DELL U2720Q".to_owned(),
+            width: 3840,
+            height: 2160,
+            scale_factor: 2.0,
+            origin_x: -3840,
+            origin_y: -120,
+            primary: false,
+            refresh_hz: Some(60),
+        });
+
+        assert_eq!(dto.origin_x, -3840);
+        assert_eq!(dto.origin_y, -120);
+        assert_eq!(dto.refresh_hz, Some(60));
+    }
+
+    #[test]
+    fn a_display_serialises_the_names_the_webview_schema_expects() {
+        // The frontend parses these through a Zod schema; a snake_case key would be
+        // rejected there rather than here.
+        let dto = DisplayInfoDto::from(DisplayInfo {
+            index: 0,
+            name: "Main".to_owned(),
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+            origin_x: 0,
+            origin_y: 0,
+            primary: true,
+            refresh_hz: None,
+        });
+        let json = serde_json::to_value(&dto).expect("a display serialises");
+
+        assert!(
+            json.get("originX").is_some(),
+            "originX must reach the webview"
+        );
+        assert!(
+            json.get("originY").is_some(),
+            "originY must reach the webview"
+        );
+        assert!(
+            json.get("refreshHz").is_some(),
+            "refreshHz must reach the webview"
+        );
+        assert!(
+            json.get("scaleFactor").is_some(),
+            "scaleFactor must reach the webview"
+        );
     }
 }

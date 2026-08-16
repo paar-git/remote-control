@@ -11,19 +11,18 @@
 import { Channel } from '@tauri-apps/api/core';
 import { z } from 'zod';
 
+import { displaySchema, type RemoteDisplay } from './displays';
 import { call } from './ipc.js';
 
-/** A capturable display, as reported by the connected agent. */
-export const displayInfoSchema = z.object({
-  index: z.number().int().nonnegative(),
-  name: z.string(),
-  width: z.number().int().positive(),
-  height: z.number().int().positive(),
-  scaleFactor: z.number().positive(),
-  primary: z.boolean(),
-});
-
-export type DisplayInfo = z.infer<typeof displayInfoSchema>;
+/**
+ * A capturable display, as reported by the connected agent.
+ *
+ * This is `displays.ts`'s schema rather than a second, thinner one. The two were
+ * separate while the Rust DTO dropped `originX`/`originY`, which is exactly what left
+ * the display picker and edge-crossing unwired: without a position, a list of monitors
+ * cannot be laid out or navigated between.
+ */
+export { displaySchema as displayInfoSchema, type RemoteDisplay as DisplayInfo } from './displays';
 
 /** What the agent actually started, once negotiation is done. */
 export const streamStartedSchema = z.object({
@@ -52,8 +51,8 @@ export const streamEndedSchema = z.object({
 export type StreamEnded = z.infer<typeof streamEndedSchema>;
 
 /** List the displays the connected agent can capture. */
-export function listDisplays(): Promise<DisplayInfo[]> {
-  return call('video_list_displays', z.array(displayInfoSchema));
+export function listDisplays(): Promise<RemoteDisplay[]> {
+  return call('video_list_displays', z.array(displaySchema));
 }
 
 /**

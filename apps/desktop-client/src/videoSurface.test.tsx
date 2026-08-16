@@ -52,7 +52,7 @@ describe('VideoSurface', () => {
   it('sizes the canvas to the stream the agent actually started', async () => {
     // A canvas left at its default size silently scales every frame, which reads as
     // a blurry remote rather than as a bug in this component.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} onPointerSample={() => null} />);
 
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     await waitFor(() => {
@@ -64,7 +64,7 @@ describe('VideoSurface', () => {
   it('says the stream failed rather than showing an empty black rectangle', async () => {
     // Indistinguishable states are the failure this project keeps guarding against:
     // a black canvas could be a locked remote screen or a dead stream.
-    render(<VideoSurface displayIndex={9} fitted capturing={false} passthrough={false} />);
+    render(<VideoSurface displayIndex={9} fitted capturing={false} passthrough={false} onPointerSample={() => null} />);
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not start/i);
   });
 
@@ -77,7 +77,7 @@ describe('VideoSurface', () => {
       return Promise.resolve(() => undefined);
     });
 
-    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} onPointerSample={() => null} />);
     await screen.findByTestId('video-surface');
 
     await waitFor(() => {
@@ -101,7 +101,7 @@ describe('VideoSurface input capture', () => {
 
   /** Render a capturing surface and hand back its focused canvas. */
   async function focusedSurface(): Promise<HTMLCanvasElement> {
-    render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} onPointerSample={() => null} />);
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     canvas.focus();
     return canvas;
@@ -119,7 +119,7 @@ describe('VideoSurface input capture', () => {
   it('sends nothing at all while capture is off', async () => {
     // A session where the operator has not taken control must not leak their typing to
     // the remote machine.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} onPointerSample={() => null} />);
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     canvas.focus();
     await userEvent.type(canvas, 'a');
@@ -130,7 +130,7 @@ describe('VideoSurface input capture', () => {
   it('is not a tab stop while capture is off', async () => {
     // A surface that takes focus but forwards nothing is a keyboard trap for anyone
     // tabbing through the session screen.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} onPointerSample={() => null} />);
     const canvas = await screen.findByTestId('video-surface');
     expect(canvas).not.toHaveAttribute('tabindex');
   });
@@ -150,7 +150,7 @@ describe('VideoSurface input capture', () => {
 
   it('releases a key still held when the session unmounts mid-chord', async () => {
     // Closing the session while holding a key is the one exit no event reports.
-    const { unmount } = render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} />);
+    const { unmount } = render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} onPointerSample={() => null} />);
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     canvas.focus();
     await userEvent.keyboard('{Shift>}');
@@ -202,7 +202,7 @@ describe('VideoSurface refused input', () => {
       return Promise.resolve(() => undefined);
     });
 
-    render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} onPointerSample={() => null} />);
     await screen.findByTestId('video-surface');
     await waitFor(() => {
       expect(deliver).toBeDefined();
@@ -242,9 +242,55 @@ describe('VideoSurface refused input', () => {
 
   it('does not listen for acknowledgements while capture is off', async () => {
     // Nothing is being sent, so nothing can be refused; a warning here would be noise.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} onPointerSample={() => null} />);
     await screen.findByTestId('video-surface');
 
     expect(inputApi.listenInputAck).not.toHaveBeenCalled();
+  });
+});
+
+describe('VideoSurface display crossing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.startStream).mockResolvedValue(STARTED);
+    vi.mocked(videoApi.listenStreamEnded).mockResolvedValue(() => undefined);
+    vi.mocked(inputApi.listenInputAck).mockResolvedValue(() => undefined);
+  });
+
+  it('sends the pointer to the neighbouring display when it crosses an edge', async () => {
+    // The operator's hand does not stop at the seam between two monitors, so neither
+    // should the cursor: the crossing lands on the *other* display, not display 0.
+    const crossing = { display: 1, x: 0.01, y: 0.42 };
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        onPointerSample={() => crossing}
+      />,
+    );
+    const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
+    canvas.focus();
+    await userEvent.click(canvas);
+
+    expect(inputApi.sendPointerMove).toHaveBeenCalledWith(0.01, 0.42, 1);
+  });
+
+  it('stays on the current display when no edge was reached', async () => {
+    render(
+      <VideoSurface
+        displayIndex={0}
+        fitted
+        capturing
+        passthrough={false}
+        onPointerSample={() => null}
+      />,
+    );
+    const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
+    canvas.focus();
+    await userEvent.click(canvas);
+
+    expect(inputApi.sendPointerMove).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), 0);
   });
 });

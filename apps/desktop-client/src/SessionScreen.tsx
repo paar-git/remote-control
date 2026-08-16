@@ -7,13 +7,19 @@
  *
  * # The display area says what is true
  *
- * There is no screen capture and no input injection in this build. The area where the
- * remote screen will go therefore says so, in a sentence, and names what does work.
- *
- * It is deliberately *not* a dark rectangle with a spinner. That would be
- * indistinguishable from a session whose video had not arrived yet, and someone would
- * sit waiting for a picture that is not coming. An empty frame is a lie told by
+ * A session that was not granted screen viewing says so in a sentence, and names what
+ * does work. It is deliberately *not* a dark rectangle with a spinner, which would be
+ * indistinguishable from a session whose video had not arrived yet and would leave
+ * someone waiting for a picture that is not coming. An empty frame is a lie told by
  * omission; a sentence is not.
+ *
+ * # This screen owns which monitor is being watched
+ *
+ * The host's arrangement lives here rather than in the surface, because three things
+ * need it at once: the picker draws it, the edge-crossing rules navigate it, and the
+ * surface streams one display out of it. It is refreshed by the host's own unsolicited
+ * pushes, since a monitor plugged in mid-session moves where every later coordinate
+ * lands.
  *
  * # The tools are the session's permissions
  *
@@ -26,10 +32,17 @@ import { MonitorOff, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { disconnectFromServer, isConnected, pingServer, type ConnectionState } from './api.js';
+import type { RemoteDisplay } from './displays';
+import { DisplaySelector } from './DisplaySelector';
+import { DisplaySwitchPrompt } from './DisplaySwitchPrompt';
 import FilesScreen from './FilesScreen';
+import { listenDisplays, sendPointerMove } from './inputApi.js';
 import MonitoringScreen from './MonitoringScreen';
 import { SessionToolbar } from './SessionToolbar';
 import { Button, type Toast } from './ui';
+import { useDisplayNavigation } from './useDisplayNavigation';
+import { findDisplay } from './displays';
+import { listDisplays } from './videoApi.js';
 import { VideoSurface } from './VideoSurface';
 
 /** How often the round trip to the machine is measured, in milliseconds. */
@@ -63,6 +76,53 @@ export function SessionScreen({
   // Input is forwarded only where the other machine granted it. Capturing without the
   // grant would send every keystroke to a host that answers each one with a refusal.
   const canControl = permissions.includes('control_input');
+
+  // The host's monitors: asked for once, then kept current by the host's own unsolicited
+  // pushes, because a monitor plugged in mid-session moves where every later coordinate
+  // lands.
+  const [displays, setDisplays] = useState<readonly RemoteDisplay[]>([]);
+  const [displaysOpen, setDisplaysOpen] = useState(false);
+  const navigation = useDisplayNavigation(displays);
+
+  useEffect(() => {
+    if (!live || !canViewScreen) return undefined;
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    listDisplays()
+      .then((found) => {
+        if (!cancelled) setDisplays(found);
+      })
+      // A host that will not enumerate its displays still streams display 0; a failed
+      // list means no picker, not a broken session.
+      .catch(() => undefined);
+
+    listenDisplays((found) => {
+      if (!cancelled) setDisplays(found);
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [live, canViewScreen]);
+
+  // A picker for one monitor is chrome that can only pick what is already showing.
+  const hasPicker = displays.length > 1;
+  useEffect(() => {
+    if (!hasPicker) setDisplaysOpen(false);
+  }, [hasPicker]);
+
+  const pendingTarget =
+    navigation.pending === null
+      ? null
+      : findDisplay(displays, navigation.pending.crossing.display);
 
   // Measured rather than assumed: this is the one number that says whether the link is
   // healthy, and it is cheap to obtain.
@@ -123,6 +183,11 @@ export function SessionScreen({
         onTogglePassthrough={() => {
           setPassthrough((current) => !current);
         }}
+        hasDisplayPicker={hasPicker}
+        displaysOpen={displaysOpen}
+        onToggleDisplays={() => {
+          setDisplaysOpen((current) => !current);
+        }}
         onDisconnect={disconnect}
         onOpenFiles={() => {
           setFilesOpen(true);
@@ -134,13 +199,12 @@ export function SessionScreen({
 
       <div className="min-h-0 flex-1">
         {canViewScreen ? (
-          // Display 0: this build does not yet offer a picker for which of the
-          // agent's displays to show, so the primary one is what a session opens on.
           <VideoSurface
-            displayIndex={0}
+            displayIndex={navigation.active}
             fitted={fitted}
             capturing={canControl}
             passthrough={passthrough}
+            onPointerSample={navigation.onPointer}
           />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
@@ -163,6 +227,36 @@ export function SessionScreen({
           </div>
         )}
       </div>
+
+      {displaysOpen && hasPicker && (
+        <div
+          className={
+            'fixed top-16 right-4 z-40 w-64 rounded-xl border border-(--color-border) ' +
+            'bg-(--color-card) p-3 shadow-lg'
+          }
+        >
+          <DisplaySelector
+            displays={displays}
+            active={navigation.active}
+            onSelect={navigation.select}
+          />
+        </div>
+      )}
+
+      {/* Asked, not assumed: crossing an edge moves the view to another monitor, and an
+          operator who did not mean it would rather say so than be moved. Answering also
+          offers to remember, so the question stops being asked. */}
+      {pendingTarget !== null && (
+        <DisplaySwitchPrompt
+          target={pendingTarget}
+          onDecide={(decision) => {
+            const crossing = navigation.decide(decision);
+            if (crossing !== null) {
+              void sendPointerMove(crossing.x, crossing.y, crossing.display).catch(() => undefined);
+            }
+          }}
+        />
+      )}
 
       {monitoringOpen && (
         <div className="border-t border-(--color-border) bg-(--color-card) px-4 py-3">
