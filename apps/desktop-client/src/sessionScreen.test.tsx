@@ -33,6 +33,7 @@ vi.mock('./videoApi.js', async (importOriginal) => {
     stopStream: vi.fn(() => Promise.resolve(null)),
     listenStreamEnded: vi.fn(() => Promise.resolve(() => undefined)),
     listDisplays: vi.fn(() => Promise.resolve([])),
+    requestKeyframe: vi.fn(() => Promise.resolve(null)),
   };
 });
 
@@ -237,5 +238,66 @@ describe('SessionScreen display picker', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: /displays/i })).not.toBeInTheDocument();
     });
+  });
+});
+
+describe('SessionScreen refresh screen', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.listDisplays).mockResolvedValue([]);
+    vi.mocked(videoApi.requestKeyframe).mockResolvedValue(null);
+  });
+
+  it('refreshing the screen asks the host for a fresh keyframe', async () => {
+    // requestKeyframe and its Tauri command existed with no caller. The reader repairs
+    // itself on a *detected* sequence gap, which does nothing for a framebuffer that is
+    // wrong but internally consistent — the case only a human notices.
+    renderSession();
+
+    await userEvent.click(await screen.findByRole('button', { name: /refresh screen/i }));
+
+    await waitFor(() => {
+      expect(videoApi.requestKeyframe).toHaveBeenCalled();
+    });
+  });
+
+  it('says so when the host will not send one', async () => {
+    // Silence here reads as "the tearing is permanent"; the operator would keep
+    // clicking a button that already failed.
+    const onToast = vi.fn();
+    vi.mocked(videoApi.requestKeyframe).mockRejectedValue(new Error('no video stream is running'));
+    render(
+      <SessionScreen
+        connection={CONNECTED}
+        deviceName="Office PC"
+        permissions={['view_screen']}
+        onToast={onToast}
+        onLeave={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /refresh screen/i }));
+
+    await waitFor(() => {
+      expect(onToast).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'error', message: expect.stringMatching(/stream/i) }),
+      );
+    });
+  });
+
+  it('offers no refresh in a session that may not watch the screen', () => {
+    // Absent, not disabled: there is nothing to refresh, and the toolbar's rule is that
+    // a tool you may not use is not there.
+    render(
+      <SessionScreen
+        connection={{ ...CONNECTED, state: 'connected', permissions: ['transfer_files'] }}
+        deviceName="Office PC"
+        permissions={['transfer_files']}
+        onToast={vi.fn()}
+        onLeave={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: /refresh screen/i })).not.toBeInTheDocument();
   });
 });

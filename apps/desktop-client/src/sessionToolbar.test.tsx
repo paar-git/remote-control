@@ -12,6 +12,7 @@ function renderToolbar(permissions: readonly string[] = ALL) {
   const onOpenMonitoring = vi.fn();
   const onToggleFitted = vi.fn();
   const onTogglePassthrough = vi.fn();
+  const onRefreshScreen = vi.fn();
   render(
     <SessionToolbar
       permissions={permissions}
@@ -23,12 +24,20 @@ function renderToolbar(permissions: readonly string[] = ALL) {
       hasDisplayPicker={false}
       displaysOpen={false}
       onToggleDisplays={vi.fn()}
+      onRefreshScreen={onRefreshScreen}
       onDisconnect={onDisconnect}
       onOpenFiles={onOpenFiles}
       onOpenMonitoring={onOpenMonitoring}
     />,
   );
-  return { onDisconnect, onOpenFiles, onOpenMonitoring, onToggleFitted, onTogglePassthrough };
+  return {
+    onDisconnect,
+    onOpenFiles,
+    onOpenMonitoring,
+    onToggleFitted,
+    onTogglePassthrough,
+    onRefreshScreen,
+  };
 }
 
 /** Move the pointer to `clientY`, as the window listener sees it. */
@@ -177,6 +186,7 @@ describe('SessionToolbar', () => {
         hasDisplayPicker={false}
         displaysOpen={false}
         onToggleDisplays={vi.fn()}
+        onRefreshScreen={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -198,6 +208,7 @@ describe('SessionToolbar', () => {
         hasDisplayPicker={false}
         displaysOpen={false}
         onToggleDisplays={vi.fn()}
+        onRefreshScreen={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -221,6 +232,7 @@ describe('SessionToolbar', () => {
         hasDisplayPicker={false}
         displaysOpen={false}
         onToggleDisplays={vi.fn()}
+        onRefreshScreen={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -255,6 +267,7 @@ describe('SessionToolbar keyboard passthrough', () => {
         hasDisplayPicker={false}
         displaysOpen={false}
         onToggleDisplays={vi.fn()}
+        onRefreshScreen={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -265,5 +278,25 @@ describe('SessionToolbar keyboard passthrough', () => {
       'aria-pressed',
       'true',
     );
+  });
+});
+
+describe('SessionToolbar refresh screen', () => {
+  it('asks its caller to refresh rather than reaching the stream itself', async () => {
+    // `ALL` predates the view_screen permission and does not include it, so this names
+    // the permission the button actually depends on rather than relying on that.
+    const { onRefreshScreen } = renderToolbar(['view_screen', ...ALL]);
+
+    await userEvent.click(screen.getByRole('button', { name: /refresh screen/i }));
+
+    expect(onRefreshScreen).toHaveBeenCalledOnce();
+  });
+
+  it('omits it entirely when the session may not watch the screen', () => {
+    // Absent, not disabled: there is nothing to refresh, and a greyed-out button would
+    // send the user looking for a setting that does not exist.
+    renderToolbar(['transfer_files']);
+
+    expect(screen.queryByRole('button', { name: /refresh screen/i })).not.toBeInTheDocument();
   });
 });

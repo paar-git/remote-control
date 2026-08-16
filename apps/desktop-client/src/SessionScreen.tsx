@@ -42,7 +42,7 @@ import { SessionToolbar } from './SessionToolbar';
 import { Button, type Toast } from './ui';
 import { useDisplayNavigation } from './useDisplayNavigation';
 import { findDisplay } from './displays';
-import { listDisplays } from './videoApi.js';
+import { listDisplays, requestKeyframe } from './videoApi.js';
 import { VideoSurface } from './VideoSurface';
 
 /** How often the round trip to the machine is measured, in milliseconds. */
@@ -156,6 +156,18 @@ export function SessionScreen({
     };
   }, [live]);
 
+  // Told about rather than swallowed: silence here reads as "the tearing is permanent",
+  // and the operator would keep pressing a button that already failed.
+  const refreshScreen = useCallback(() => {
+    requestKeyframe().catch((error: unknown) => {
+      onToast({
+        kind: 'error',
+        message:
+          error instanceof Error ? error.message : 'The screen could not be refreshed.',
+      });
+    });
+  }, [onToast]);
+
   const disconnect = useCallback(() => {
     disconnectFromServer()
       .then(() => {
@@ -191,6 +203,7 @@ export function SessionScreen({
         onToggleDisplays={() => {
           setDisplaysOpen((current) => !current);
         }}
+        onRefreshScreen={refreshScreen}
         onDisconnect={disconnect}
         onOpenFiles={() => {
           setFilesOpen(true);

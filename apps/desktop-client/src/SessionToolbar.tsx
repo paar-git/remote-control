@@ -35,6 +35,7 @@ import {
   LogOut,
   Maximize2,
   MonitorSmartphone,
+  RefreshCw,
   Scaling,
   type LucideIcon,
 } from 'lucide-react';
@@ -56,6 +57,7 @@ export function SessionToolbar({
   hasDisplayPicker,
   displaysOpen,
   onToggleDisplays,
+  onRefreshScreen,
   onDisconnect,
   onOpenFiles,
   onOpenMonitoring,
@@ -93,6 +95,14 @@ export function SessionToolbar({
   readonly hasDisplayPicker: boolean;
   readonly displaysOpen: boolean;
   readonly onToggleDisplays: () => void;
+  /**
+   * Ask the host to resend the whole screen.
+   *
+   * The stream repairs itself when it *detects* a dropped frame, which does nothing for
+   * a picture that is wrong but internally consistent — the case only a human notices.
+   * This is the manual way out of that.
+   */
+  readonly onRefreshScreen: () => void;
   readonly onDisconnect: () => void;
   readonly onOpenFiles: () => void;
   readonly onOpenMonitoring: () => void;
@@ -166,6 +176,9 @@ export function SessionToolbar({
           pressed={displaysOpen}
           onClick={onToggleDisplays}
         />
+      )}
+      {may('view_screen') && (
+        <Tool icon={RefreshCw} label="Refresh screen" onClick={onRefreshScreen} />
       )}
       <Tool icon={Scaling} label="Fit to window" pressed={fitted} onClick={onToggleFitted} />
       <Tool
