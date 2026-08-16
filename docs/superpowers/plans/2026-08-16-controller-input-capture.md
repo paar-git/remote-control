@@ -1,6 +1,6 @@
 # Controller Input Capture Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Let an operator drive the remote machine by typing and pointing at the video surface — the missing controlling half of a complete-but-unconsumed input layer.
 
@@ -39,7 +39,7 @@
 
 **The load-bearing decision:** `input_key` is where a chord becomes either a physical key or an intent. With `passthrough` true it is *always* physical — that is Task 3's escape hatch, designed in now rather than retrofitted.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `input_commands.rs`:
 
@@ -88,12 +88,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p rc-desktop-client input_commands`
 Expected: FAIL — `cannot find function classify`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```rust
 /// What a key event turned into.
@@ -129,12 +129,12 @@ fn classify(code: &str, modifiers: Modifiers, passthrough: bool, os: HostOs) -> 
 
 The commands then hold a monotonic `seq` counter, build the matching `InputEvent`, and write it to the input channel. Follow how `video_commands.rs` holds its writer and maps transport errors.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p rc-desktop-client` then `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 Expected: PASS, clippy clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop-client/src-tauri/src/input_commands.rs apps/desktop-client/src-tauri/src/connection.rs apps/desktop-client/src-tauri/src/lib.rs apps/desktop-client/src-tauri/Cargo.toml
@@ -153,7 +153,7 @@ git commit -m "feat(client): send keyboard and pointer input to the remote machi
 - Consumes: the Task 1 commands.
 - Produces: `pointerFraction(event: {clientX,clientY}, rect: DOMRect): {x,y}` and `modifierBits(event: KeyboardEvent | MouseEvent): number`; `<VideoSurface capturing={boolean} …>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 describe('pointerFraction', () => {
@@ -180,23 +180,23 @@ describe('modifierBits', () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd apps/desktop-client && pnpm vitest run src/inputCapture.test.ts`
 Expected: FAIL — cannot resolve `./inputCapture`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `pointerFraction` clamps into `0..=1`. `modifierBits` mirrors `Modifiers`' bit layout exactly: SHIFT `0b0001`, CONTROL `0b0010`, ALT `0b0100`, META `0b1000` — **verify these against `crates/protocol/src/input.rs` rather than trusting this list**, since a mismatch silently sends the wrong modifier.
 
 `VideoSurface` gains focus handling: the canvas is focusable, captures `keydown`/`keyup`/`pointermove`/`pointerdown`/`pointerup`/`wheel` **only while focused**, and calls `event.preventDefault()` so the browser does not act on the operator's keystrokes locally. Release capture on blur, and release it explicitly when the component unmounts — a session that ends mid-chord must not leave the operator's own machine believing a key is held.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd apps/desktop-client && pnpm test:run && pnpm typecheck` and `pnpm lint` from the repo root.
 Expected: PASS, clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop-client/src/inputCapture.ts apps/desktop-client/src/inputCapture.test.ts apps/desktop-client/src/VideoSurface.tsx apps/desktop-client/src/videoSurface.test.tsx
@@ -212,7 +212,7 @@ git commit -m "feat(client): capture keyboard and pointer on the video surface"
 
 **Why this exists.** Intent translation is right for shortcuts and wrong for terminals. A Windows or Linux operator pressing `Ctrl+C` against a remote macOS host has it detected as `Copy` and rendered as `Cmd+C`, so SIGINT never arrives — and the same for `Ctrl+Z`, `Ctrl+A`, `Ctrl+S`. The gap is asymmetric: a macOS operator is unaffected, because `Ctrl+C` is not in the macOS table and already falls through as a physical key. There is no way to say "send this literally", and the toolbar has carried a dead "Keyboard passthrough" toggle since before any of this existed.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```tsx
 it('keyboard passthrough sends the literal chord instead of the intent', async () => {
@@ -229,23 +229,23 @@ it('keyboard passthrough sends the literal chord instead of the intent', async (
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd apps/desktop-client && pnpm vitest run src/sessionScreen.test.tsx`
 Expected: FAIL — the toggle does not reach the capture layer.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Wire `passthrough` from `SessionToolbar` through `SessionScreen` into `VideoSurface`, and from there into every `input_key` call. Make the props **required**, matching the decision already taken for `fitted` — an optional prop here would let a caller ship a toggle that looks live and does nothing, which is the exact defect this toggle already had once.
 
 Show the state plainly: while passthrough is on, the surface should say shortcuts are being sent literally. An operator who forgets it is on will wonder why Copy stopped working.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd apps/desktop-client && pnpm test:run && pnpm typecheck`, `pnpm lint` from the root.
 Expected: PASS, clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop-client/src/SessionToolbar.tsx apps/desktop-client/src/SessionScreen.tsx apps/desktop-client/src/VideoSurface.tsx apps/desktop-client/src/sessionToolbar.test.tsx apps/desktop-client/src/sessionScreen.test.tsx
@@ -256,7 +256,7 @@ git commit -m "feat(client): let an operator send a chord literally"
 
 ### Task 4: Verification and honest documentation
 
-- [ ] **Step 1: Full suite**
+- [x] **Step 1: Full suite**
 
 ```bash
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -265,11 +265,11 @@ cargo test --workspace -- --test-threads=1
 cd apps/desktop-client && pnpm test:run && pnpm typecheck
 ```
 
-- [ ] **Step 2: Update `README.md` and `PROGRESS.md`**
+- [x] **Step 2: Update `README.md` and `PROGRESS.md`**
 
 The screen can now be driven. Record what is still missing: `Alt+Tab` is intercepted by the operator's own OS before the app sees it and needs low-level keyboard hooking that is not built; character keys inject by US-layout character, so a non-US *host* layout may produce a different character for letter keys; clipboard sync does not exist.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add README.md PROGRESS.md
