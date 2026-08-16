@@ -19,9 +19,9 @@ export function PageHeader({
   readonly meta?: React.ReactNode | undefined;
 }): React.JSX.Element {
   return (
-    <header className="mb-6 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+    <header className="mb-3 flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
       <div className="min-w-0">
-        <h2 className="text-lg font-semibold tracking-[-0.01em]">{title}</h2>
+        <h2 className="text-[17px] font-medium">{title}</h2>
         {meta !== undefined && (
           <div className="mt-1.5 flex flex-wrap items-center gap-2">{meta}</div>
         )}

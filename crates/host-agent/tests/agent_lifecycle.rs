@@ -5,12 +5,11 @@
 //!
 //! # What is provable in this build
 //!
-//! The pairing protocol has been deleted and the accept path that replaces it is not
-//! here yet, so no client can obtain a session. What these tests hold onto is what
-//! remains true regardless: the agent starts and reports itself healthy, it keeps its
-//! device identity across a restart, and a client that completes TLS is refused rather
-//! than admitted. The session-level tests — ping, metrics, file transfer — return with
-//! the accept path that makes a session possible again.
+//! Completing TLS still admits nothing. These tests hold the properties that do not
+//! depend on a grant: the agent starts and reports itself healthy, it keeps its
+//! device identity across a restart, and a client that only completes TLS is refused
+//! rather than admitted. Session-level behaviour — admission, ping, metrics, file
+//! transfer — is covered in `access_e2e.rs`.
 //!
 //! # Why the agent is spawned rather than called
 //!
@@ -226,9 +225,10 @@ async fn an_agent_starts_and_reports_itself_healthy() {
 
 #[tokio::test]
 async fn a_client_that_completes_tls_is_not_given_a_session() {
-    // The agent listens, TLS admits the peer, and the handshake refuses it. This build
-    // has no authorisation step, so *every* client lands here. If this test ever sees a
-    // session, the agent is admitting peers it never authorised.
+    // The agent listens, TLS admits the peer, and admission still refuses: this
+    // fixture has incoming access switched off, so completing TLS is not enough.
+    // If this test ever sees a session, the agent is admitting peers it never
+    // authorised.
     let agent = RunningAgent::start().await;
     let identity = client_identity("hopeful");
 
@@ -253,7 +253,7 @@ async fn a_client_that_completes_tls_is_not_given_a_session() {
 
     assert!(
         result.is_err(),
-        "no client may be given a session in this build, got {result:?}"
+        "a client that only completes TLS must not be given a session, got {result:?}"
     );
 
     // And the agent must not be holding a session open for it.

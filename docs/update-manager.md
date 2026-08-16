@@ -1,6 +1,6 @@
 # Download, Installer and Update Manager
 
-The desktop client uses shared Rust update primitives in `crates/updater`, Tauri commands in `apps/desktop-client/src-tauri/src/update_commands.rs`, and frontend state in `apps/desktop-client/src/UpdateScreen.tsx`. The same crate also exposes `rc-bootstrapper`, a small standalone entry point for fresh full-application installs.
+The desktop client uses shared Rust update primitives in `crates/updater`, Tauri commands in `apps/desktop-client/src-tauri/src/update_commands.rs`, and frontend state in `apps/desktop-client/src/UpdatesPane.tsx`. The same crate also exposes `rc-bootstrapper`, a small standalone entry point for fresh full-application installs.
 
 ## Trust Model
 
@@ -20,7 +20,7 @@ Because a keyring is always embedded, the signature policy is `Required` in ever
 
 A build with no saved configuration checks `https://github.com/<owner>/<repo>/releases/latest/download/release-index.json`, a stable endpoint that redirects to the newest published release. Precedence, most specific first: the URL passed to `check_for_updates`, the `RC_UPDATE_MANIFEST_URL` runtime environment variable, the URL saved in `update-config.json` from a previous check, then the compiled-in default (overridable at build time with `RC_UPDATE_METADATA_URL`).
 
-The desktop client checks once on unlock and every six hours after that. The check is silent: failures are recorded but never raised to the user, because an offline machine must not greet its owner with an error. A background check is skipped entirely while a transfer or installation is running. When a newer version is found, a banner appears above the current section and a dot appears on the Updates sidebar item.
+The desktop client checks once on start-up and every six hours after that. The check is silent: failures are recorded but never raised to the user, because an offline machine must not greet its owner with an error. A background check is skipped entirely while a transfer or installation is running. When a newer version is found, a banner appears above the current section. Download and install live in Settings, in `UpdatesPane.tsx`.
 
 ## Release Index
 

@@ -192,7 +192,7 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
 
     if config.network.remote_access_enabled {
         tracing::warn!(
-            "remote access is enabled; confirm the firewall guidance in              docs/installation.md has been applied"
+            "remote access is enabled; allow the listener through the host firewall on private networks"
         );
     }
 

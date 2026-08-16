@@ -5,7 +5,8 @@
  * can be reached at all, which is a real condition — the webview can load without its
  * Tauri host ever responding — not a placeholder for a deleted owner account.
  *
- * Out of session the window is four categories inside {@link AppShell}. Inside a
+ * Out of session the window is four categories inside {@link AppShell}, under a
+ * persistent connect row and this machine's address. Inside a
  * session it becomes the remote machine — {@link SessionScreen} replaces the entire
  * frame. That is the design: once you are connected, the interface gets out of the way.
  *
@@ -14,8 +15,8 @@
  * inside a session too.
  */
 
-import { AlertTriangle, MonitorCog } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { AlertTriangle } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { AcceptDialog } from './AcceptDialog';
 import { AppShell } from './AppShell';
@@ -27,6 +28,8 @@ import {
   listInboundSessions,
   type InboundSession,
 } from './api.js';
+import { invitationText, primaryAddress, RcMark } from './chrome';
+import { formatDeviceId } from './format.js';
 import { InboundSessionBanner } from './InboundSessionBanner';
 import { isTauriAvailable } from './ipc.js';
 import { MyDevicesPage } from './MyDevicesPage';
@@ -35,7 +38,9 @@ import { RemoteControlPage } from './RemoteControlPage';
 import { SessionScreen } from './SessionScreen';
 import { SessionsPage } from './SessionsPage';
 import { SettingsPage } from './SettingsPage';
+import { useConnectForm } from './useConnectForm.js';
 import { useConnectionState } from './useConnection.js';
+import { useHostSnapshot } from './useHostSnapshot.js';
 import { isReadyToInstall, pendingUpdateVersion } from './updates.js';
 import { useUpdateWatcher } from './useUpdateWatcher.js';
 import { ToastBar, type Toast } from './ui';
@@ -59,6 +64,12 @@ export default function App(): React.JSX.Element {
   const pendingVersion = pendingUpdateVersion(updates.status);
   const connection = useConnectionState(ready);
   const live = isConnected(connection.state);
+  const host = useHostSnapshot(ready, hostEpoch);
+  const form = useConnectForm({
+    connection: connection.state,
+    onConnection: connection.set,
+    onToast: setToast,
+  });
 
   useEffect(() => {
     if (!isTauriAvailable()) {
@@ -89,9 +100,30 @@ export default function App(): React.JSX.Element {
     };
   }, []);
 
+  const wasLive = useRef(false);
   useEffect(() => {
+    if (live && !wasLive.current) {
+      setInSession(true);
+      host.refresh();
+    }
     if (!live) setInSession(false);
+    wasLive.current = live;
   }, [live]);
+
+  const invite = useCallback(() => {
+    const deviceId =
+      host.identity === null ? '—' : formatDeviceId(host.identity.identityFingerprint);
+    const address = host.status === null ? null : primaryAddress(host.status.addresses);
+    const text = invitationText(host.status?.machineName ?? 'This device', deviceId, address);
+    navigator.clipboard.writeText(text).then(
+      () => {
+        setToast({ kind: 'success', message: 'Invitation copied.' });
+      },
+      () => {
+        setToast({ kind: 'error', message: 'Could not copy the invitation.' });
+      },
+    );
+  }, [host.identity, host.status]);
 
   useEffect(() => {
     if (!ready) return;
@@ -152,50 +184,79 @@ export default function App(): React.JSX.Element {
 
   if (gate.status === 'unavailable') return <BackendUnavailable message={gate.message} />;
 
-  const banner = (
-    <>
-      {pendingVersion !== null && (
-        <UpdateBanner
-          version={pendingVersion}
-          ready={isReadyToInstall(updates.status)}
-          onOpenSettings={() => {
-            setView('settings');
-          }}
-        />
-      )}
-      <InboundSessionBanner
-        sessions={inbound}
-        onDisconnect={onDisconnectInbound}
-        onEmergency={onEmergency}
+  const updateBanner =
+    pendingVersion !== null ? (
+      <UpdateBanner
+        version={pendingVersion}
+        ready={isReadyToInstall(updates.status)}
+        onOpenSettings={() => {
+          setView('settings');
+        }}
       />
-    </>
+    ) : null;
+
+  const inboundBanner = (
+    <InboundSessionBanner
+      sessions={inbound}
+      onDisconnect={onDisconnectInbound}
+      onEmergency={onEmergency}
+    />
   );
 
   return (
-    <>
+    <div className="flex h-full min-h-0 flex-col">
+      {inboundBanner}
       {inSession && live ? (
+        <div className="min-h-0 flex-1">
         <SessionScreen
           connection={connection.state}
-          deviceName={null}
+          deviceName={
+            connection.state.state === 'connected' ? connection.state.deviceName : null
+          }
           permissions={connection.state.state === 'connected' ? connection.state.permissions : []}
           onToast={setToast}
           onLeave={() => {
             setInSession(false);
           }}
         />
+        </div>
       ) : (
-        <AppShell view={view} onNavigate={setView} banner={banner}>
+        <AppShell
+          view={view}
+          onNavigate={setView}
+          banner={updateBanner}
+          connection={connection.state}
+          status={host.status}
+          identity={host.identity}
+          recent={host.recent}
+          address={form.address}
+          onAddressChange={form.setAddress}
+          onSubmit={form.submit}
+          parseError={form.parseError}
+          busy={form.busy}
+          failed={form.failed}
+          inputRef={form.inputRef}
+          onPickRecent={form.connect}
+          onConnectWithPassword={form.submitWithPassword}
+          onNewSession={form.clear}
+          onInvite={invite}
+        >
           {view === 'remote-control' && (
             <RemoteControlPage
-              connection={connection.state}
-              onConnection={connection.set}
-              onConnected={() => {
-                setInSession(true);
-              }}
+              onConnect={form.connect}
+              connectBusy={form.busy}
               onToast={setToast}
+              onHostChanged={host.refresh}
               onViewAllDevices={() => {
                 setView('my-devices');
               }}
+              onViewSessions={() => {
+                setView('sessions');
+              }}
+              onOpenSettings={() => {
+                setView('settings');
+              }}
+              onInvite={invite}
               hostEpoch={hostEpoch}
             />
           )}
@@ -204,10 +265,17 @@ export default function App(): React.JSX.Element {
               onConnect={() => {
                 setInSession(true);
               }}
+              onConnection={connection.set}
               onToast={setToast}
             />
           )}
-          {view === 'sessions' && <SessionsPage onToast={setToast} />}
+          {view === 'sessions' && (
+            <SessionsPage
+              inbound={inbound}
+              onDisconnectInbound={onDisconnectInbound}
+              onToast={setToast}
+            />
+          )}
           {view === 'settings' && (
             <SettingsPage
               onToast={setToast}
@@ -223,16 +291,14 @@ export default function App(): React.JSX.Element {
       <AcceptDialog onToast={setToast} />
 
       <ToastBar toast={toast} onDismiss={dismissToast} />
-    </>
+    </div>
   );
 }
 
 function Splash(): React.JSX.Element {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 bg-(--color-page)">
-      <span className="flex size-11 items-center justify-center rounded-2xl bg-(--color-accent) text-(--color-accent-text)">
-        <MonitorCog aria-hidden="true" className="size-5.5" />
-      </span>
+      <RcMark size={28} />
       <p role="status" className="text-sm text-(--color-text-secondary)">
         Starting…
       </p>
@@ -245,10 +311,10 @@ function BackendUnavailable({ message }: { readonly message: string }): React.JS
     <div className="flex h-full items-center justify-center bg-(--color-page) p-6">
       <div
         role="alert"
-        className="w-full max-w-md rounded-xl border border-(--color-danger)/40 bg-(--color-card) p-5"
+        className="w-full max-w-md rounded-[4px] border border-(--color-danger)/40 bg-(--color-card) p-5"
       >
         <div className="mb-2 flex items-center gap-2.5">
-          <span className="flex size-8 items-center justify-center rounded-lg bg-(--color-danger-soft) text-(--color-danger)">
+          <span className="flex size-8 items-center justify-center rounded-[4px] bg-(--color-danger-soft) text-(--color-danger)">
             <AlertTriangle aria-hidden="true" className="size-4" />
           </span>
           <h1 className="text-base font-semibold">Backend unavailable</h1>

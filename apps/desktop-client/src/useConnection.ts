@@ -3,8 +3,8 @@
  *
  * The backend owns the connection, so the UI reads it rather than keeping a copy: a
  * state the UI invented could disagree with the session that is actually open. One hook
- * means the sidebar, the top bar, Home and Devices all show the same answer at the same
- * time instead of polling independently and disagreeing for a second.
+ * means the status bar, Remote Control and My Devices all show the same answer at the
+ * same time instead of polling independently and disagreeing for a second.
  */
 
 import { useCallback, useEffect, useState } from 'react';

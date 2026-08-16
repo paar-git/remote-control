@@ -6,29 +6,45 @@ import { useCallback, useEffect, useState } from 'react';
 
 import {
   connectToAddress,
+  listRecent,
   listTrustedDevices,
   probeDevice,
+  type ConnectionState,
   type Presence,
+  type Recent,
   type TrustedDevice,
 } from './api.js';
+import { RecentDevicesPanel } from './chrome';
+import { HardDrive } from 'lucide-react';
+
 import { DeviceCard } from './DeviceCard';
 import { DeviceDetail } from './DeviceDetail';
 import { EmptyState, PageHeader, type Toast } from './ui';
 
 export function MyDevicesPage({
   onConnect,
+  onConnection,
   onToast,
 }: {
   readonly onConnect: () => void;
+  readonly onConnection?: ((next: ConnectionState) => void) | undefined;
   readonly onToast: (toast: Toast) => void;
 }): React.JSX.Element {
   const [devices, setDevices] = useState<readonly TrustedDevice[] | null>(null);
+  const [recent, setRecent] = useState<readonly Recent[]>([]);
   const [presence, setPresence] = useState<Readonly<Record<string, Presence>>>({});
   const [open, setOpen] = useState<TrustedDevice | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
     let cancelled = false;
+    listRecent()
+      .then((entries) => {
+        if (!cancelled) setRecent(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setRecent([]);
+      });
     listTrustedDevices()
       .then((loaded) => {
         if (cancelled) return;
@@ -69,11 +85,12 @@ export function MyDevicesPage({
     return load();
   }, [load]);
 
-  const connect = (device: TrustedDevice): void => {
-    if (device.lastAddress === null || busy) return;
+  const dial = (address: string): void => {
+    if (busy) return;
     setBusy(true);
-    connectToAddress(device.lastAddress, null)
+    connectToAddress(address, null)
       .then((next) => {
+        onConnection?.(next);
         if (next.state === 'connected') onConnect();
       })
       .catch((error: unknown) => {
@@ -87,35 +104,49 @@ export function MyDevicesPage({
       });
   };
 
+  const connect = (device: TrustedDevice): void => {
+    if (device.lastAddress === null) return;
+    dial(device.lastAddress);
+  };
+
   return (
-    <div className="mx-auto w-full max-w-4xl">
+    <div className="w-full">
       <PageHeader
         title="My Devices"
         description="Computers this machine trusts. Access and permissions are decided separately."
       />
 
+      {recent.length > 0 && (
+        <div className="mb-4">
+          <RecentDevicesPanel recent={recent} presence={{}} busy={busy} onConnect={dial} />
+        </div>
+      )}
+
       {devices === null ? (
         <p className="text-sm text-(--color-text-secondary)">Loading trusted devices…</p>
       ) : devices.length === 0 ? (
         <EmptyState
+          icon={HardDrive}
           title="No trusted devices yet"
           body="Accept & Trust on an incoming connection, or connect to a machine and remember it."
         />
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {devices.map((device) => (
-            <DeviceCard
-              key={device.identityFingerprint}
-              device={device}
-              presence={presence[device.identityFingerprint] ?? 'checking'}
-              busy={busy}
-              onConnect={() => {
-                connect(device);
-              }}
-              onOpen={() => {
-                setOpen(device);
-              }}
-            />
+        <div className="overflow-hidden rounded-[4px] border border-(--color-border) bg-(--color-card)">
+          {devices.map((device, index) => (
+            <div key={device.identityFingerprint}>
+              {index > 0 && <div className="mx-4 h-px bg-(--color-separator)" />}
+              <DeviceCard
+                device={device}
+                presence={presence[device.identityFingerprint] ?? 'checking'}
+                busy={busy}
+                onConnect={() => {
+                  connect(device);
+                }}
+                onOpen={() => {
+                  setOpen(device);
+                }}
+              />
+            </div>
           ))}
         </div>
       )}

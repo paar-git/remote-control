@@ -42,7 +42,7 @@ export function ToastBar({
       // `alert` for errors so screen readers interrupt; `status` for successes so
       // they do not.
       role={error ? 'alert' : 'status'}
-      className={`animate-toast-in fixed right-5 bottom-5 z-50 flex max-w-sm items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-sm shadow-lg shadow-[rgb(16_24_40_/_12%)] ${
+      className={`animate-toast-in fixed right-5 bottom-16 z-50 flex max-w-sm items-start gap-2.5 rounded-[4px] border px-3.5 py-2.5 text-sm ${
         error
           ? 'border-(--color-danger)/40 bg-(--color-card) text-(--color-text)'
           : 'border-(--color-success)/40 bg-(--color-card) text-(--color-text)'
@@ -84,9 +84,11 @@ export function ConfirmDialog({
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!open) return;
-    cancelRef.current?.focus();
+    if (open) cancelRef.current?.focus();
+  }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onCancel();
     };
@@ -104,11 +106,11 @@ export function ConfirmDialog({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="animate-fade-in w-full max-w-md rounded-xl border border-(--color-border) bg-(--color-card) p-5 shadow-xl shadow-[rgb(16_24_40_/_16%)]"
+        className="animate-fade-in w-full max-w-md rounded-[4px] border border-(--color-border) bg-(--color-card) p-5"
       >
         <div className="mb-3 flex items-center gap-2.5">
           {destructive && (
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-(--color-danger-soft) text-(--color-danger)">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-[4px] bg-(--color-danger-soft) text-(--color-danger)">
               <AlertTriangle aria-hidden="true" className="size-4" />
             </span>
           )}
@@ -121,7 +123,7 @@ export function ConfirmDialog({
             ref={cancelRef}
             type="button"
             onClick={onCancel}
-            className="inline-flex h-8 items-center rounded-lg border border-(--color-border) px-3 text-sm font-medium transition-colors duration-150 ease-(--ease-ui) hover:bg-(--color-hover)"
+            className="inline-flex h-8 items-center rounded-[4px] border border-(--color-border) px-3 text-sm font-medium transition-colors duration-125 ease-(--ease-ui) hover:bg-(--color-hover)"
           >
             Cancel
           </button>
@@ -147,15 +149,17 @@ export function EmptyState({
   readonly icon?: LucideIcon | undefined;
 }): React.JSX.Element {
   return (
-    <div className="flex flex-col items-center rounded-xl border border-dashed border-(--color-border) px-6 py-10 text-center">
+    <div className="flex max-w-md items-start gap-3 pt-1">
       {Icon !== undefined && (
-        <span className="mb-3 flex size-10 items-center justify-center rounded-xl bg-(--color-card) text-(--color-text-secondary)">
+        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center text-(--color-text-muted)">
           <Icon aria-hidden="true" className="size-5" />
         </span>
       )}
-      <p className="mb-1 text-sm font-medium">{title}</p>
-      <p className="mb-4 max-w-md text-sm text-(--color-text-secondary)">{body}</p>
-      {action}
+      <div className="min-w-0">
+        <p className="text-[15px] font-medium">{title}</p>
+        <p className="mt-1 text-[13px] text-(--color-text-secondary)">{body}</p>
+        {action !== undefined && <div className="mt-3">{action}</div>}
+      </div>
     </div>
   );
 }
@@ -179,7 +183,7 @@ export function ErrorState({
   return (
     <div
       role="alert"
-      className="rounded-xl border border-(--color-danger)/40 bg-(--color-danger-soft) p-4"
+      className="rounded-[4px] border border-(--color-danger)/40 bg-(--color-danger-soft) p-4"
     >
       <div className="flex items-start gap-2.5">
         <AlertTriangle

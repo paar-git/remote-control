@@ -113,6 +113,33 @@ export function formatRate(bytesPerSecond: number): string {
  * Coarse on purpose: nobody reads "17 days, 4 hours, 32 minutes and 9 seconds" off a
  * dashboard, and the seconds change while they are reading it.
  */
+/** Clock-style duration, e.g. `00:06:21`. */
+export function formatClockDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = total % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
+}
+
+/** Absolute time with a Today/Yesterday prefix when it applies. */
+export function formatDayTime(ms: number, nowMs: number = Date.now()): string {
+  const date = new Date(ms);
+  const now = new Date(nowMs);
+  const time = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const startOf = (value: Date): number =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const diffDays = Math.round((startOf(now) - startOf(date)) / 86_400_000);
+  if (diffDays === 0) return `Today, ${time}`;
+  if (diffDays === 1) return `Yesterday, ${time}`;
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 export function formatDuration(seconds: number): string {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);

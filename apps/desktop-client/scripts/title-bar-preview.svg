@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1648" height="57" viewBox="0 0 1648 57" fill="none">
+  <rect width="1648" height="57" fill="#111315"/>
+  <rect y="56" width="1648" height="1" fill="#454A50"/>
+
+  <!-- Brand 96px -->
+  <g transform="translate(16 18)">
+    <g transform="translate(0 0)">
+      <path fill="#FF413D" fill-rule="evenodd" d="M1.7 1.4h10.6v8.1H1.7zm1.9 2.55h6.8v4.15H3.6zM8.7 11.1h10.6v8.1H8.7zm1.9 2.55h6.8v4.15h-6.8z"/>
+      <path fill="#FF413D" d="M7.15 8.85h2.7l1.95 1.7-1.95 1.7H7.15l1.75-1.7z"/>
+    </g>
+    <text x="31" y="16" fill="#F3F3F3" font-family="Segoe UI Variable, Segoe UI, sans-serif" font-size="15" font-weight="600" letter-spacing="-0.45">RC</text>
+  </g>
+
+  <!-- Control session tab -->
+  <rect x="96" width="118" height="57" fill="#141618"/>
+  <text x="155" y="34" fill="#F1F1F2" font-family="Segoe UI Variable, Segoe UI, sans-serif" font-size="15" text-anchor="middle">Control</text>
+  <rect x="96" y="55" width="118" height="2" fill="#FF413D"/>
+
+  <!-- New Session -->
+  <text x="424" y="34" fill="#B7BAC0" font-family="Segoe UI Variable, Segoe UI, sans-serif" font-size="15" text-anchor="middle">New Session</text>
+
+  <!-- Caption buttons -->
+  <g fill="none" stroke="#B7BAC0" stroke-width="1">
+    <path d="M1551 28.5h10"/>
+    <rect x="1596.5" y="24.5" width="7" height="7"/>
+    <path d="M1631 24.5l6 6M1637 24.5l-6 6"/>
+  </g>
+</svg>

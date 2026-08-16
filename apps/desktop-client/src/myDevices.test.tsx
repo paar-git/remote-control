@@ -10,6 +10,7 @@ vi.mock('./api.js', async (importOriginal) => {
   return {
     ...actual,
     listTrustedDevices: vi.fn(),
+    listRecent: vi.fn(),
     probeDevice: vi.fn(),
     connectToAddress: vi.fn(),
     setDevicePermissions: vi.fn(),
@@ -44,6 +45,8 @@ function mockDevices(devices: TrustedDevice[]): void {
 describe('MyDevicesPage', () => {
   beforeEach(() => {
     vi.mocked(api.listTrustedDevices).mockReset();
+    vi.mocked(api.listRecent).mockReset();
+    vi.mocked(api.listRecent).mockResolvedValue([]);
     vi.mocked(api.probeDevice).mockReset();
     vi.mocked(api.probeDevice).mockResolvedValue('offline');
   });

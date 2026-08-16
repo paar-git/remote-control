@@ -3,60 +3,63 @@
 /*
  * Design tokens.
  *
- * Two themes, one accent. The accent is a primary blue used for Connect and selected
- * chrome. Red is reserved for Disconnect, refusals and errors — using it on the main
- * action made every connect look like a warning.
- *
- * * **Two surfaces.** A page colour, cards sitting on top of it. Depth comes from a
- *   hairline border and one soft shadow.
- * * **One accent.** Reserved for the primary action and the current state of a control.
- * * **Soft variants.** Each status colour has a low-alpha companion used as a fill
- *   behind the solid colour, so a badge reads as a state rather than as a button.
+ * Dense Windows-style desktop chrome. Red is RC's identity — Connect, the device
+ * address, and the selected nav item. Surfaces are flat rectangles with hairline
+ * borders, not floating cards.
  */
 @theme {
-  --color-page: #f4f6fa;
-  --color-card: #ffffff;
-  --color-sidebar: #eef1f6;
-  --color-hover: #e8ecf2;
-  --color-border: #dfe3ea;
-  --color-border-hover: #c5cbd6;
-  --color-text: #141820;
-  --color-text-secondary: #5b6472;
-  --color-accent: #2563eb;
-  --color-accent-hover: #1d4ed8;
-  --color-accent-soft: rgb(37 99 235 / 12%);
+  --color-page: #e4e6e8;
+  --color-card: #f4f6f7;
+  --color-hover: #e2e4e6;
+  --color-border: #b4b8bd;
+  --color-border-hover: #a8acb2;
+  --color-separator: rgb(0 0 0 / 8%);
+  --color-text: #1a1c1e;
+  --color-text-secondary: #5c6066;
+  --color-text-muted: #858991;
+  --color-accent: #e23a36;
+  --color-accent-hover: #ff514d;
+  --color-accent-pressed: #c72f2c;
+  --color-accent-soft: rgb(226 58 54 / 12%);
   --color-accent-text: #ffffff;
-  --color-success: #1a7333;
-  --color-success-soft: rgb(26 115 51 / 12%);
-  --color-warning: #8f5706;
-  --color-warning-soft: rgb(143 87 6 / 12%);
+  --color-success: #1a9a3e;
+  --color-success-soft: rgb(26 154 62 / 12%);
+  --color-warning: #b87a12;
+  --color-warning-soft: rgb(184 122 18 / 12%);
   --color-danger: #c62828;
   --color-danger-soft: rgb(198 40 40 / 10%);
-  --radius-card: 16px;
-  --shadow-card: 0 1px 2px rgb(16 24 40 / 5%), 0 8px 24px rgb(16 24 40 / 6%);
-  --ease-ui: cubic-bezier(0.2, 0, 0.2, 1);
+  --color-titlebar: #dcdedf;
+  --color-input: #ffffff;
+  --color-chrome: #e8e9ea;
+  --radius-card: 4px;
+  --shadow-card: none;
+  --ease-ui: ease;
 }
 
 [data-theme='dark'] {
-  --color-page: #101218;
-  --color-card: #181b22;
-  --color-sidebar: #14171e;
-  --color-hover: #22262f;
-  --color-border: #2a303b;
-  --color-border-hover: #3b4250;
-  --color-text: #f2f4f8;
-  --color-text-secondary: #9aa3b2;
-  --color-accent: #3b82f6;
-  --color-accent-hover: #60a5fa;
-  --color-accent-soft: rgb(59 130 246 / 16%);
+  --color-page: #141618;
+  --color-card: #1e2124;
+  --color-hover: #202326;
+  --color-border: #454a50;
+  --color-border-hover: #545a61;
+  --color-separator: rgb(255 255 255 / 12%);
+  --color-text: #f1f1f2;
+  --color-text-secondary: #b7bac0;
+  --color-text-muted: #858991;
+  --color-accent: #ff413d;
+  --color-accent-hover: #ff514d;
+  --color-accent-pressed: #df3532;
+  --color-accent-soft: rgb(255 65 61 / 14%);
   --color-accent-text: #ffffff;
-  --color-success: #3dba63;
-  --color-success-soft: rgb(61 186 99 / 16%);
-  --color-warning: #e0a23a;
-  --color-warning-soft: rgb(224 162 58 / 16%);
-  --color-danger: #f07171;
-  --color-danger-soft: rgb(240 113 113 / 16%);
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 35%), 0 10px 28px rgb(0 0 0 / 28%);
+  --color-success: #31c854;
+  --color-success-soft: rgb(49 200 84 / 16%);
+  --color-warning: #e6a93a;
+  --color-warning-soft: rgb(230 169 58 / 16%);
+  --color-danger: #e74b45;
+  --color-danger-soft: rgb(231 75 69 / 16%);
+  --color-titlebar: #111315;
+  --color-input: #151719;
+  --color-chrome: #191b1d;
 }
 
 @layer base {
@@ -103,9 +106,13 @@
 
   /* Keyboard navigation must always be visible — this is an admin tool. */
   :focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
-    border-radius: 6px;
+    outline: 1px solid var(--color-accent);
+    outline-offset: 0;
+    border-radius: 4px;
+  }
+
+  .lucide {
+    stroke-width: 1.65;
   }
 
   /* The chrome is not a document; only deliberate scroll regions select. */
@@ -169,11 +176,9 @@
   @keyframes rc-fade-in {
     from {
       opacity: 0;
-      transform: translateY(2px);
     }
     to {
       opacity: 1;
-      transform: none;
     }
   }
 
@@ -186,11 +191,9 @@
   @keyframes rc-view-in {
     from {
       opacity: 0;
-      transform: translateY(6px);
     }
     to {
       opacity: 1;
-      transform: none;
     }
   }
 
@@ -236,5 +239,36 @@
 
   .animate-status-dot {
     animation: rc-dot 180ms var(--ease-ui) both;
+  }
+
+  .rc-content {
+    width: 100%;
+    max-width: 1360px;
+    margin-inline: auto;
+    padding-inline: 24px;
+  }
+
+  @media (min-width: 1400px) {
+    .rc-content {
+      padding-inline: 0;
+    }
+  }
+
+  .rc-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.18fr) minmax(0, 1fr);
+    gap: 16px 32px;
+    height: 100%;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  @media (max-width: 1049px) {
+    .rc-workspace {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: none;
+      height: auto;
+    }
   }
 }

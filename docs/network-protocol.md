@@ -59,7 +59,7 @@ before parsing anything.
 | Control | 1 | 256 KiB | Handshake, admission, requests |
 | File transfer | 3 | 8 MiB | Directory listings, chunks |
 | Video | 4 | 16 MiB | Encoded frames |
-| Input | 5 | 256 KiB | Mouse and keyboard events |
+| Input | 5 | 4 KiB | Mouse and keyboard events |
 | Metrics | 6 | 256 KiB | Periodic system metrics |
 
 Frames are `RC` magic, channel byte, and a big-endian `u32` length, then a postcard

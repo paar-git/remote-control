@@ -22,11 +22,10 @@ export function Card({
   return (
     <div
       className={
-        'rounded-[var(--radius-card)] border border-(--color-border) bg-(--color-card) ' +
-        'shadow-(--shadow-card) ' +
-        (padded ? 'p-6 ' : '') +
+        'rounded-[4px] border border-(--color-border) bg-(--color-card) ' +
+        (padded ? 'p-[22px] ' : '') +
         (interactive
-          ? 'transition-[border-color,box-shadow,transform] duration-200 ease-(--ease-ui) hover:border-(--color-border-hover) '
+          ? 'transition-[background-color,border-color] duration-125 ease-(--ease-ui) hover:bg-(--color-hover) '
           : '') +
         className
       }
@@ -49,11 +48,11 @@ export function CardHeader({
   return (
     <div className="mb-3 flex items-center gap-2.5">
       {Icon !== undefined && (
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-(--color-card) text-(--color-text-secondary)">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-[4px] bg-(--color-card) text-(--color-text-secondary)">
           <Icon aria-hidden="true" className="size-4" />
         </span>
       )}
-      <h3 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">{title}</h3>
+      <h3 className="min-w-0 flex-1 truncate text-[17px] font-semibold">{title}</h3>
       {trailing}
     </div>
   );

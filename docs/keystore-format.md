@@ -116,11 +116,11 @@ Renewal reissues the TLS certificate **without changing the device identity**:
 | Certificate fingerprint | SHA-256 of the DER certificate | **Yes** |
 | Certificate version | Counter | **Yes** |
 
-A peer pins the **certificate fingerprint** it observed, so renewing a certificate does
-break an existing pin — deliberately. See `access-model.md`: a changed identity is
-refused rather than prompted for.
-The certificate fingerprint is expected to change and is recorded per-device so a rotation
-can be distinguished from an identity substitution.
+A peer pins the **identity fingerprint**, not the certificate fingerprint. Renewal
+reissues the TLS certificate from the same identity key, so an existing pin
+survives. A changed identity is refused rather than prompted for — see
+`access-model.md`. The certificate fingerprint is expected to change and is
+recorded so a rotation can be distinguished from an identity substitution.
 
 The agent never silently regenerates an identity. If the keystore cannot be read, it fails
 — because regenerating would change the device identity, so every machine that has

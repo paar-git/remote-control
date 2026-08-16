@@ -37,7 +37,7 @@ decided.
 | The address did not resolve | yes |
 | The operator pressed Disconnect | **no** |
 | The connection was refused, for any reason | **no** |
-| The other machine presented a different certificate | **no** |
+| The other machine presented a different identity | **no** |
 | Protocol or version mismatch | **no** |
 | The other machine is rate-limiting this one | **no** |
 | The address is malformed | **no** |
@@ -102,10 +102,10 @@ was doing.
 ## The decision is made again, every time
 
 A reconnect is a new connection and goes through the whole handshake, including the
-admission decision. The certificate is observed again and checked against the pin again.
+admission decision. The identity is observed again and checked against the pin again.
 
 This is what makes withdrawing access immediate. A machine whose pin is removed while it
-is connected is asked about again on its very next attempt, and one whose certificate
+is connected is asked about again on its very next attempt, and one whose identity
 changed is refused outright rather than being handed to the dialog.
 
 It also means the permissions can differ between one session and the next, because a

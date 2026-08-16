@@ -1,8 +1,9 @@
 # Threat model
 
 Written for the current design: one application that is both the machine being
-controlled and the machine controlling, admitting connections by a human clicking Accept
-or by an unattended password, and remembering a device by the identity it proved.
+controlled and the machine controlling, admitting connections by a trusted
+identity, an unattended password, or a human clicking Accept, and remembering a
+device by the identity it proved.
 
 The access rules themselves are in [`access-model.md`](access-model.md). This document is
 about who can attack them and what happens when they do.
@@ -37,11 +38,13 @@ The previous design required an attacker to defeat a pairing exchange: a short-l
 single-use, attempt-capped code, with the proof bound to both certificate fingerprints.
 Without it, no connection was possible at all.
 
-The current design requires **mutual TLS plus either a human clicking Accept or the
-unattended password**. Completing TLS is not a barrier — the listener is
-trust-on-first-use and any well-formed self-signed client certificate passes it.
+The current design requires **mutual TLS plus a trusted identity, the unattended
+password, or a human clicking Accept**. Completing TLS is not a barrier — the
+listener is trust-on-first-use and any well-formed self-signed client certificate
+passes it.
 
-So the barrier is now a person, or a password.
+So the first door is a trusted identity. Without that grant, the barrier is a
+person, or a password.
 
 This is a real reduction, and it was made deliberately: the pairing exchange was the
 single largest obstacle to the product being usable, and a remote-control tool nobody
@@ -110,7 +113,7 @@ passwords, at the rate the lockout allows.
 capabilities without being admitted — none of it travels before the decision. Tell a
 dismissal from a wrong password from a lockout. Learn whether unattended access is
 configured at all, by answer or by timing. Stack dialogs. Get a session without a human
-click or the password.
+click, the password, or a stored trusted-identity grant.
 
 *Residual:* denial of service by flooding the port; the one-dialog rule also means an
 attacker can occupy the dialog slot and stop a legitimate connection from raising one

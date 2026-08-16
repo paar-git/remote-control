@@ -18,6 +18,7 @@ const versions = new Map([
   ['Cargo workspace', readWorkspaceCargoVersion()],
   ['root package.json', readJson('package.json').version],
   ['desktop package.json', readJson('apps/desktop-client/package.json').version],
+  ['shared-types package.json', readJson('packages/shared-types/package.json').version],
   ['Tauri config', readJson('apps/desktop-client/src-tauri/tauri.conf.json').version],
 ]);
 

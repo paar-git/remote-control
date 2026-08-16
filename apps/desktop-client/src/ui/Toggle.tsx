@@ -24,16 +24,16 @@ export function Toggle({
         onChange(!checked);
       }}
       className={
-        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ' +
-        'duration-200 ease-(--ease-ui) disabled:opacity-45 ' +
+        'relative inline-flex h-[28px] w-[50px] shrink-0 items-center rounded-full transition-colors ' +
+        'duration-125 ease-(--ease-ui) disabled:opacity-45 ' +
         (checked ? 'bg-(--color-accent)' : 'bg-(--color-border-hover)')
       }
     >
       <span
         className={
-          'inline-block size-5 rounded-full bg-white shadow-sm transition-transform ' +
-          'duration-200 ease-(--ease-ui) ' +
-          (checked ? 'translate-x-5' : 'translate-x-0.5')
+          'inline-block size-[22px] rounded-full bg-white transition-transform ' +
+          'duration-125 ease-(--ease-ui) ' +
+          (checked ? 'translate-x-[25px]' : 'translate-x-[3px]')
         }
       />
     </button>

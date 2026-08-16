@@ -17,7 +17,7 @@ There is still no remote display. A session can transfer files and show live met
 - Shrink monitoring to a session strip
 - Replace trust, owner and audit with recent and settings
 - Parse the address a user types
-- Reduce the permission model to three permissions
+- Reduce the permission model to four permissions (control, files, metrics, administer)
 
 ## Fixes
 
