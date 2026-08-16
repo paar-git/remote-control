@@ -293,80 +293,6 @@ pub struct ServiceInfo {
     pub protected: bool,
 }
 
-/// An operation to perform on a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ServiceAction {
-    /// Start it now.
-    Start,
-    /// Stop it now.
-    Stop,
-    /// Stop then start.
-    Restart,
-    /// Set to start at boot.
-    EnableAtBoot,
-    /// Set to not start at boot.
-    DisableAtBoot,
-}
-
-/// A power operation on the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum PowerAction {
-    /// Lock the console session.
-    Lock,
-    /// Sign the interactive user out.
-    SignOut,
-    /// Reboot.
-    Restart,
-    /// Power off.
-    Shutdown,
-    /// Suspend to RAM.
-    Sleep,
-    /// Suspend to disk.
-    Hibernate,
-    /// Restart only the agent process, leaving the host up.
-    RestartAgent,
-    /// Reboot into the platform's recovery / advanced startup environment.
-    RestartToRecovery,
-}
-
-impl PowerAction {
-    /// Whether this action interrupts the host badly enough to demand the strongest
-    /// confirmation flow in the UI.
-    #[must_use]
-    pub const fn is_high_impact(self) -> bool {
-        matches!(
-            self,
-            Self::Restart
-                | Self::Shutdown
-                | Self::SignOut
-                | Self::Hibernate
-                | Self::Sleep
-                | Self::RestartToRecovery
-        )
-    }
-
-    /// Whether this action would drop the current remote session.
-    #[must_use]
-    pub const fn ends_session(self) -> bool {
-        !matches!(self, Self::Lock)
-    }
-}
-
-/// A pending power action the operator can still cancel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScheduledPowerAction {
-    /// What will happen.
-    pub action: PowerAction,
-    /// When it fires, milliseconds since the Unix epoch.
-    pub execute_at_ms: i64,
-    /// Token required to cancel it.
-    pub cancel_token: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,31 +433,5 @@ mod tests {
         // The live half is still present, or a tick would carry nothing worth pushing.
         assert!(cpu.contains_key("usage_percent"));
         assert!(cpu.contains_key("per_core_percent"));
-    }
-
-    #[test]
-    fn destructive_power_actions_are_high_impact() {
-        for action in [
-            PowerAction::Restart,
-            PowerAction::Shutdown,
-            PowerAction::SignOut,
-        ] {
-            assert!(
-                action.is_high_impact(),
-                "{action:?} must require strong confirmation"
-            );
-        }
-    }
-
-    #[test]
-    fn lock_is_low_impact_and_keeps_the_session() {
-        assert!(!PowerAction::Lock.is_high_impact());
-        assert!(!PowerAction::Lock.ends_session());
-    }
-
-    #[test]
-    fn restarting_the_agent_ends_the_session_but_is_not_high_impact() {
-        assert!(PowerAction::RestartAgent.ends_session());
-        assert!(!PowerAction::RestartAgent.is_high_impact());
     }
 }

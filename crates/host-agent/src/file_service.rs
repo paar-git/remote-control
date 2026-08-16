@@ -1,14 +1,18 @@
 //! Serving the file channel for one authenticated connection.
 //!
-//! # Two authorization checks, not one
+//! # One authorization check
 //!
-//! Reading needs [`Capability::FileRead`]; anything that changes the filesystem needs
-//! [`Capability::FileWrite`]. Both are checked **per message** against the live session
-//! rather than once when the channel opens, so a device revoked mid-connection stops
-//! being served immediately.
+//! Every file operation, read or write, needs [`Permission::TransferFiles`]. It is
+//! checked **per message** against the live session rather than once when the channel
+//! opens, so a device whose permissions change mid-connection stops being served
+//! immediately.
 //!
-//! Splitting read from write is what makes a View Only device useful: it can browse and
-//! download without being able to alter anything.
+//! There used to be a second, finer split here: an explicit list of read-only
+//! operations that needed only read access, with everything else needing write access.
+//! That distinction is gone because there is now exactly one file permission —
+//! [`Permission::TransferFiles`] — so a read and a write need the same grant. The list
+//! collapsed into this single check rather than being deleted by accident; if a second
+//! file permission is ever reintroduced, the read/write split belongs back here.
 //!
 //! # Every path is resolved before it is touched
 //!
@@ -32,10 +36,11 @@ use rc_file_transfer::{
 use rc_protocol::TransferId;
 use rc_protocol::control::ErrorCode;
 use rc_protocol::files::{ConflictPolicy, FileAgentMessage, FileClientMessage};
-use rc_security::permissions::{AuthorizationContext, Capability};
-use rc_storage::audit::{AuditCategory, AuditEvent, AuditResult, actions};
+use rc_security::Permission;
 use rc_transport::{ChannelReader, ChannelWriter, TransportError};
 use tokio::sync::Mutex;
+
+use crate::sessions::Session;
 
 /// Serves the file channel for one connection.
 pub struct FileService {
@@ -47,11 +52,9 @@ pub struct FileService {
     transfers: Arc<TransferRegistry>,
     /// Shared so a download pump and the message loop can both write.
     writer: Arc<Mutex<ChannelWriter>>,
-    authorization: AuthorizationContext,
-    database: rc_storage::Database,
+    session: Session,
     device_id: rc_protocol::DeviceId,
     session_id: rc_protocol::SessionId,
-    clock: Arc<dyn rc_security::Clock>,
     /// Whether the agent's configuration permits file transfer at all.
     enabled: bool,
 }
@@ -64,11 +67,9 @@ impl FileService {
         writer: ChannelWriter,
         policy: PathPolicy,
         max_transfer_bytes: u64,
-        authorization: AuthorizationContext,
-        database: rc_storage::Database,
+        session: Session,
         device_id: rc_protocol::DeviceId,
         session_id: rc_protocol::SessionId,
-        clock: Arc<dyn rc_security::Clock>,
         enabled: bool,
     ) -> Self {
         Self {
@@ -78,11 +79,9 @@ impl FileService {
                 rc_file_transfer::MAX_CONCURRENT_TRANSFERS,
             )),
             writer: Arc::new(Mutex::new(writer)),
-            authorization,
-            database,
+            session,
             device_id,
             session_id,
-            clock,
             enabled,
         }
     }
@@ -123,114 +122,51 @@ impl FileService {
             return;
         }
 
-        // Split by what the operation *does* rather than by message shape, so the two
-        // capability checks stay one decision each rather than being repeated per arm.
-        if is_read_only(&message) {
-            self.handle_read(message).await;
-        } else {
-            self.handle_write(message).await;
+        // Cancelling is the one operation not gated on `TransferFiles`: stopping
+        // something already in flight is always permitted, and refusing it would leave
+        // a transfer running that the operator asked to stop. Every other operation,
+        // read or write, needs the same single permission — see the module docs.
+        if let FileClientMessage::TransferCancel { transfer_id } = message {
+            self.transfers.cancel(transfer_id);
+            self.send(&FileAgentMessage::Ok).await;
+            return;
         }
-    }
 
-    /// Handle a message that only reads.
-    async fn handle_read(&self, message: FileClientMessage) {
+        if self.refuse_without().await {
+            return;
+        }
+
         match message {
             FileClientMessage::List {
                 path,
                 include_hidden,
             } => {
-                if self.refuse_without(Capability::FileRead).await {
-                    return;
-                }
                 self.list(&path, include_hidden).await;
             }
 
-            FileClientMessage::Stat { path } => {
-                if self.refuse_without(Capability::FileRead).await {
-                    return;
-                }
-                match self.resolve(&path) {
-                    Ok(resolved) => match stat(&resolved) {
-                        Ok(entry) => {
-                            self.send(&FileAgentMessage::Stat {
-                                path: resolved.to_string_lossy().into_owned(),
-                                entry,
-                            })
-                            .await;
-                        }
-                        Err(err) => self.send_file_error(&err).await,
-                    },
-                    Err(err) => self.send_file_error(&err).await,
-                }
-            }
+            FileClientMessage::Stat { path } => self.stat_path(&path).await,
 
             FileClientMessage::VerifyRange {
                 path,
                 offset,
                 length,
-            } => {
-                if self.refuse_without(Capability::FileRead).await {
-                    return;
-                }
-                match self
-                    .resolve(&path)
-                    .and_then(|resolved| checksum_range(&resolved, offset, length))
-                {
-                    Ok((checksum, length)) => {
-                        self.send(&FileAgentMessage::RangeChecksum { checksum, length })
-                            .await;
-                    }
-                    Err(err) => self.send_file_error(&err).await,
-                }
-            }
+            } => self.verify_range(&path, offset, length).await,
 
             FileClientMessage::DownloadBegin {
                 transfer_id,
                 source,
                 start_offset,
             } => {
-                if self.refuse_without(Capability::FileRead).await {
-                    return;
-                }
                 self.download(transfer_id, &source, start_offset).await;
             }
 
-            // Routed here by `is_read_only`, so anything else is a routing bug.
-            _ => {
-                self.send_error(
-                    ErrorCode::Internal,
-                    "that file request was routed incorrectly",
-                )
-                .await;
-            }
-        }
-    }
-
-    /// Handle a message that changes the filesystem.
-    async fn handle_write(&self, message: FileClientMessage) {
-        match message {
-            FileClientMessage::CreateDirectory { path } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
-                let outcome = self.resolve(&path).and_then(|resolved| {
-                    std::fs::create_dir_all(&resolved).map_err(|err| FileError::from_io(&err))
-                });
-                self.answer(outcome, actions::DIRECTORY_CREATED, &path)
-                    .await;
-            }
+            FileClientMessage::CreateDirectory { path } => self.create_directory(&path).await,
 
             FileClientMessage::Rename { from, to, conflict } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
                 self.rename(&from, &to, conflict).await;
             }
 
             FileClientMessage::Copy { from, to, conflict } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
                 self.copy(&from, &to, conflict).await;
             }
 
@@ -239,9 +175,6 @@ impl FileService {
                 permanent,
                 recursive,
             } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
                 self.delete(&path, permanent, recursive).await;
             }
 
@@ -252,9 +185,6 @@ impl FileService {
                 checksum,
                 conflict,
             } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
                 self.upload_begin(transfer_id, &destination, total_bytes, checksum, conflict)
                     .await;
             }
@@ -263,40 +193,17 @@ impl FileService {
                 transfer_id,
                 offset,
                 data,
-            } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
-                // The bytes are never logged: file contents are not something the audit
-                // trail records.
-                if let Err(err) = self.transfers.write_chunk(transfer_id, offset, &data) {
-                    self.fail_transfer(transfer_id, &err).await;
-                }
-            }
+            } => self.upload_chunk(transfer_id, offset, &data).await,
 
-            FileClientMessage::UploadEnd { transfer_id } => {
-                if self.refuse_without(Capability::FileWrite).await {
-                    return;
-                }
-                match self.transfers.finish(transfer_id) {
-                    Ok(bytes) => {
-                        self.audit_transfer(actions::FILE_UPLOADED, bytes).await;
-                        self.send(&FileAgentMessage::TransferComplete {
-                            transfer_id,
-                            bytes_transferred: bytes,
-                        })
-                        .await;
-                    }
-                    Err(err) => self.fail_transfer(transfer_id, &err).await,
-                }
-            }
+            FileClientMessage::UploadEnd { transfer_id } => self.upload_end(transfer_id).await,
 
-            FileClientMessage::TransferCancel { transfer_id } => {
-                // Deliberately not capability-gated: stopping something already in
-                // flight is always permitted, and refusing it would leave a transfer
-                // running that the operator asked to stop.
-                self.transfers.cancel(transfer_id);
-                self.send(&FileAgentMessage::Ok).await;
+            // Handled above, before the permission check.
+            FileClientMessage::TransferCancel { .. } => {
+                self.send_error(
+                    ErrorCode::Internal,
+                    "that file request was routed incorrectly",
+                )
+                .await;
             }
 
             // `FileClientMessage` is `#[non_exhaustive]`: an operation from a newer
@@ -308,6 +215,62 @@ impl FileService {
                 )
                 .await;
             }
+        }
+    }
+
+    async fn stat_path(&self, path: &str) {
+        match self.resolve(path) {
+            Ok(resolved) => match stat(&resolved) {
+                Ok(entry) => {
+                    self.send(&FileAgentMessage::Stat {
+                        path: resolved.to_string_lossy().into_owned(),
+                        entry,
+                    })
+                    .await;
+                }
+                Err(err) => self.send_file_error(&err).await,
+            },
+            Err(err) => self.send_file_error(&err).await,
+        }
+    }
+
+    async fn verify_range(&self, path: &str, offset: u64, length: u64) {
+        match self
+            .resolve(path)
+            .and_then(|resolved| checksum_range(&resolved, offset, length))
+        {
+            Ok((checksum, length)) => {
+                self.send(&FileAgentMessage::RangeChecksum { checksum, length })
+                    .await;
+            }
+            Err(err) => self.send_file_error(&err).await,
+        }
+    }
+
+    async fn create_directory(&self, path: &str) {
+        let outcome = self.resolve(path).and_then(|resolved| {
+            std::fs::create_dir_all(&resolved).map_err(|err| FileError::from_io(&err))
+        });
+        self.answer(outcome, "file.directory_created").await;
+    }
+
+    async fn upload_chunk(&self, transfer_id: TransferId, offset: u64, data: &[u8]) {
+        if let Err(err) = self.transfers.write_chunk(transfer_id, offset, data) {
+            self.fail_transfer(transfer_id, &err).await;
+        }
+    }
+
+    async fn upload_end(&self, transfer_id: TransferId) {
+        match self.transfers.finish(transfer_id) {
+            Ok(bytes) => {
+                self.log_transfer("file.uploaded", bytes);
+                self.send(&FileAgentMessage::TransferComplete {
+                    transfer_id,
+                    bytes_transferred: bytes,
+                })
+                .await;
+            }
+            Err(err) => self.fail_transfer(transfer_id, &err).await,
         }
     }
 
@@ -344,7 +307,7 @@ impl FileService {
             std::fs::rename(&source, &destination).map_err(|err| FileError::from_io(&err))
         })();
 
-        self.answer(outcome, actions::FILE_RENAMED, from).await;
+        self.answer(outcome, "file.renamed").await;
     }
 
     /// Copy within the host.
@@ -370,7 +333,7 @@ impl FileService {
                 .map_err(|err| FileError::from_io(&err))
         })();
 
-        self.answer(outcome, actions::FILE_COPIED, from).await;
+        self.answer(outcome, "file.copied").await;
     }
 
     /// Delete a path.
@@ -399,7 +362,7 @@ impl FileService {
         // whatever the client asked for. The flag is not consulted, and the client is
         // told plainly rather than being allowed to believe a delete was recoverable.
         let _ = permanent;
-        self.answer(outcome, actions::FILE_DELETED, path).await;
+        self.answer(outcome, "file.deleted").await;
     }
 
     /// Begin or resume an upload.
@@ -501,7 +464,7 @@ impl FileService {
         }
 
         let sent = download.bytes_sent();
-        self.audit_transfer(actions::FILE_DOWNLOADED, sent).await;
+        self.log_transfer("file.downloaded", sent);
         self.send(&FileAgentMessage::TransferComplete {
             transfer_id,
             bytes_transferred: sent,
@@ -514,37 +477,30 @@ impl FileService {
         self.policy.resolve(raw)
     }
 
-    /// Refuse the message when the session lacks `capability`. Returns whether it did.
-    async fn refuse_without(&self, capability: Capability) -> bool {
-        if self.authorization.require(capability).is_ok() {
+    /// Refuse the message when the session lacks [`Permission::TransferFiles`]. Returns
+    /// whether it did.
+    async fn refuse_without(&self) -> bool {
+        if self.session.require(Permission::TransferFiles).is_ok() {
             return false;
         }
 
         self.send_error(
             ErrorCode::PermissionDenied,
-            match capability {
-                Capability::FileWrite => "this device may read files but not change them",
-                _ => "this device is not permitted to browse files on this server",
-            },
+            "this device is not permitted to transfer files on this server",
         )
         .await;
         true
     }
 
     /// Report the outcome of an operation that either works or does not.
-    async fn answer(
-        &self,
-        outcome: rc_file_transfer::Result<()>,
-        action: &'static str,
-        path: &str,
-    ) {
+    async fn answer(&self, outcome: rc_file_transfer::Result<()>, action: &'static str) {
         match outcome {
             Ok(()) => {
-                self.audit_path(action, AuditResult::Success, path).await;
+                self.log_operation(action, true);
                 self.send(&FileAgentMessage::Ok).await;
             }
             Err(err) => {
-                self.audit_path(action, AuditResult::Failure, path).await;
+                self.log_operation(action, false);
                 self.send_file_error(&err).await;
             }
         }
@@ -583,52 +539,35 @@ impl FileService {
         .await;
     }
 
-    /// Record an operation on a path.
+    /// Log an operation on a path.
     ///
-    /// The path is deliberately **not** included: it came from a peer, and the audit
-    /// trail is read by a human. What is recorded is that this device did this kind of
-    /// thing in this session, which is what the trail is for.
-    async fn audit_path(&self, action: &'static str, result: AuditResult, _path: &str) {
-        self.audit(
-            AuditEvent::new(AuditCategory::FileTransfer, action, result)
-                .actor_device(self.device_id)
-                .meta("session_id", self.session_id),
-        )
-        .await;
+    /// The path is deliberately **not** included: it came from a peer, and this is
+    /// read by a human. What is logged is that this device did this kind of thing in
+    /// this session.
+    ///
+    /// There is no persisted audit trail in this build — the table it used to write to
+    /// was dropped along with the model it described (see
+    /// `crates/storage/migrations/0003_anydesk_model.sql`) — so this only reaches the
+    /// process log.
+    fn log_operation(&self, action: &'static str, success: bool) {
+        tracing::info!(
+            device_id = %self.device_id,
+            session_id = %self.session_id,
+            action,
+            success,
+            "file operation"
+        );
     }
 
-    async fn audit_transfer(&self, action: &'static str, bytes: u64) {
-        self.audit(
-            AuditEvent::new(AuditCategory::FileTransfer, action, AuditResult::Success)
-                .actor_device(self.device_id)
-                .meta("session_id", self.session_id)
-                .meta("bytes", bytes),
-        )
-        .await;
+    fn log_transfer(&self, action: &'static str, bytes: u64) {
+        tracing::info!(
+            device_id = %self.device_id,
+            session_id = %self.session_id,
+            action,
+            bytes,
+            "file transfer"
+        );
     }
-
-    async fn audit(&self, event: AuditEvent) {
-        let repository = rc_storage::audit::AuditRepository::new(&self.database);
-        if let Err(err) = repository.record(&event, self.clock.now_ms()).await {
-            tracing::error!(%err, action = event.action, "could not write an audit record");
-        }
-    }
-}
-
-/// Whether a message only reads, and so needs [`Capability::FileRead`] alone.
-///
-/// Written as an exhaustive-by-listing match rather than a negation: a message added
-/// later falls through to the write half, which is the safe side to default to. A new
-/// operation being needlessly gated behind write access is a nuisance; a new operation
-/// that changes the filesystem being treated as a read is a hole.
-const fn is_read_only(message: &FileClientMessage) -> bool {
-    matches!(
-        message,
-        FileClientMessage::List { .. }
-            | FileClientMessage::Stat { .. }
-            | FileClientMessage::VerifyRange { .. }
-            | FileClientMessage::DownloadBegin { .. }
-    )
 }
 
 /// Apply a conflict policy to a destination that may already exist.
@@ -692,33 +631,7 @@ fn partial_resume_point(
 
 #[cfg(test)]
 mod tests {
-    use rc_security::Role;
-
     use super::*;
-
-    #[test]
-    fn reading_and_writing_are_separate_capabilities() {
-        // What makes View Only useful: browse and download, but change nothing.
-        let view_only = AuthorizationContext::new(Role::ViewOnly);
-
-        assert!(view_only.require(Capability::FileRead).is_ok());
-        assert!(view_only.require(Capability::FileWrite).is_err());
-    }
-
-    #[test]
-    fn an_operator_may_write_and_a_revoked_device_may_not_even_read() {
-        assert!(
-            AuthorizationContext::new(Role::Operator)
-                .require(Capability::FileWrite)
-                .is_ok()
-        );
-        assert!(
-            AuthorizationContext::revoked(Role::Owner)
-                .require(Capability::FileRead)
-                .is_err(),
-            "revocation must override the role entirely"
-        );
-    }
 
     #[test]
     fn a_destination_that_does_not_exist_is_used_as_given() {

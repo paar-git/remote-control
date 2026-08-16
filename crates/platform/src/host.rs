@@ -59,9 +59,75 @@ pub const fn detect_os_family() -> OsFamily {
     }
 }
 
+/// Every address on this machine a peer on the same network could dial.
+///
+/// Loopback is excluded: an address only this machine can reach is not one to show
+/// someone who is being asked to type it in elsewhere. Link-local IPv4 (`169.254/16`)
+/// is excluded for the same reason — it means DHCP failed, so the address will not
+/// route. IPv6 link-local (`fe80::/10`) is excluded because it is unusable without a
+/// zone index this does not carry.
+///
+/// Returns them sorted, IPv4 first, so the list a user reads off the screen does not
+/// reorder itself between calls. May be empty on a machine with no network at all,
+/// which is reported as empty rather than padded with a loopback address that would
+/// not work.
+#[must_use]
+pub fn reachable_addresses() -> Vec<std::net::IpAddr> {
+    use std::net::IpAddr;
+
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let mut found: Vec<IpAddr> = networks
+        .values()
+        .flat_map(sysinfo::NetworkData::ip_networks)
+        .map(|network| network.addr)
+        .filter(|address| match address {
+            IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local(),
+            // `is_unicast_link_local` is still unstable, so the prefix is checked
+            // directly: fe80::/10 is the first ten bits being 1111111010.
+            IpAddr::V6(v6) => !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80,
+        })
+        .collect();
+
+    found.sort_unstable_by_key(|address| (address.is_ipv6(), address.to_string()));
+    found.dedup();
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reachable_addresses_exclude_anything_a_peer_could_not_dial() {
+        // The list is read off a screen and typed in on another machine. A loopback or
+        // link-local address there is worse than a short list: it looks like an answer
+        // and cannot work.
+        for address in reachable_addresses() {
+            assert!(!address.is_loopback(), "{address} is loopback");
+            match address {
+                std::net::IpAddr::V4(v4) => assert!(!v4.is_link_local(), "{v4} is link-local"),
+                std::net::IpAddr::V6(v6) => {
+                    assert_ne!(v6.segments()[0] & 0xffc0, 0xfe80, "{v6} is link-local");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reachable_addresses_are_ordered_and_unique() {
+        // Shown as a list a user picks from; it must not reshuffle between renders.
+        let first = reachable_addresses();
+        assert_eq!(first, reachable_addresses(), "the order must be stable");
+
+        let mut deduped = first.clone();
+        deduped.dedup();
+        assert_eq!(deduped, first, "an address must not appear twice");
+
+        assert!(
+            first.windows(2).all(|w| !w[0].is_ipv6() || w[1].is_ipv6()),
+            "IPv4 addresses come first, got {first:?}"
+        );
+    }
 
     #[test]
     fn detects_a_known_os_family() {

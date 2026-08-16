@@ -17,21 +17,12 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-mod config;
-mod file_service;
-mod identity;
-mod local_api;
-mod logging;
-mod metrics_service;
-mod server;
-mod sessions;
-mod terminal_service;
-
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use config::AgentConfig;
+use rc_host_agent::config::AgentConfig;
+use rc_host_agent::{health, identity, logging, server};
 use rc_platform::{AppPaths, HostInfo};
 
 /// Command-line interface.
@@ -69,12 +60,6 @@ enum Command {
     },
     /// Print this agent's device identity and fingerprints.
     Identity,
-    /// Open a pairing window and display a one-time code.
-    Pair {
-        /// How long the code stays valid, in seconds.
-        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u64).range(30..=900))]
-        ttl: u64,
-    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -132,20 +117,6 @@ fn main() -> anyhow::Result<()> {
             identity::print_identity(&device_identity);
             Ok(())
         }
-        Command::Pair { ttl } => {
-            let config = load()?;
-
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .context("could not start the async runtime")?;
-
-            // The window has to be opened inside the *running* agent: pairing sessions
-            // live in that process's memory, and only that process can verify the
-            // proof a client will send. So this command asks it, rather than opening a
-            // window of its own that nothing would ever answer.
-            runtime.block_on(identity::request_pairing_window(&paths, &config, ttl))
-        }
         Command::Run => run(paths, load()?),
     }
 }
@@ -201,19 +172,9 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         "database ready"
     );
 
-    // Recorded once the database is available, so first-run identity creation leaves a
-    // trail. An ordinary load writes nothing.
-    identity::record_identity_event(
-        &rc_storage::audit::AuditRepository::new(&database),
-        identity_origin,
-        &device_identity,
-        &rc_security::SystemClock,
-    )
-    .await?;
-
-    // Pairing sessions are in-memory, so any window still marked open belongs to a
-    // previous run and can no longer be used. Recording that keeps the trail honest.
-    identity::expire_stale_windows(&database).await?;
+    // Logged once the database is available, so first-run identity creation leaves a
+    // trail in the process log. An ordinary load logs nothing.
+    identity::record_identity_event(identity_origin, &device_identity, &rc_security::SystemClock);
 
     tracing::info!(
         device_id = %device_identity.device_id(),
@@ -224,7 +185,6 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
 
     tracing::info!(
         listen = %config.listen_socket(),
-        discovery = config.network.discovery_enabled,
         remote_access = config.network.remote_access_enabled,
         max_sessions = config.network.max_sessions,
         "network configuration loaded"
@@ -236,24 +196,15 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         );
     }
 
-    // Shared with the local control endpoint. Windows are opened out-of-band, by an
-    // operator running `rc-agent pair`, and live only in this process's memory.
-    let pairing = std::sync::Arc::new(rc_security::PairingManager::with_defaults());
     let health_port = config.network.health_port;
-    let privileged_port = config.network.privileged_port;
     let device_identity = std::sync::Arc::new(device_identity);
 
-    let privileged = connect_privileged_helper(&paths, privileged_port).await;
-
-    let server = std::sync::Arc::new(
-        server::AgentServer::new(
-            std::sync::Arc::clone(&device_identity),
-            config,
-            database.clone(),
-            std::sync::Arc::clone(&pairing),
-        )
-        .with_privileged_helper(privileged),
-    );
+    let server = std::sync::Arc::new(server::AgentServer::new(
+        std::sync::Arc::clone(&device_identity),
+        config,
+        &database,
+        std::sync::Arc::new(server::DismissingPrompt),
+    ));
 
     // One shutdown signal, observed by both the listener and the local endpoint. A
     // broadcast rather than two waiters on the OS signal, because only one task can
@@ -268,15 +219,7 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         let _ = shutdown_tx.send(());
     });
 
-    let local_task = spawn_local_endpoint(
-        health_port,
-        &paths,
-        &database,
-        &server,
-        &pairing,
-        &device_identity,
-        local_shutdown,
-    );
+    let health_task = spawn_health_endpoint(health_port, &database, &server, local_shutdown);
 
     server
         .run(async move {
@@ -285,7 +228,7 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
         .await?;
 
     tracing::info!("shutdown signal received, stopping");
-    if let Some(task) = local_task {
+    if let Some(task) = health_task {
         // The endpoint has been told to stop; waiting for it keeps the shutdown
         // ordered rather than leaving a socket open behind the process.
         let _ = task.await;
@@ -295,101 +238,25 @@ async fn run_async(paths: AppPaths, config: AgentConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Connect to the privileged helper, if one is configured.
+/// Start the loopback health endpoint, if it is enabled.
 ///
-/// Returns `None` when no helper is installed, which is a supported configuration: the
-/// agent then refuses operations needing Administrator or root with a message saying so.
-///
-/// The state is logged once, at startup, so an operator finds out here rather than when
-/// a power button does nothing.
-async fn connect_privileged_helper(
-    paths: &AppPaths,
+/// Best-effort: an agent that cannot serve health can still serve clients, and refusing
+/// to start would turn a diagnostic facility into an outage.
+fn spawn_health_endpoint(
     port: u16,
-) -> Option<rc_privileged::PrivilegedClient> {
-    if port == 0 {
-        tracing::info!(
-            "no privileged helper is configured; operations needing Administrator or \
-             root will be refused"
-        );
-        return None;
-    }
-
-    let token_path = rc_privileged::client::token_path(paths.data_dir());
-    let client = match rc_privileged::PrivilegedClient::from_token_file(port, &token_path) {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                path = %token_path.display(),
-                "could not read the privileged helper's token; is the helper running?"
-            );
-            return None;
-        }
-    };
-
-    // Confirmed rather than assumed: a token file left by a helper that has since
-    // stopped would otherwise look like a working helper until the first real request.
-    match client.ping().await {
-        Ok((version, elevated)) => {
-            if elevated {
-                tracing::info!(helper_version = %version, "privileged helper ready");
-            } else {
-                tracing::warn!(
-                    helper_version = %version,
-                    "the privileged helper is running but not elevated; operations \
-                     needing Administrator or root will fail"
-                );
-            }
-            Some(client)
-        }
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "the privileged helper did not answer; privileged operations will be \
-                 refused"
-            );
-            None
-        }
-    }
-}
-
-/// Start the loopback control endpoint, if it is enabled.
-///
-/// Best-effort throughout: an agent that cannot serve health or accept a local pairing
-/// request can still serve clients, and refusing to start would turn a diagnostic
-/// facility into an outage.
-fn spawn_local_endpoint(
-    port: u16,
-    paths: &AppPaths,
     database: &rc_storage::Database,
     server: &std::sync::Arc<server::AgentServer>,
-    pairing: &std::sync::Arc<rc_security::PairingManager>,
-    identity: &std::sync::Arc<rc_security::DeviceIdentity>,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if port == 0 {
-        tracing::info!("the local control endpoint is disabled by configuration");
+        tracing::info!("the local health endpoint is disabled by configuration");
         return None;
     }
 
-    // Written before the endpoint starts serving, so `rc-agent pair` never finds a
-    // socket it cannot authenticate to. A fresh token per start invalidates any copy
-    // taken from a previous run.
-    let token = local_api::LocalControlToken::generate();
-    if let Err(err) = token.write_to(&local_api::token_path(paths)) {
-        tracing::warn!(
-            %err,
-            "could not write the local control token; `rc-agent pair` will not work"
-        );
-    }
-
-    let endpoint = std::sync::Arc::new(local_api::LocalEndpoint::new(
+    let endpoint = std::sync::Arc::new(health::HealthEndpoint::new(
         database.clone(),
         server.sessions(),
         server.listener_ready(),
-        std::sync::Arc::clone(pairing),
-        std::sync::Arc::clone(identity),
-        token,
     ));
 
     Some(tokio::spawn(async move {
@@ -399,7 +266,7 @@ fn spawn_local_endpoint(
             })
             .await
         {
-            tracing::warn!(%err, port, "the local control endpoint stopped");
+            tracing::warn!(%err, port, "the local health endpoint stopped");
         }
     }))
 }

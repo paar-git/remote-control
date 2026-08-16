@@ -14,7 +14,8 @@
 //! # What is recorded
 //!
 //! Only what the operator needs in order to recognise a session and end it: which
-//! device, which role, where from, when it started and when it was last active. No
+//! device, what it was permitted to do, where from, when it started and when it was
+//! last active. No
 //! message content, and no credential — there is no session credential to record,
 //! because a session is authenticated by its TLS connection rather than by a bearer
 //! value.
@@ -24,7 +25,68 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rc_protocol::{DeviceId, SessionId};
-use rc_security::Role;
+use rc_security::{Permission, PermissionSet};
+
+use crate::error::{AccessError, Result};
+
+/// What a live session may do, as the channels serving it see it.
+///
+/// Carries exactly the [`PermissionSet`] the connection was admitted with — decided
+/// once, by [`crate::access::authorize_connection`], and fixed for the session's whole
+/// lifetime. Widening it requires a new connection, which means a new decision by a
+/// human.
+///
+/// [`Session::require`] is what every channel service calls, on every request rather
+/// than once when the channel opens: a permission decided once at handshake and then
+/// trusted forever is exactly the failure this design exists to prevent, so a session
+/// whose permissions are withdrawn mid-connection stops being answered immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Session {
+    permissions: PermissionSet,
+    identity: rc_security::Fingerprint,
+}
+
+impl Session {
+    /// A session held by the device that proved `identity`, granted `permissions`.
+    #[must_use]
+    pub const fn new(permissions: PermissionSet, identity: rc_security::Fingerprint) -> Self {
+        Self {
+            permissions,
+            identity,
+        }
+    }
+
+    /// The identity this session was admitted under.
+    ///
+    /// Taken from the connection at admission, never from a request body. It is what
+    /// lets a service refuse an action aimed at the caller's own trust row -- see
+    /// [`crate::trust_service`].
+    #[must_use]
+    pub const fn identity(&self) -> rc_security::Fingerprint {
+        self.identity
+    }
+
+    /// What this session may do. Fixed for its lifetime.
+    #[must_use]
+    pub const fn permissions(&self) -> PermissionSet {
+        self.permissions
+    }
+
+    /// Refuse unless this session holds `permission`.
+    ///
+    /// # Errors
+    /// [`AccessError::PermissionDenied`] if the session's granted permissions do not
+    /// include `permission`.
+    pub fn require(&self, permission: Permission) -> Result<()> {
+        if self.permissions.contains(permission) {
+            Ok(())
+        } else {
+            Err(AccessError::PermissionDenied {
+                permission: permission.name(),
+            })
+        }
+    }
+}
 
 /// A session as the operator sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,8 +95,13 @@ pub struct LiveSession {
     pub session_id: SessionId,
     /// Which trusted device is connected.
     pub device_id: DeviceId,
+    /// The identity that device proved, so the operator's view names the same thing
+    /// the trust list does.
+    pub identity_fingerprint: rc_security::Fingerprint,
+    /// The name it reported. Untrusted text; sanitise before rendering.
+    pub display_name: String,
     /// What that device is permitted to do.
-    pub role: Role,
+    pub permissions: PermissionSet,
     /// Peer address, host only.
     pub source: String,
     /// When the session was admitted, milliseconds since the Unix epoch.
@@ -51,6 +118,13 @@ pub struct SessionRegistry {
     /// in `sessions`. This is what the cap is enforced against.
     reserved: AtomicUsize,
     sessions: Mutex<Vec<LiveSession>>,
+    /// One waker per live session, so ending a session actually ends it.
+    ///
+    /// Removing a row from `sessions` would clear the operator's display while leaving
+    /// the remote peer connected — the worst available outcome, because it would say
+    /// nobody is controlling the machine while somebody is. The session's own task
+    /// waits on its waker and closes the connection when it fires.
+    enders: Mutex<Vec<(SessionId, Arc<tokio::sync::Notify>)>>,
 }
 
 impl SessionRegistry {
@@ -64,6 +138,7 @@ impl SessionRegistry {
             max_sessions: max_sessions.max(1),
             reserved: AtomicUsize::new(0),
             sessions: Mutex::new(Vec::new()),
+            enders: Mutex::new(Vec::new()),
         }
     }
 
@@ -94,6 +169,7 @@ impl SessionRegistry {
                     return Some(SessionSlot {
                         registry: Arc::clone(self),
                         session_id: Mutex::new(None),
+                        end: Arc::new(tokio::sync::Notify::new()),
                     });
                 }
                 Err(observed) => current = observed,
@@ -119,15 +195,57 @@ impl SessionRegistry {
         sessions
     }
 
-    fn insert(&self, session: LiveSession) {
+    /// End one session, returning whether it was there to end.
+    ///
+    /// Reports `false` for a session that has already gone rather than pretending: a
+    /// Disconnect button that claims success for a session that had already ended
+    /// teaches the operator that the button is decorative.
+    pub fn end(&self, session_id: SessionId) -> bool {
+        let waker = self.enders.lock().ok().and_then(|mut enders| {
+            let index = enders.iter().position(|(id, _)| *id == session_id)?;
+            Some(enders.swap_remove(index).1)
+        });
+
+        let Some(waker) = waker else { return false };
+        self.remove(session_id);
+        waker.notify_waiters();
+        true
+    }
+
+    /// End every live session, returning how many were ended.
+    ///
+    /// The emergency stop. The whole list is taken under one lock, so a session
+    /// admitted while this runs cannot be skipped by a partially-drained loop.
+    pub fn end_all(&self) -> usize {
+        let drained: Vec<(SessionId, Arc<tokio::sync::Notify>)> = self
+            .enders
+            .lock()
+            .map(|mut enders| std::mem::take(&mut *enders))
+            .unwrap_or_default();
+
+        for (session_id, waker) in &drained {
+            self.remove(*session_id);
+            waker.notify_waiters();
+        }
+        drained.len()
+    }
+
+    fn insert(&self, session: LiveSession, end: &Arc<tokio::sync::Notify>) {
+        let session_id = session.session_id;
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.push(session);
+        }
+        if let Ok(mut enders) = self.enders.lock() {
+            enders.push((session_id, Arc::clone(end)));
         }
     }
 
     fn remove(&self, session_id: SessionId) {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.retain(|s| s.session_id != session_id);
+        }
+        if let Ok(mut enders) = self.enders.lock() {
+            enders.retain(|(id, _)| *id != session_id);
         }
     }
 
@@ -160,6 +278,8 @@ pub struct SessionSlot {
     /// Set once the connection authenticates. A reservation that never gets this far
     /// still occupied a slot and still releases it.
     session_id: Mutex<Option<SessionId>>,
+    /// Fires when an operator ends this session.
+    end: Arc<tokio::sync::Notify>,
 }
 
 impl SessionSlot {
@@ -168,21 +288,36 @@ impl SessionSlot {
         &self,
         session_id: SessionId,
         device_id: DeviceId,
-        role: Role,
+        identity_fingerprint: rc_security::Fingerprint,
+        display_name: String,
+        permissions: PermissionSet,
         source: SocketAddr,
         now_ms: i64,
     ) {
         if let Ok(mut slot) = self.session_id.lock() {
             *slot = Some(session_id);
         }
-        self.registry.insert(LiveSession {
-            session_id,
-            device_id,
-            role,
-            source: source.ip().to_string(),
-            started_at_ms: now_ms,
-            last_active_ms: now_ms,
-        });
+        self.registry.insert(
+            LiveSession {
+                session_id,
+                device_id,
+                identity_fingerprint,
+                display_name,
+                permissions,
+                source: source.ip().to_string(),
+                started_at_ms: now_ms,
+                last_active_ms: now_ms,
+            },
+            &self.end,
+        );
+    }
+
+    /// Resolves once an operator has ended this session.
+    ///
+    /// A session task selects on this alongside its own work, so Disconnect closes the
+    /// connection rather than only clearing a row from a list.
+    pub async fn ended(&self) {
+        self.end.notified().await;
     }
 
     /// Note that the session did something, for the idle display.
@@ -208,7 +343,46 @@ impl Drop for SessionSlot {
 
 #[cfg(test)]
 mod tests {
+    use rc_security::Permission;
+
     use super::*;
+
+    #[test]
+    fn a_session_may_use_a_permission_it_was_granted() {
+        let session = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
+        assert!(session.require(Permission::ViewMetrics).is_ok());
+    }
+
+    #[test]
+    fn a_session_is_refused_a_permission_it_was_not_granted() {
+        // The dangerous direction: a session must never be let through for something it
+        // was not explicitly granted.
+        let session = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
+        let err = session.require(Permission::TransferFiles).unwrap_err();
+        assert!(matches!(
+            err,
+            AccessError::PermissionDenied {
+                permission: "transfer_files"
+            }
+        ));
+    }
+
+    #[test]
+    fn a_session_with_no_permissions_is_refused_everything() {
+        let session = Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
+        for permission in Permission::ALL {
+            assert!(session.require(permission).is_err());
+        }
+    }
 
     fn registry(cap: usize) -> Arc<SessionRegistry> {
         Arc::new(SessionRegistry::new(cap))
@@ -256,7 +430,9 @@ mod tests {
         slot.activate(
             session_id,
             DeviceId::generate(),
-            Role::Operator,
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
+            PermissionSet::ALL,
             address(),
             1_000,
         );
@@ -283,7 +459,9 @@ mod tests {
         slot.activate(
             session_id,
             DeviceId::generate(),
-            Role::Owner,
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
+            PermissionSet::ALL,
             address(),
             1_000,
         );
@@ -303,7 +481,9 @@ mod tests {
         slot.activate(
             SessionId::generate(),
             DeviceId::generate(),
-            Role::Owner,
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
+            PermissionSet::ALL,
             address(),
             1,
         );
@@ -325,8 +505,24 @@ mod tests {
 
         let old_id = SessionId::generate();
         let new_id = SessionId::generate();
-        older.activate(old_id, DeviceId::generate(), Role::Owner, address(), 1_000);
-        newer.activate(new_id, DeviceId::generate(), Role::Owner, address(), 9_000);
+        older.activate(
+            old_id,
+            DeviceId::generate(),
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
+            PermissionSet::ALL,
+            address(),
+            1_000,
+        );
+        newer.activate(
+            new_id,
+            DeviceId::generate(),
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
+            PermissionSet::ALL,
+            address(),
+            9_000,
+        );
 
         let listed = registry.list();
         assert_eq!(listed[0].session_id, new_id);
@@ -360,5 +556,91 @@ mod tests {
 
         assert_eq!(slots.len(), 8, "exactly the cap must be handed out");
         assert_eq!(registry.reserved_count(), 8);
+    }
+
+    #[tokio::test]
+    async fn ending_a_session_wakes_it_rather_than_only_clearing_the_row() {
+        // Removing the row alone would clear the operator's display while leaving the
+        // remote peer connected -- the worst outcome available, because the machine
+        // would say nobody is controlling it while somebody is.
+        let registry = Arc::new(SessionRegistry::new(4));
+        let slot = registry.reserve().unwrap();
+        let session_id = SessionId::generate();
+        slot.activate(
+            session_id,
+            DeviceId::generate(),
+            rc_security::Fingerprint::from_bytes([9u8; 32]),
+            "Test Device".to_owned(),
+            PermissionSet::ALL,
+            "10.0.0.2:5000".parse().unwrap(),
+            1,
+        );
+
+        let waiting = tokio::spawn({
+            let slot_end = Arc::clone(&slot.end);
+            async move { slot_end.notified().await }
+        });
+        tokio::task::yield_now().await;
+
+        assert!(registry.end(session_id));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .expect("the session must be woken, not merely removed")
+            .unwrap();
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn ending_a_session_that_has_already_gone_reports_that_rather_than_pretending() {
+        let registry = Arc::new(SessionRegistry::new(4));
+        assert!(!registry.end(SessionId::generate()));
+    }
+
+    #[test]
+    fn ending_everything_ends_every_session() {
+        let registry = Arc::new(SessionRegistry::new(4));
+        let slots: Vec<SessionSlot> = (0..3)
+            .map(|index| {
+                let slot = registry.reserve().unwrap();
+                slot.activate(
+                    SessionId::generate(),
+                    DeviceId::generate(),
+                    rc_security::Fingerprint::from_bytes([9u8; 32]),
+                    "Test Device".to_owned(),
+                    PermissionSet::ALL,
+                    "10.0.0.2:5000".parse().unwrap(),
+                    i64::from(index) + 1,
+                );
+                slot
+            })
+            .collect();
+
+        assert_eq!(registry.end_all(), 3);
+        assert!(registry.list().is_empty());
+        drop(slots);
+    }
+
+    #[test]
+    fn a_live_session_names_the_identity_the_device_proved() {
+        // The operator's view has to name the same thing the trust list does, or
+        // "disconnect this device" and "revoke this device" would be about different
+        // devices.
+        let registry = Arc::new(SessionRegistry::new(4));
+        let slot = registry.reserve().unwrap();
+        let identity = rc_security::Fingerprint::from_bytes([9u8; 32]);
+        slot.activate(
+            SessionId::generate(),
+            DeviceId::generate(),
+            identity,
+            "Gaming PC".to_owned(),
+            PermissionSet::ALL,
+            "10.0.0.2:5000".parse().unwrap(),
+            1,
+        );
+
+        let live = registry.list();
+        assert_eq!(live[0].identity_fingerprint, identity);
+        assert_eq!(live[0].display_name, "Gaming PC");
     }
 }

@@ -93,8 +93,6 @@ pub struct NetworkConfig {
     pub listen_address: IpAddr,
     /// UDP port for QUIC.
     pub listen_port: u16,
-    /// Whether to advertise the agent over mDNS on the local network.
-    pub discovery_enabled: bool,
     /// Whether to register with a coordination server for connections from outside
     /// the LAN. Off by default: remote reachability must be a deliberate choice.
     pub remote_access_enabled: bool,
@@ -107,12 +105,6 @@ pub struct NetworkConfig {
     /// Always bound to `127.0.0.1`; the address is deliberately not configurable, so no
     /// configuration mistake can expose it to the network.
     pub health_port: u16,
-    /// TCP port the privileged helper listens on, or `0` when no helper is installed.
-    ///
-    /// Always loopback; the address is not configurable. With no helper, operations
-    /// needing Administrator or root are refused with a message saying so rather than
-    /// failing with an obscure operating-system error.
-    pub privileged_port: u16,
     /// Maximum concurrent authenticated sessions.
     pub max_sessions: u16,
     /// Failed authentication attempts permitted per source address per minute.
@@ -125,8 +117,6 @@ impl Default for NetworkConfig {
             listen_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             listen_port: rc_protocol::DEFAULT_AGENT_PORT,
             health_port: rc_protocol::DEFAULT_AGENT_HEALTH_PORT,
-            privileged_port: rc_protocol::DEFAULT_PRIVILEGED_PORT,
-            discovery_enabled: true,
             remote_access_enabled: false,
             coordination_url: None,
             relay_url: None,
@@ -169,16 +159,10 @@ impl Default for SessionConfig {
 pub struct FeatureConfig {
     /// Allow screen capture and input injection.
     pub remote_desktop: bool,
-    /// Allow PTY sessions.
-    pub terminal: bool,
     /// Allow file browsing and transfer.
     pub file_transfer: bool,
     /// Allow process termination.
     pub process_management: bool,
-    /// Allow service control.
-    pub service_management: bool,
-    /// Allow power actions.
-    pub power_control: bool,
     /// Allow clipboard synchronisation.
     pub clipboard_sync: bool,
     /// Roots the file manager is confined to. Empty means the whole filesystem, which
@@ -192,11 +176,8 @@ impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
             remote_desktop: true,
-            terminal: true,
             file_transfer: true,
             process_management: true,
-            service_management: true,
-            power_control: true,
             clipboard_sync: true,
             file_transfer_roots: Vec::new(),
             max_transfer_bytes: 64 * 1024 * 1024 * 1024,
@@ -351,23 +332,6 @@ impl AgentConfig {
             return invalid(
                 "network.health_port",
                 "must differ from the QUIC listener port",
-            );
-        }
-        // `0` disables the helper; any other value must be bindable without root and
-        // must not collide with a port the agent already uses.
-        if self.network.privileged_port != 0 && self.network.privileged_port < 1024 {
-            return invalid(
-                "network.privileged_port",
-                "must be 0 when no helper is installed, or above 1023",
-            );
-        }
-        if self.network.privileged_port != 0
-            && (self.network.privileged_port == self.network.listen_port
-                || self.network.privileged_port == self.network.health_port)
-        {
-            return invalid(
-                "network.privileged_port",
-                "must differ from the agent's own ports",
             );
         }
         if self.network.max_sessions == 0 {
@@ -690,7 +654,7 @@ mod tests {
         let config = AgentConfig {
             device_name: "home-server".into(),
             features: FeatureConfig {
-                terminal: false,
+                remote_desktop: false,
                 ..FeatureConfig::default()
             },
             ..AgentConfig::default()

@@ -6,28 +6,36 @@
 //!   client                                            agent
 //!     │                                                 │
 //!     │──── QUIC + mTLS 1.3, ALPN "rc/1" ──────────────►│
-//!     │     both certificates pinned by fingerprint     │
 //!     │                                                 │
 //!     │──── Hello (device id, version, capabilities) ──►│
-//!     │                                                 │  trust lookup
-//!     │                                                 │  revocation re-check
-//!     │◄─── HelloAck (session, granted capabilities) ───│
+//!     │                                                 │  version and role checks
+//!     │◄─── HelloAck (negotiated version, only) ────────│
+//!     │──── Authenticate (dialled address, password) ──►│
+//!     │                                                 │  admission decision
+//!     │◄─── SessionAuthorization ───────────────────────│
+//!     │       Granted (permissions, who this is)        │
+//!     │       or Refused (one coarse reason)            │
 //!     │                                                 │
-//!     │◄════ six independent channel streams ══════════►│
+//!     │◄════ independent channel streams ══════════════►│
 //! ```
 //!
 //! # Why the layers are separate
 //!
-//! TLS proves *which key* is on the other end. It does not know whether that key is
-//! still trusted — revocation happens in the database, minutes or months after a
-//! certificate was pinned. So authentication is two steps:
+//! TLS proves *which key* is on the other end. It cannot answer whether that key may
+//! have a session, because in this design that is a decision the machine being
+//! controlled makes — usually by asking its user. So admission is two steps:
 //!
-//! 1. [`tls`] pins the certificate fingerprint and records what was actually observed.
-//! 2. [`handshake`] looks the device up, **re-checks revocation**, and only then admits
-//!    it.
+//! 1. [`tls`] records the certificate fingerprint that was actually observed.
+//! 2. [`handshake`] carries that fingerprint to a decision the *caller* makes, and
+//!    carries the answer back.
 //!
-//! Collapsing these — trusting the TLS result alone — would make revocation take effect
-//! only when a certificate happened to change, which is to say never.
+//! Collapsing these — admitting whoever completes TLS — would leave a remote-control
+//! agent with no authorisation step at all.
+//!
+//! Note where the split falls. `HelloAck` is sent before anything has been decided, so
+//! it says only that the versions are compatible; everything identifying the machine
+//! waits for `SessionAuthorization::Granted`. A peer that is refused learns that it was
+//! refused, and nothing about what it reached.
 //!
 //! # Channels
 //!
@@ -38,18 +46,19 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod address;
 pub mod channel;
-pub mod discovery;
 pub mod endpoint;
 pub mod error;
 pub mod handshake;
-pub mod pairing;
 pub mod tls;
 
+pub use address::PeerAddress;
 pub use channel::{ChannelReader, ChannelWriter, accept_channel, open_channel};
-pub use discovery::{Advertiser, DiscoveredAgent};
 pub use endpoint::{AgentListener, ClientConnector};
-pub use error::{RejectionCause, Result, TransportError};
-pub use handshake::{AuthenticatedPeer, TrustDirectory, TrustRecord};
-pub use pairing::{PairingRecorder, PairingService, pair_as_client};
-pub use tls::{ALPN, ObservedCertificate, ObservedPeer, PinPolicy, peer_certificate_fingerprint};
+pub use error::{Result, TransportError};
+pub use handshake::{AuthenticatedPeer, PeerIdentity};
+pub use tls::{
+    ALPN, ObservedCertificate, ObservedPeer, PinPolicy, peer_certificate_der,
+    peer_certificate_fingerprint,
+};

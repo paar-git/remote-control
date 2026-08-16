@@ -7,9 +7,6 @@
 /// Largest control-channel message body, in bytes.
 pub const MAX_CONTROL_FRAME: usize = 256 * 1024;
 
-/// Largest terminal-channel message body, in bytes.
-pub const MAX_TERMINAL_FRAME: usize = 512 * 1024;
-
 /// Largest file-transfer message body, in bytes. Chunks are sized well under this.
 pub const MAX_FILE_FRAME: usize = 8 * 1024 * 1024;
 
@@ -31,9 +28,6 @@ pub const MAX_DIR_ENTRIES: usize = 10_000;
 /// Maximum length of a device's user-visible name, in bytes.
 pub const MAX_DEVICE_NAME_BYTES: usize = 128;
 
-/// Maximum number of concurrent terminal sessions per connection.
-pub const MAX_TERMINAL_SESSIONS: usize = 8;
-
 /// Maximum number of concurrently queued file transfers per connection.
 pub const MAX_QUEUED_TRANSFERS: usize = 256;
 
@@ -49,12 +43,7 @@ mod tests {
 
     #[test]
     fn channel_limits_are_within_absolute_ceiling() {
-        for limit in [
-            MAX_CONTROL_FRAME,
-            MAX_TERMINAL_FRAME,
-            MAX_FILE_FRAME,
-            MAX_VIDEO_FRAME,
-        ] {
+        for limit in [MAX_CONTROL_FRAME, MAX_FILE_FRAME, MAX_VIDEO_FRAME] {
             assert!(limit <= MAX_ANY_FRAME, "{limit} exceeds MAX_ANY_FRAME");
             assert!(limit > 0);
         }

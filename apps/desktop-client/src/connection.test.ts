@@ -20,10 +20,9 @@ import {
 /** One example of every state the backend can send. */
 const everyState: ConnectionState[] = [
   { state: 'offline' },
-  { state: 'discovering' },
   { state: 'connecting', address: '192.168.1.20:47811' },
   { state: 'authenticating' },
-  { state: 'connected', sessionId: 'ses_abc', address: '192.168.1.20:47811' },
+  { state: 'connected', sessionId: 'ses_abc', address: '192.168.1.20:47811', permissions: [] },
   { state: 'disconnecting' },
   { state: 'reconnecting', attempt: 3 },
   { state: 'waiting_to_retry', attempt: 4, retryInMs: 2500 },
@@ -43,6 +42,22 @@ describe('connection state', () => {
     // error at the boundary and not a blank panel three components later.
     expect(() => connectionStateSchema.parse({ state: 'probably_fine' })).toThrow();
     expect(() => connectionStateSchema.parse({ state: 'connected' })).toThrow();
+  });
+
+  it('has no discovering state', () => {
+    // `discovering` existed only for mDNS. Typing an address cannot discover, so the
+    // schema at the IPC boundary must reject it rather than parse it through.
+    expect(() => connectionStateSchema.parse({ state: 'discovering' })).toThrow();
+  });
+
+  it('describes every state a typed address can reach', () => {
+    // One example of each of the nine states left once `discovering` is gone. Real
+    // field values throughout, because this schema (unlike the brief's hypothetical
+    // tag-only union) requires them: `refused` and `failed` render `state.message`
+    // directly, so a placeholder object would make this pass for the wrong reason.
+    for (const state of everyState) {
+      expect(describeConnectionState(state)).toBeTruthy();
+    }
   });
 
   it('describes every state without falling through to an empty string', () => {
@@ -67,7 +82,9 @@ describe('connection state', () => {
     expect(isBusy({ state: 'waiting_to_retry', attempt: 1, retryInMs: 10 })).toBe(true);
 
     expect(isBusy({ state: 'offline' })).toBe(false);
-    expect(isBusy({ state: 'connected', sessionId: 's', address: 'x' })).toBe(false);
+    expect(isBusy({ state: 'connected', sessionId: 's', address: 'x', permissions: [] })).toBe(
+      false,
+    );
     expect(isBusy({ state: 'failed', message: 'no' })).toBe(false);
     expect(isBusy({ state: 'refused', reason: 'not_authorized', message: 'no' })).toBe(false);
   });
@@ -91,6 +108,7 @@ describe('connection state', () => {
         state: 'connected',
         sessionId: 'ses_x',
         address: '10.0.0.4:47811',
+        permissions: [],
       }),
     ).toContain('10.0.0.4:47811');
   });
@@ -112,6 +130,7 @@ describe('connection state', () => {
       state: 'connected',
       sessionId: 'ses_secret-looking-value',
       address: '10.0.0.4:47811',
+      permissions: [],
     });
     expect(described).not.toContain('ses_secret-looking-value');
   });

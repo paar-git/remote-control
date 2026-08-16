@@ -3,92 +3,95 @@
 /*
  * Design tokens.
  *
- * The interface is a dense administration tool, not a marketing page: a neutral
- * surface hierarchy, one accent colour reserved for primary actions, and a separate
- * danger colour that appears only on destructive confirmations. Both themes are
- * defined here so the whole app inherits them rather than each view improvising.
+ * Two themes, one accent. The accent is a primary blue used for Connect and selected
+ * chrome. Red is reserved for Disconnect, refusals and errors — using it on the main
+ * action made every connect look like a warning.
+ *
+ * * **Two surfaces.** A page colour, cards sitting on top of it. Depth comes from a
+ *   hairline border and one soft shadow.
+ * * **One accent.** Reserved for the primary action and the current state of a control.
+ * * **Soft variants.** Each status colour has a low-alpha companion used as a fill
+ *   behind the solid colour, so a badge reads as a state rather than as a button.
  */
 @theme {
-  --color-surface: oklch(99% 0 0);
-  --color-surface-raised: oklch(100% 0 0);
-  --color-surface-sunken: oklch(96.5% 0.002 250);
-  --color-border-subtle: oklch(91% 0.004 250);
-  --color-text-primary: oklch(22% 0.01 250);
-  --color-text-secondary: oklch(48% 0.012 250);
-  --color-accent: oklch(55% 0.16 250);
-  --color-accent-text: oklch(99% 0 0);
-  --color-danger: oklch(53% 0.2 25);
-  --color-success: oklch(58% 0.14 150);
-  --color-warning: oklch(70% 0.15 75);
+  --color-page: #f4f6fa;
+  --color-card: #ffffff;
+  --color-sidebar: #eef1f6;
+  --color-hover: #e8ecf2;
+  --color-border: #dfe3ea;
+  --color-border-hover: #c5cbd6;
+  --color-text: #141820;
+  --color-text-secondary: #5b6472;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-soft: rgb(37 99 235 / 12%);
+  --color-accent-text: #ffffff;
+  --color-success: #1a7333;
+  --color-success-soft: rgb(26 115 51 / 12%);
+  --color-warning: #8f5706;
+  --color-warning-soft: rgb(143 87 6 / 12%);
+  --color-danger: #c62828;
+  --color-danger-soft: rgb(198 40 40 / 10%);
+  --radius-card: 16px;
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 5%), 0 8px 24px rgb(16 24 40 / 6%);
+  --ease-ui: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+[data-theme='dark'] {
+  --color-page: #101218;
+  --color-card: #181b22;
+  --color-sidebar: #14171e;
+  --color-hover: #22262f;
+  --color-border: #2a303b;
+  --color-border-hover: #3b4250;
+  --color-text: #f2f4f8;
+  --color-text-secondary: #9aa3b2;
+  --color-accent: #3b82f6;
+  --color-accent-hover: #60a5fa;
+  --color-accent-soft: rgb(59 130 246 / 16%);
+  --color-accent-text: #ffffff;
+  --color-success: #3dba63;
+  --color-success-soft: rgb(61 186 99 / 16%);
+  --color-warning: #e0a23a;
+  --color-warning-soft: rgb(224 162 58 / 16%);
+  --color-danger: #f07171;
+  --color-danger-soft: rgb(240 113 113 / 16%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 35%), 0 10px 28px rgb(0 0 0 / 28%);
 }
 
 @layer base {
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
   }
 
-  /* The viewer's OS preference is the default signal. */
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --color-surface: oklch(20% 0.008 250);
-      --color-surface-raised: oklch(24% 0.009 250);
-      --color-surface-sunken: oklch(16% 0.007 250);
-      --color-border-subtle: oklch(32% 0.01 250);
-      --color-text-primary: oklch(95% 0.004 250);
-      --color-text-secondary: oklch(70% 0.012 250);
-      --color-accent: oklch(68% 0.15 250);
-      --color-accent-text: oklch(18% 0.01 250);
-      --color-danger: oklch(66% 0.19 25);
-      --color-success: oklch(72% 0.15 150);
-      --color-warning: oklch(78% 0.15 75);
-    }
-  }
-
-  /* An explicit in-app choice must win over the OS preference in both directions. */
-  :root[data-theme='light'] {
-    --color-surface: oklch(99% 0 0);
-    --color-surface-raised: oklch(100% 0 0);
-    --color-surface-sunken: oklch(96.5% 0.002 250);
-    --color-border-subtle: oklch(91% 0.004 250);
-    --color-text-primary: oklch(22% 0.01 250);
-    --color-text-secondary: oklch(48% 0.012 250);
-    --color-accent: oklch(55% 0.16 250);
-    --color-accent-text: oklch(99% 0 0);
-    --color-danger: oklch(53% 0.2 25);
-    --color-success: oklch(58% 0.14 150);
-    --color-warning: oklch(70% 0.15 75);
-  }
-
-  :root[data-theme='dark'] {
-    --color-surface: oklch(20% 0.008 250);
-    --color-surface-raised: oklch(24% 0.009 250);
-    --color-surface-sunken: oklch(16% 0.007 250);
-    --color-border-subtle: oklch(32% 0.01 250);
-    --color-text-primary: oklch(95% 0.004 250);
-    --color-text-secondary: oklch(70% 0.012 250);
-    --color-accent: oklch(68% 0.15 250);
-    --color-accent-text: oklch(18% 0.01 250);
-    --color-danger: oklch(66% 0.19 25);
-    --color-success: oklch(72% 0.15 150);
-    --color-warning: oklch(78% 0.15 75);
+  [data-theme='dark'] {
+    color-scheme: dark;
   }
 
   html,
-  body {
+  body,
+  #root {
     height: 100%;
   }
 
   body {
-    background-color: var(--color-surface);
-    color: var(--color-text-primary);
+    background-color: var(--color-page);
+    color: var(--color-text);
     font-family:
       'Segoe UI Variable Text',
       'Segoe UI',
+      'Inter var',
+      'Inter',
       system-ui,
       -apple-system,
       sans-serif;
     font-size: 14px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    /* Tabular figures keep live metrics from shifting sideways as digits change. */
+    font-variant-numeric: tabular-nums;
+    /* A desktop chrome, not a document: the app owns its own scroll regions. */
+    overflow: hidden;
   }
 
   /* Remote host names and file paths must never be reflowed or mis-read. */
@@ -102,6 +105,36 @@
   :focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* The chrome is not a document; only deliberate scroll regions select. */
+  button,
+  [role='tab'],
+  [role='button'] {
+    user-select: none;
+  }
+
+  /* Scrollbars styled to belong to the app rather than to the platform. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-border);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-text-secondary);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -111,5 +144,97 @@
       animation-duration: 0.01ms !important;
       transition-duration: 0.01ms !important;
     }
+  }
+}
+
+@layer utilities {
+  /* A dot that pulses while something is genuinely in progress. */
+  @keyframes rc-pulse {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.82);
+    }
+  }
+
+  .animate-status-pulse {
+    animation: rc-pulse 1.4s var(--ease-ui) infinite;
+  }
+
+  /* A state change should settle rather than jump. */
+  @keyframes rc-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-fade-in {
+    animation: rc-fade-in 160ms var(--ease-ui) both;
+  }
+
+  /* A page change should settle rather than swap. Reduced motion is honoured by
+     the global rule above, which clamps every animation duration. */
+  @keyframes rc-view-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-view-in {
+    animation: rc-view-in 180ms var(--ease-ui) both;
+  }
+
+  @keyframes rc-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-toast-in {
+    animation: rc-toast-in 180ms var(--ease-ui) both;
+  }
+
+  @keyframes rc-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .animate-spin-slow {
+    animation: rc-spin 700ms linear infinite;
+  }
+
+  @keyframes rc-dot {
+    from {
+      transform: scale(0.6);
+      opacity: 0.4;
+    }
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+
+  .animate-status-dot {
+    animation: rc-dot 180ms var(--ease-ui) both;
   }
 }

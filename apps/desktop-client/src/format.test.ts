@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   abbreviateFingerprint,
+  compactDeviceId,
+  formatDeviceId,
   formatFingerprintGroups,
   formatRelative,
   formatTimestamp,
@@ -9,6 +11,26 @@ import {
 } from './format.js';
 
 const FINGERPRINT = 'a'.repeat(64);
+
+describe('device id', () => {
+  it('groups nine stable digits from a fingerprint', () => {
+    const id = formatDeviceId('a'.repeat(64));
+    expect(id).toMatch(/^\d{3} \d{3} \d{3}$/);
+    expect(formatDeviceId('a'.repeat(64))).toBe(id);
+  });
+
+  it('changes when the identity changes', () => {
+    expect(formatDeviceId('a'.repeat(64))).not.toBe(formatDeviceId('b'.repeat(64)));
+  });
+
+  it('strips grouping spaces', () => {
+    expect(compactDeviceId('842 391 552')).toBe('842391552');
+  });
+
+  it('does not invent an id from an empty value', () => {
+    expect(formatDeviceId('')).toBe('—');
+  });
+});
 
 describe('fingerprint formatting', () => {
   it('groups into sixteen blocks of four', () => {

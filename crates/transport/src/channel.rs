@@ -286,7 +286,6 @@ pub async fn accept_channel(
 const fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Control => "control",
-        Channel::Terminal => "terminal",
         Channel::FileTransfer => "file-transfer",
         Channel::Video => "video",
         Channel::Input => "input",

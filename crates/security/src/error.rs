@@ -1,10 +1,10 @@
 //! Typed security errors.
 //!
 //! Error text is written on the assumption that it may be shown to the operator and
-//! written to logs. No variant carries a password, pairing code, private key, proof
+//! written to logs. No variant carries a password, private key, proof
 //! or any other secret, and none of them echo attacker-supplied input.
 
-/// Errors raised by identity, keystore, pairing and authentication operations.
+/// Errors raised by identity, keystore and authentication operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SecurityError {
@@ -72,42 +72,6 @@ pub enum SecurityError {
     /// A signature did not verify.
     #[error("signature verification failed")]
     BadSignature,
-
-    /// A pairing proof did not verify.
-    ///
-    /// Deliberately indistinguishable from a wrong pairing code, so failures cannot be
-    /// used as an oracle to learn whether a guessed code was close.
-    #[error("pairing proof rejected")]
-    ProofRejected,
-
-    /// The pairing transcript did not match the one the peer signed, meaning some
-    /// bound value (identity, permission, expiry, version) differs between the peers.
-    #[error("pairing transcript mismatch")]
-    TranscriptMismatch,
-
-    /// No pairing session with that identifier is open.
-    #[error("no such pairing session")]
-    PairingSessionUnknown,
-
-    /// The pairing window has closed.
-    #[error("the pairing code has expired")]
-    PairingExpired,
-
-    /// The pairing code has already been used successfully.
-    #[error("the pairing code has already been used")]
-    PairingAlreadyConsumed,
-
-    /// Too many failed attempts; the code has been destroyed.
-    #[error("too many failed pairing attempts; the code has been cancelled")]
-    PairingAttemptsExhausted,
-
-    /// The pairing session is not in a state where this step is valid.
-    #[error("pairing step is not valid in the current state")]
-    PairingWrongState,
-
-    /// The peer speaks a protocol version we will not pair with.
-    #[error("the peer's protocol version is not supported for pairing")]
-    UnsupportedProtocolVersion,
 
     /// A value that must be fresh was seen before.
     #[error("replayed value rejected")]
@@ -183,21 +147,9 @@ mod tests {
     }
 
     #[test]
-    fn proof_rejection_does_not_reveal_why() {
-        let message = SecurityError::ProofRejected.to_string();
-        for leak in ["code", "digit", "expected", "guess"] {
-            assert!(
-                !message.to_lowercase().contains(leak),
-                "leaks `{leak}`: {message}"
-            );
-        }
-    }
-
-    #[test]
     fn errors_never_render_secret_values() {
         let errors = [
             SecurityError::BadSignature,
-            SecurityError::ProofRejected,
             SecurityError::KeystoreCorrupt,
             SecurityError::KeystoreWrongIdentity,
             SecurityError::InvalidCredentials,

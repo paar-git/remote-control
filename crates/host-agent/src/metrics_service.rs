@@ -27,13 +27,15 @@
 use std::sync::Arc;
 
 use rc_protocol::system::{MetricsAgentMessage, MetricsStopReason};
-use rc_security::permissions::{AuthorizationContext, Capability};
+use rc_security::Permission;
 use rc_transport::ChannelWriter;
+
+use crate::sessions::Session;
 
 /// Serves the metrics channel for one connection.
 pub struct MetricsService {
     writer: ChannelWriter,
-    authorization: AuthorizationContext,
+    session: Session,
     /// The agent-wide collector.
     ///
     /// Shared rather than owned: CPU utilisation is measured *across an interval*, so a
@@ -52,14 +54,14 @@ impl MetricsService {
     #[must_use]
     pub const fn new(
         writer: ChannelWriter,
-        authorization: AuthorizationContext,
+        session: Session,
         collector: Arc<tokio::sync::Mutex<rc_monitoring::MetricsCollector>>,
         clock: Arc<dyn rc_security::Clock>,
         interval: tokio::sync::watch::Receiver<Option<u32>>,
     ) -> Self {
         Self {
             writer,
-            authorization,
+            session,
             collector,
             clock,
             interval,
@@ -125,7 +127,7 @@ impl MetricsService {
                 _ = ticker.tick() => {
                     // Re-checked here, every tick, against the live session rather than
                     // captured when the subscription was created.
-                    if self.authorization.require(Capability::RemoteDesktopView).is_err() {
+                    if self.session.require(Permission::ViewMetrics).is_err() {
                         return self.stop(MetricsStopReason::NotAuthorized).await;
                     }
 
@@ -183,7 +185,7 @@ async fn await_subscription(
 
 #[cfg(test)]
 mod tests {
-    use rc_security::Role;
+    use rc_security::PermissionSet;
 
     use super::*;
 
@@ -224,20 +226,26 @@ mod tests {
     }
 
     #[test]
-    fn a_view_only_device_may_watch_but_a_revoked_one_may_not() {
-        // The capability the service re-checks on every tick, decided by the permission
-        // table rather than by a role check written here.
-        assert!(
-            AuthorizationContext::new(Role::ViewOnly)
-                .require(Capability::RemoteDesktopView)
-                .is_ok(),
-            "watching a server is what View Only is for"
+    fn the_gate_this_service_applies_is_the_session_s_own() {
+        // What the per-tick check calls, asserted through the same door the service
+        // uses rather than by restating `PermissionSet`'s semantics. The tick loop
+        // itself needs a live `ChannelWriter`, which needs a real QUIC connection, so
+        // the loop is covered end-to-end and not here; `sessions::Session::require`
+        // carries the refusal semantics under its own tests.
+        let watcher = Session::new(
+            PermissionSet::NONE.with(Permission::ViewMetrics),
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
+        );
+        assert!(watcher.require(Permission::ViewMetrics).is_ok());
+
+        let revoked = Session::new(
+            PermissionSet::NONE,
+            rc_security::Fingerprint::from_bytes([1u8; 32]),
         );
         assert!(
-            AuthorizationContext::revoked(Role::Owner)
-                .require(Capability::RemoteDesktopView)
-                .is_err(),
-            "revocation must stop a stream mid-flight, not at the next connection"
+            revoked.require(Permission::ViewMetrics).is_err(),
+            "a session stripped of the permission must stop a stream mid-flight, not at \
+             the next connection"
         );
     }
 }

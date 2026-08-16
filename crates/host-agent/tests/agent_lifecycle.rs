@@ -3,16 +3,20 @@
 //! These spawn the actual agent binary — its own process, its own database, its own
 //! keystore — and drive a real client against it over QUIC. Nothing is stubbed.
 //!
-//! What they are here to prove is the sequence the product specification calls the
-//! definition of done for this phase: the agent starts, a client pairs with it, the
-//! server stays saved, the client connects, disconnects, and reconnects, and a client
-//! that was never paired is refused.
+//! # What is provable in this build
+//!
+//! The pairing protocol has been deleted and the accept path that replaces it is not
+//! here yet, so no client can obtain a session. What these tests hold onto is what
+//! remains true regardless: the agent starts and reports itself healthy, it keeps its
+//! device identity across a restart, and a client that completes TLS is refused rather
+//! than admitted. The session-level tests — ping, metrics, file transfer — return with
+//! the accept path that makes a session possible again.
 //!
 //! # Why the agent is spawned rather than called
 //!
-//! Pairing windows live in the agent process's memory. A test that called the pairing
-//! code in-process would prove that the functions compose, not that two processes can
-//! actually reach each other — which is the only question worth asking here.
+//! A test that called the agent's own functions in-process would prove that they
+//! compose, not that two processes can actually reach each other — which is the only
+//! question worth asking here.
 
 // Integration tests assert against known-good values, so `unwrap` and `panic` are the
 // clearest way to fail. The workspace denies them in library code, where a panic would
@@ -24,11 +28,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use rc_protocol::control::{ControlRequestPayload, ControlResult, DeviceDescriptor, OsFamily};
-use rc_security::pairing::RequestedPermissions;
-use rc_security::permissions::Role;
-use rc_security::{DeviceIdentity, PairingCode, SystemClock};
-use rc_transport::{ClientConnector, PinPolicy};
+use rc_protocol::control::{DeviceDescriptor, OsFamily};
+use rc_security::{DeviceIdentity, SystemClock};
+use rc_transport::{ClientConnector, PeerAddress, PinPolicy};
 
 /// A running agent, torn down when the handle is dropped.
 struct RunningAgent {
@@ -40,7 +42,6 @@ struct RunningAgent {
     /// test that deleted it.
     root: Option<tempfile::TempDir>,
     root_path: PathBuf,
-    data_dir: PathBuf,
     quic_port: u16,
     local_port: u16,
 }
@@ -52,8 +53,6 @@ impl RunningAgent {
         let quic_port = free_udp_port();
         let local_port = free_tcp_port();
 
-        // Discovery is off: the tests dial a known address, and a responder joining a
-        // multicast group is exactly the kind of thing a build agent forbids.
         let config = format!(
             "device_name = \"integration-agent\"\n\
              \n\
@@ -61,7 +60,6 @@ impl RunningAgent {
              listen_address = \"127.0.0.1\"\n\
              listen_port = {quic_port}\n\
              health_port = {local_port}\n\
-             discovery_enabled = false\n\
              remote_access_enabled = false\n"
         );
 
@@ -83,7 +81,6 @@ impl RunningAgent {
 
         let agent = Self {
             child,
-            data_dir: root.path().join("data"),
             root_path: root.path().to_path_buf(),
             root: Some(root),
             quic_port,
@@ -122,39 +119,6 @@ impl RunningAgent {
     /// The address a client dials.
     fn address(&self) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, self.quic_port))
-    }
-
-    /// Ask the running agent to open a pairing window, and return the code.
-    async fn open_pairing_window(&self) -> PairingCode {
-        let token = std::fs::read_to_string(self.data_dir.join("local-control.token"))
-            .expect("the agent must publish a local control token");
-
-        let body = "{\"ttl_secs\":300}";
-        let request = format!(
-            "POST /pairing HTTP/1.1\r\n\
-             Host: 127.0.0.1\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             x-rc-local-token: {}\r\n\
-             Connection: close\r\n\r\n{body}",
-            body.len(),
-            token.trim(),
-        );
-
-        let response = self
-            .send(&request)
-            .await
-            .expect("the local endpoint must answer");
-        assert!(
-            response.starts_with("HTTP/1.1 200"),
-            "opening a window must succeed, got: {response}"
-        );
-
-        let payload = response.split_once("\r\n\r\n").unwrap().1;
-        let parsed: serde_json::Value = serde_json::from_str(payload.trim()).unwrap();
-        let code = parsed["code"].as_str().unwrap();
-
-        PairingCode::parse(code).expect("the agent must issue a well-formed code")
     }
 
     /// A `GET` against the local endpoint.
@@ -232,66 +196,22 @@ fn descriptor(identity: &DeviceIdentity) -> DeviceDescriptor {
     }
 }
 
-/// Pair a client with the running agent, returning what the client should pin.
-async fn pair(
-    agent: &RunningAgent,
-    identity: &DeviceIdentity,
-) -> rc_security::pairing::PairedAgent {
-    let code = agent.open_pairing_window().await;
+/// What `rc-agent identity` prints for the installation under `root`.
+fn reported_device_id(root: &Path, config_path: &Path) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_rc-agent"))
+        .arg("--root")
+        .arg(root)
+        .arg("--config")
+        .arg(config_path)
+        .arg("identity")
+        .output()
+        .expect("the agent binary must report its identity");
 
-    let (connector, _) = ClientConnector::new(identity, PinPolicy::TrustOnFirstUse).unwrap();
-    let connection = connector.connect(agent.address()).await.unwrap();
-
-    let paired = rc_transport::pair_as_client(
-        &connection,
-        identity,
-        descriptor(identity),
-        &code,
-        RequestedPermissions::full(Role::Owner),
-        None,
-    )
-    .await
-    .expect("pairing with a live agent must succeed");
-
-    connection.close(0u32.into(), b"paired");
-    paired
-}
-
-/// Open an authenticated session against the agent.
-/// The control streams are returned alongside the connection because dropping them
-/// ends the session: the agent treats the control channel closing as the session
-/// ending, which is correct — it is the channel the session is defined by — and a test
-/// that let them fall out of scope would tear down the very connection it was about to
-/// use.
-async fn connect(
-    agent: &RunningAgent,
-    identity: &DeviceIdentity,
-    paired: &rc_security::pairing::PairedAgent,
-) -> rc_transport::Result<(
-    quinn::Connection,
-    rc_protocol::control::HelloAck,
-    rc_transport::ChannelWriter,
-    rc_transport::ChannelReader,
-)> {
-    let (connector, _) =
-        ClientConnector::new(identity, PinPolicy::Pinned(paired.certificate_fingerprint))?;
-    let connection = connector.connect(agent.address()).await?;
-
-    let (mut writer, mut reader) =
-        rc_transport::open_channel(&connection, rc_protocol::Channel::Control).await?;
-
-    let ack = rc_transport::handshake::begin_handshake(
-        &mut reader,
-        &mut writer,
-        descriptor(identity),
-        rc_protocol::control::Capabilities::default(),
-        rc_protocol::now_ms(),
-    )
-    .await?;
-
-    // The connector owns the socket the connection runs on.
-    std::mem::forget(connector);
-    Ok((connection, ack, writer, reader))
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .find_map(|line| line.strip_prefix("Device ID:"))
+        .map(|value| value.trim().to_owned())
+        .expect("the identity output must name a device id")
 }
 
 #[tokio::test]
@@ -305,160 +225,14 @@ async fn an_agent_starts_and_reports_itself_healthy() {
 }
 
 #[tokio::test]
-async fn a_client_pairs_connects_disconnects_and_reconnects() {
-    // The whole Phase 3 sequence, across two processes.
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-
-    let paired = pair(&agent, &identity).await;
-
-    // Connect.
-    let (first, ack, first_writer, first_reader) = connect(&agent, &identity, &paired)
-        .await
-        .expect("a paired client must be admitted");
-    assert!(ack.already_paired);
-    assert_eq!(ack.descriptor.device_id, paired.device_id);
-
-    // The agent counts it as a live session.
-    let health = agent.get("/health").await.unwrap();
-    assert!(
-        health.contains("\"active_sessions\":1"),
-        "the agent must see one session, got: {health}"
-    );
-
-    // Disconnect.
-    drop(first_writer);
-    drop(first_reader);
-    first.close(0u32.into(), b"done");
-    drop(first);
-
-    // Reconnect, with no code and no further operator action. This is the property the
-    // saved server exists for.
-    let (second, second_ack, _second_writer, _second_reader) = connect(&agent, &identity, &paired)
-        .await
-        .expect("reconnecting must not need the code again");
-    assert!(second_ack.already_paired);
-    assert_ne!(
-        second_ack.session_id, ack.session_id,
-        "each connection is its own session"
-    );
-
-    second.close(0u32.into(), b"done");
-}
-
-#[tokio::test]
-async fn an_unpaired_client_is_refused() {
-    let agent = RunningAgent::start().await;
-
-    // Pair one client so the agent has a trusted device that is *not* this one.
-    let paired_identity = client_identity("paired-client");
-    let paired = pair(&agent, &paired_identity).await;
-
-    // A different client, pinning the agent correctly but never having paired.
-    let stranger = client_identity("stranger");
-    let result = connect(&agent, &stranger, &paired).await;
-
-    assert!(
-        result.is_err(),
-        "a client the agent has never trusted must be refused, got a session"
-    );
-}
-
-#[tokio::test]
-async fn a_pairing_window_is_used_once() {
-    let agent = RunningAgent::start().await;
-
-    let code = agent.open_pairing_window().await;
-    let first = client_identity("first");
-    let second = client_identity("second");
-
-    // The first client consumes the window.
-    let (connector, _) = ClientConnector::new(&first, PinPolicy::TrustOnFirstUse).unwrap();
-    let connection = connector.connect(agent.address()).await.unwrap();
-    rc_transport::pair_as_client(
-        &connection,
-        &first,
-        descriptor(&first),
-        &code,
-        RequestedPermissions::full(Role::Owner),
-        None,
-    )
-    .await
-    .expect("the first pairing succeeds");
-    connection.close(0u32.into(), b"paired");
-
-    // The same code cannot pair a second device.
-    let (connector, _) = ClientConnector::new(&second, PinPolicy::TrustOnFirstUse).unwrap();
-    let connection = connector.connect(agent.address()).await.unwrap();
-    let replay = rc_transport::pair_as_client(
-        &connection,
-        &second,
-        descriptor(&second),
-        &code,
-        RequestedPermissions::full(Role::Owner),
-        None,
-    )
-    .await;
-
-    assert!(replay.is_err(), "a consumed code must not pair again");
-}
-
-#[tokio::test]
-async fn pairing_is_refused_when_no_window_is_open() {
-    // The agent is listening, but the operator has not started pairing.
+async fn a_client_that_completes_tls_is_not_given_a_session() {
+    // The agent listens, TLS admits the peer, and the handshake refuses it. This build
+    // has no authorisation step, so *every* client lands here. If this test ever sees a
+    // session, the agent is admitting peers it never authorised.
     let agent = RunningAgent::start().await;
     let identity = client_identity("hopeful");
 
     let (connector, _) = ClientConnector::new(&identity, PinPolicy::TrustOnFirstUse).unwrap();
-    let connection = connector.connect(agent.address()).await.unwrap();
-
-    let result = rc_transport::pair_as_client(
-        &connection,
-        &identity,
-        descriptor(&identity),
-        &PairingCode::generate(&rc_security::OsRandom),
-        RequestedPermissions::full(Role::Owner),
-        None,
-    )
-    .await;
-
-    let message = result.unwrap_err().to_string();
-    assert!(
-        message.contains("pairing mode"),
-        "the operator must be told what to do, got: {message}"
-    );
-}
-
-#[tokio::test]
-async fn a_local_pairing_request_without_the_token_is_refused() {
-    // The token is the whole access-control decision for creating trust.
-    let agent = RunningAgent::start().await;
-
-    let body = "{\"ttl_secs\":300}";
-    let request = format!(
-        "POST /pairing HTTP/1.1\r\n\
-         Host: 127.0.0.1\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
-        body.len()
-    );
-
-    let response = agent.send(&request).await.unwrap();
-    assert!(
-        response.starts_with("HTTP/1.1 401"),
-        "an untokened request must be refused, got: {response}"
-    );
-}
-
-#[tokio::test]
-async fn the_agent_answers_a_ping_on_the_session_stream() {
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let (connector, _) =
-        ClientConnector::new(&identity, PinPolicy::Pinned(paired.certificate_fingerprint)).unwrap();
     let connection = connector.connect(agent.address()).await.unwrap();
 
     let (mut writer, mut reader) =
@@ -466,50 +240,37 @@ async fn the_agent_answers_a_ping_on_the_session_stream() {
             .await
             .unwrap();
 
-    let ack = rc_transport::handshake::begin_handshake(
+    let result = rc_transport::handshake::begin_handshake(
         &mut reader,
         &mut writer,
         descriptor(&identity),
         rc_protocol::control::Capabilities::default(),
+        agent.address().to_string().parse::<PeerAddress>().unwrap(),
+        None,
         rc_protocol::now_ms(),
     )
-    .await
-    .unwrap();
+    .await;
 
-    let request_id = rc_protocol::RequestId::generate();
-    writer
-        .send(&rc_protocol::control::ControlRequest {
-            request_id,
-            session_id: ack.session_id,
-            sent_at_ms: rc_protocol::now_ms(),
-            nonce: [1u8; 16],
-            payload: ControlRequestPayload::Ping { token: 987 },
-        })
-        .await
-        .unwrap();
+    assert!(
+        result.is_err(),
+        "no client may be given a session in this build, got {result:?}"
+    );
 
-    let response: rc_protocol::control::ControlResponse =
-        reader.next_message().await.unwrap().unwrap();
+    // And the agent must not be holding a session open for it.
+    let health = agent.get("/health").await.unwrap();
+    assert!(
+        health.contains("\"active_sessions\":0"),
+        "a refused peer must not leave a live session, got: {health}"
+    );
 
-    assert_eq!(response.request_id, request_id);
-    match response.result {
-        ControlResult::Ok(rc_protocol::control::ControlResponsePayload::Pong { token, .. }) => {
-            assert_eq!(token, 987, "the pong must echo the token it was sent");
-        }
-        other => panic!("expected a pong, got {other:?}"),
-    }
-
-    std::mem::forget(connector);
-    connection.close(0u32.into(), b"done");
+    connection.close(0u32.into(), b"refused");
 }
 
 #[tokio::test]
 async fn an_agent_keeps_its_identity_across_a_restart() {
-    // A restart that changed the agent's identity would break every existing pairing.
-    // This is the property the keystore exists to hold.
+    // A restart that changed the agent's identity would make every client that pinned
+    // it refuse to connect. This is the property the keystore exists to hold.
     let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
 
     let quic_port = agent.quic_port;
     let local_port = agent.local_port;
@@ -519,15 +280,19 @@ async fn an_agent_keeps_its_identity_across_a_restart() {
     let config_path = root.join("config").join("agent.toml");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    let before = reported_device_id(&root, &config_path);
+
     let restarted = restart_at(&root, &config_path, quic_port, local_port).await;
+    let health = restarted.get("/health").await.expect("health must answer");
+    assert!(health.contains("\"status\":\"ok\""), "got: {health}");
+    drop(restarted);
 
-    // The same pin still works, with no re-pairing.
-    let (connection, ack, _writer, _reader) = connect(&restarted, &identity, &paired)
-        .await
-        .expect("trust must survive an agent restart");
-    assert_eq!(ack.descriptor.device_id, paired.device_id);
-
-    connection.close(0u32.into(), b"done");
+    let after = reported_device_id(&root, &config_path);
+    assert_eq!(
+        before, after,
+        "the device identity must survive a restart unchanged"
+    );
+    assert!(before.starts_with("dev_"), "got: {before}");
 }
 
 /// Start an agent again over an existing data directory.
@@ -552,682 +317,9 @@ async fn restart_at(
         child,
         root: None,
         root_path: root.to_path_buf(),
-        data_dir: root.join("data"),
         quic_port,
         local_port,
     };
     agent.wait_until_healthy().await;
     agent
-}
-
-#[tokio::test]
-async fn a_session_gets_real_measured_metrics() {
-    // The dashboard's figures come from the operating system, not from a placeholder.
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let (connector, _) =
-        ClientConnector::new(&identity, PinPolicy::Pinned(paired.certificate_fingerprint)).unwrap();
-    let connection = connector.connect(agent.address()).await.unwrap();
-
-    let (mut writer, mut reader) =
-        rc_transport::open_channel(&connection, rc_protocol::Channel::Control)
-            .await
-            .unwrap();
-
-    let ack = rc_transport::handshake::begin_handshake(
-        &mut reader,
-        &mut writer,
-        descriptor(&identity),
-        rc_protocol::control::Capabilities::default(),
-        rc_protocol::now_ms(),
-    )
-    .await
-    .unwrap();
-
-    let request_id = rc_protocol::RequestId::generate();
-    writer
-        .send(&rc_protocol::control::ControlRequest {
-            request_id,
-            session_id: ack.session_id,
-            sent_at_ms: rc_protocol::now_ms(),
-            nonce: [2u8; 16],
-            payload: ControlRequestPayload::SystemSnapshot,
-        })
-        .await
-        .unwrap();
-
-    let response: rc_protocol::control::ControlResponse =
-        reader.next_message().await.unwrap().unwrap();
-
-    match response.result {
-        ControlResult::Ok(rc_protocol::control::ControlResponsePayload::Snapshot(snapshot)) => {
-            assert!(snapshot.cpu.logical_cores >= 1, "a real host has cores");
-            assert!(snapshot.memory.total_bytes > 0, "a real host has memory");
-            assert!(
-                !snapshot.cpu.model.is_empty(),
-                "the processor model must be reported"
-            );
-            assert!(
-                !snapshot.top_processes.is_empty(),
-                "a running host has processes"
-            );
-            assert_eq!(
-                snapshot.cpu.per_core_percent.len(),
-                snapshot.cpu.logical_cores,
-                "one reading per core"
-            );
-        }
-        other => panic!("expected a snapshot, got {other:?}"),
-    }
-
-    std::mem::forget(connector);
-    connection.close(0u32.into(), b"done");
-}
-
-#[tokio::test]
-async fn a_session_can_open_a_real_terminal_and_run_a_command() {
-    // End to end across two processes: a PTY on the agent, driven from a client, with
-    // the command's output coming back over QUIC.
-    use rc_protocol::terminal::{
-        PrivilegeLevel, ShellKind, TerminalAgentMessage, TerminalClientMessage, TerminalSize,
-    };
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    // The control streams are held for the life of the test; dropping them would end
-    // the session and take the terminal channel with it.
-    let (connection, _ack, _control_writer, _control_reader) =
-        connect(&agent, &identity, &paired).await.unwrap();
-
-    let (mut writer, mut reader) =
-        rc_transport::open_channel(&connection, rc_protocol::Channel::Terminal)
-            .await
-            .unwrap();
-
-    let terminal_id = rc_protocol::TerminalId::generate();
-    writer
-        .send(&TerminalClientMessage::Open {
-            terminal_id,
-            shell: ShellKind::SystemDefault,
-            privilege: PrivilegeLevel::Standard,
-            size: TerminalSize { cols: 80, rows: 24 },
-            working_directory: None,
-        })
-        .await
-        .unwrap();
-
-    let probe = "rc-integration-probe";
-    // The command is written so the line the shell echoes back does not contain
-    // the probe, while the line it prints does: on a POSIX shell the quotes are
-    // removed before `echo` ever sees the word. A single match then proves the
-    // command actually ran, rather than proving the terminal echoes input.
-    // `cmd.exe` keeps the quotes literally, so on Windows the original form is
-    // used and both occurrences are required.
-    let command: &[u8] = if cfg!(windows) {
-        b"echo rc-integration-probe\r\n"
-    } else {
-        b"echo rc-integration-pr''obe\n"
-    };
-    let required_matches = if cfg!(windows) { 2 } else { 1 };
-
-    let mut opened = false;
-    let mut attempts = 0;
-    let mut collected = Vec::new();
-
-    let saw_output = tokio::time::timeout(Duration::from_secs(40), async {
-        loop {
-            // A quiet gap means the shell has finished writing its prompt. Typing
-            // on a byte count instead raced shell start-up: on a slower runner the
-            // command went in before the shell was reading, and was simply lost.
-            let next =
-                tokio::time::timeout(Duration::from_millis(750), reader.next_message()).await;
-
-            let Ok(received) = next else {
-                if !opened {
-                    continue;
-                }
-                // Settled with no match yet, so type the command, or type it again
-                // if the first attempt landed while the shell was still starting.
-                attempts += 1;
-                if attempts > 4 {
-                    return false;
-                }
-                writer
-                    .send(&TerminalClientMessage::Input {
-                        terminal_id,
-                        data: command.to_vec(),
-                    })
-                    .await
-                    .unwrap();
-                continue;
-            };
-
-            let Ok(Some(message)) = received else {
-                return false;
-            };
-
-            match message {
-                TerminalAgentMessage::Opened { pid, .. } => {
-                    assert!(pid > 0, "a real shell has a process id");
-                    opened = true;
-                }
-                TerminalAgentMessage::Output { data, .. } => {
-                    // A shell asks the terminal where its cursor is before drawing a
-                    // prompt; a client that never answers leaves it waiting forever.
-                    if data.windows(4).any(|w| w == b"\x1b[6n") {
-                        writer
-                            .send(&TerminalClientMessage::Input {
-                                terminal_id,
-                                data: b"\x1b[1;1R".to_vec(),
-                            })
-                            .await
-                            .unwrap();
-                    }
-
-                    collected.extend_from_slice(&data);
-                    let text = String::from_utf8_lossy(&collected);
-                    if text.matches(probe).count() >= required_matches {
-                        return true;
-                    }
-                }
-                TerminalAgentMessage::Error { message, .. } => {
-                    panic!("the agent refused the terminal: {message}");
-                }
-                TerminalAgentMessage::Exited { .. } => return false,
-                _ => {}
-            }
-        }
-    })
-    .await;
-
-    assert_eq!(
-        saw_output,
-        Ok(true),
-        "a command typed into the remote shell must run and return its output"
-    );
-
-    writer
-        .send(&TerminalClientMessage::Close { terminal_id })
-        .await
-        .unwrap();
-
-    connection.close(0u32.into(), b"done");
-}
-
-/// Open the file channel on an authenticated connection.
-async fn open_file_channel(
-    connection: &quinn::Connection,
-) -> (rc_transport::ChannelWriter, rc_transport::ChannelReader) {
-    rc_transport::open_channel(connection, rc_protocol::Channel::FileTransfer)
-        .await
-        .expect("the agent must serve the file channel")
-}
-
-/// Read the next file message, failing the test if none arrives.
-async fn next_file_message(
-    reader: &mut rc_transport::ChannelReader,
-) -> rc_protocol::files::FileAgentMessage {
-    tokio::time::timeout(Duration::from_secs(20), reader.next_message())
-        .await
-        .expect("the agent must answer within the deadline")
-        .expect("the file channel must stay open")
-        .expect("the agent must send a message")
-}
-
-#[tokio::test]
-async fn a_session_can_browse_the_servers_files() {
-    use rc_protocol::files::{FileAgentMessage, FileClientMessage};
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let (connection, _ack, _control_writer, _control_reader) =
-        connect(&agent, &identity, &paired).await.unwrap();
-    let (mut writer, mut reader) = open_file_channel(&connection).await;
-
-    // A directory the test owns, with known contents.
-    let workspace = tempfile::tempdir().unwrap();
-    std::fs::write(workspace.path().join("readme.txt"), b"hello").unwrap();
-    std::fs::create_dir(workspace.path().join("subdir")).unwrap();
-
-    writer
-        .send(&FileClientMessage::List {
-            path: workspace.path().to_string_lossy().into_owned(),
-            include_hidden: false,
-        })
-        .await
-        .unwrap();
-
-    match next_file_message(&mut reader).await {
-        FileAgentMessage::Listing { entries, .. } => {
-            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-            assert!(names.contains(&"readme.txt"), "got {names:?}");
-            assert!(names.contains(&"subdir"), "got {names:?}");
-        }
-        other => panic!("expected a listing, got {other:?}"),
-    }
-
-    connection.close(0u32.into(), b"done");
-}
-
-#[tokio::test]
-async fn a_file_uploads_and_downloads_with_its_checksum_verified() {
-    // The round trip across two processes: bytes go up, come back, and match.
-    use rc_protocol::files::{
-        Checksum, ChecksumAlgorithm, ConflictPolicy, FileAgentMessage, FileClientMessage,
-    };
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let (connection, _ack, _control_writer, _control_reader) =
-        connect(&agent, &identity, &paired).await.unwrap();
-    let (mut writer, mut reader) = open_file_channel(&connection).await;
-
-    let workspace = tempfile::tempdir().unwrap();
-    let destination = workspace.path().join("uploaded.bin");
-    let content: Vec<u8> = (0..5000u32).map(|index| (index % 251) as u8).collect();
-    let checksum = Checksum {
-        algorithm: ChecksumAlgorithm::Blake3,
-        digest: blake3::hash(&content).as_bytes().to_vec(),
-    };
-
-    // ---- upload ----
-    let transfer_id = rc_protocol::TransferId::generate();
-    writer
-        .send(&FileClientMessage::UploadBegin {
-            transfer_id,
-            destination: destination.to_string_lossy().into_owned(),
-            total_bytes: content.len() as u64,
-            checksum: checksum.clone(),
-            conflict: ConflictPolicy::Overwrite,
-        })
-        .await
-        .unwrap();
-
-    match next_file_message(&mut reader).await {
-        FileAgentMessage::UploadReady { resume_offset, .. } => {
-            assert_eq!(resume_offset, 0, "a fresh upload starts at the beginning");
-        }
-        other => panic!("expected the agent to be ready, got {other:?}"),
-    }
-
-    let mut offset = 0u64;
-    for chunk in content.chunks(1024) {
-        writer
-            .send(&FileClientMessage::UploadChunk {
-                transfer_id,
-                offset,
-                data: chunk.to_vec(),
-            })
-            .await
-            .unwrap();
-        offset += chunk.len() as u64;
-    }
-
-    writer
-        .send(&FileClientMessage::UploadEnd { transfer_id })
-        .await
-        .unwrap();
-
-    match next_file_message(&mut reader).await {
-        FileAgentMessage::TransferComplete {
-            bytes_transferred, ..
-        } => {
-            assert_eq!(bytes_transferred, content.len() as u64);
-        }
-        other => panic!("expected the upload to complete, got {other:?}"),
-    }
-
-    // The file is really on disk, with the right bytes.
-    assert_eq!(std::fs::read(&destination).unwrap(), content);
-
-    // ---- download it back ----
-    let download_id = rc_protocol::TransferId::generate();
-    writer
-        .send(&FileClientMessage::DownloadBegin {
-            transfer_id: download_id,
-            source: destination.to_string_lossy().into_owned(),
-            start_offset: 0,
-        })
-        .await
-        .unwrap();
-
-    let mut received = Vec::new();
-    let mut announced = None;
-
-    loop {
-        match next_file_message(&mut reader).await {
-            FileAgentMessage::DownloadBegin {
-                total_bytes,
-                checksum,
-                ..
-            } => {
-                assert_eq!(total_bytes, content.len() as u64);
-                announced = Some(checksum);
-            }
-            FileAgentMessage::DownloadChunk { offset, data, .. } => {
-                assert_eq!(offset, received.len() as u64, "chunks must arrive in order");
-                received.extend_from_slice(&data);
-            }
-            FileAgentMessage::TransferComplete { .. } => break,
-            other => panic!("unexpected message during download: {other:?}"),
-        }
-    }
-
-    assert_eq!(received, content, "the round trip must be byte-exact");
-    assert_eq!(
-        announced
-            .expect("the agent must announce a checksum")
-            .digest,
-        checksum.digest,
-        "the announced digest must match what was uploaded"
-    );
-
-    connection.close(0u32.into(), b"done");
-}
-
-#[tokio::test]
-async fn an_upload_that_fails_its_checksum_is_discarded() {
-    // A file that is silently wrong is worse than a transfer that failed.
-    use rc_protocol::files::{
-        Checksum, ChecksumAlgorithm, ConflictPolicy, FileAgentMessage, FileClientMessage,
-    };
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let (connection, _ack, _control_writer, _control_reader) =
-        connect(&agent, &identity, &paired).await.unwrap();
-    let (mut writer, mut reader) = open_file_channel(&connection).await;
-
-    let workspace = tempfile::tempdir().unwrap();
-    let destination = workspace.path().join("corrupt.bin");
-    let transfer_id = rc_protocol::TransferId::generate();
-
-    writer
-        .send(&FileClientMessage::UploadBegin {
-            transfer_id,
-            destination: destination.to_string_lossy().into_owned(),
-            total_bytes: 4,
-            // A digest of something else entirely.
-            checksum: Checksum {
-                algorithm: ChecksumAlgorithm::Blake3,
-                digest: blake3::hash(b"good").as_bytes().to_vec(),
-            },
-            conflict: ConflictPolicy::Overwrite,
-        })
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        next_file_message(&mut reader).await,
-        FileAgentMessage::UploadReady { .. }
-    ));
-
-    writer
-        .send(&FileClientMessage::UploadChunk {
-            transfer_id,
-            offset: 0,
-            data: b"BAD!".to_vec(),
-        })
-        .await
-        .unwrap();
-    writer
-        .send(&FileClientMessage::UploadEnd { transfer_id })
-        .await
-        .unwrap();
-
-    match next_file_message(&mut reader).await {
-        FileAgentMessage::TransferFailed { .. } => {}
-        other => panic!("a corrupt upload must fail, got {other:?}"),
-    }
-
-    assert!(
-        !destination.exists(),
-        "nothing must be left at the destination"
-    );
-
-    connection.close(0u32.into(), b"done");
-}
-
-#[tokio::test]
-async fn a_path_traversal_is_refused_over_the_wire() {
-    // The path checks are library-tested; this proves they are actually reached by a
-    // real message on a real connection.
-    use rc_protocol::files::{FileAgentMessage, FileClientMessage};
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let (connection, _ack, _control_writer, _control_reader) =
-        connect(&agent, &identity, &paired).await.unwrap();
-    let (mut writer, mut reader) = open_file_channel(&connection).await;
-
-    for hostile in ["relative/path", "", "/tmp/CON"] {
-        writer
-            .send(&FileClientMessage::List {
-                path: hostile.to_owned(),
-                include_hidden: false,
-            })
-            .await
-            .unwrap();
-
-        match next_file_message(&mut reader).await {
-            FileAgentMessage::Error { message, .. } => {
-                assert!(
-                    !message.contains(hostile) || hostile.is_empty(),
-                    "an error must not echo the path it was given: {message}"
-                );
-            }
-            other => panic!("{hostile:?} must be refused, got {other:?}"),
-        }
-    }
-
-    connection.close(0u32.into(), b"done");
-}
-
-/// A session with a metrics channel open and a subscription already accepted.
-///
-/// The control streams come back with it because dropping them ends the session, and
-/// with it the push the caller is about to measure.
-struct Subscribed {
-    connection: quinn::Connection,
-    control_writer: rc_transport::ChannelWriter,
-    control_reader: rc_transport::ChannelReader,
-    metrics_reader: rc_transport::ChannelReader,
-    /// Held open for the life of the session: dropping it closes the metrics channel.
-    _metrics_writer: rc_transport::ChannelWriter,
-    session_id: rc_protocol::SessionId,
-    /// The interval the agent actually accepted, after clamping.
-    interval_ms: u32,
-}
-
-/// Connect, open the metrics channel, and subscribe.
-///
-/// `requested_ms` is deliberately allowed to be below the floor so callers can assert
-/// that the answer carries the clamped figure rather than what was asked for.
-async fn subscribe_to_metrics(
-    agent: &RunningAgent,
-    identity: &DeviceIdentity,
-    paired: &rc_security::pairing::PairedAgent,
-    requested_ms: u32,
-) -> Subscribed {
-    let (connection, ack, mut control_writer, mut control_reader) =
-        connect(agent, identity, paired).await.unwrap();
-
-    // Opened before subscribing here, but the agent creates the subscription handle
-    // before either exists, so the other order works too.
-    let (metrics_writer, metrics_reader) =
-        rc_transport::open_channel(&connection, rc_protocol::Channel::Metrics)
-            .await
-            .unwrap();
-
-    let request_id = rc_protocol::RequestId::generate();
-    control_writer
-        .send(&rc_protocol::control::ControlRequest {
-            request_id,
-            session_id: ack.session_id,
-            sent_at_ms: rc_protocol::now_ms(),
-            nonce: [7u8; 16],
-            payload: ControlRequestPayload::SubscribeMetrics {
-                interval_ms: requested_ms,
-            },
-        })
-        .await
-        .unwrap();
-
-    let response: rc_protocol::control::ControlResponse =
-        control_reader.next_message().await.unwrap().unwrap();
-    assert_eq!(response.request_id, request_id);
-
-    let interval_ms = match response.result {
-        ControlResult::Ok(rc_protocol::control::ControlResponsePayload::MetricsSubscribed {
-            interval_ms,
-        }) => interval_ms,
-        other => panic!("expected a subscription, got {other:?}"),
-    };
-
-    Subscribed {
-        connection,
-        control_writer,
-        control_reader,
-        metrics_reader,
-        _metrics_writer: metrics_writer,
-        session_id: ack.session_id,
-        interval_ms,
-    }
-}
-
-#[tokio::test]
-async fn a_subscription_pushes_real_readings_without_being_polled() {
-    // The whole point of pushed metrics, across two processes: the client asks once on
-    // the control channel and readings arrive on the metrics channel unprompted.
-    use rc_protocol::system::MetricsAgentMessage;
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    // Below the floor on purpose: a client asking for 1 ms would cost a sample a
-    // thousand times a second on the machine it is supposed to be observing.
-    let mut session = subscribe_to_metrics(&agent, &identity, &paired, 1).await;
-    assert_eq!(
-        session.interval_ms,
-        rc_monitoring::MIN_SAMPLE_INTERVAL_MS,
-        "an interval below the floor must be clamped, not honoured"
-    );
-
-    // Two ticks, so this proves a *stream* rather than a single reply that happened to
-    // arrive on another channel.
-    let mut ticks = Vec::new();
-    let pushed = tokio::time::timeout(Duration::from_secs(30), async {
-        while let Ok(Some(message)) = session
-            .metrics_reader
-            .next_message::<MetricsAgentMessage>()
-            .await
-        {
-            match message {
-                MetricsAgentMessage::Update(update) => {
-                    ticks.push(*update);
-                    if ticks.len() == 2 {
-                        return true;
-                    }
-                }
-                other => panic!("the stream must not stop while subscribed: {other:?}"),
-            }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
-
-    assert!(pushed, "the agent must push without being polled");
-
-    // Real readings, not a plausible-looking empty answer.
-    for tick in &ticks {
-        assert!(tick.memory.total_bytes > 0, "a running host has memory");
-        assert!(
-            !tick.cpu.per_core_percent.is_empty(),
-            "a running host has cores"
-        );
-        assert!(tick.captured_at_ms > 0);
-    }
-
-    let gap = ticks[1].captured_at_ms - ticks[0].captured_at_ms;
-    assert!(gap >= 0, "ticks must advance in time");
-    assert!(
-        gap >= i64::from(session.interval_ms) / 2,
-        "ticks arrived {gap} ms apart, faster than the {} ms the agent accepted",
-        session.interval_ms
-    );
-
-    session.connection.close(0u32.into(), b"done");
-}
-
-#[tokio::test]
-async fn an_unsubscribe_stops_the_stream_and_says_so() {
-    // A dashboard that stops updating without being told cannot distinguish an idle
-    // server from one that stopped answering, and would keep showing its last reading
-    // as though it were current.
-    use rc_protocol::system::{MetricsAgentMessage, MetricsStopReason};
-
-    let agent = RunningAgent::start().await;
-    let identity = client_identity("client");
-    let paired = pair(&agent, &identity).await;
-
-    let mut session = subscribe_to_metrics(&agent, &identity, &paired, 200).await;
-
-    let request_id = rc_protocol::RequestId::generate();
-    session
-        .control_writer
-        .send(&rc_protocol::control::ControlRequest {
-            request_id,
-            session_id: session.session_id,
-            sent_at_ms: rc_protocol::now_ms(),
-            nonce: [8u8; 16],
-            payload: ControlRequestPayload::UnsubscribeMetrics,
-        })
-        .await
-        .unwrap();
-
-    let response: rc_protocol::control::ControlResponse = session
-        .control_reader
-        .next_message()
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(request_id, response.request_id);
-
-    let told = tokio::time::timeout(Duration::from_secs(30), async {
-        while let Ok(Some(message)) = session
-            .metrics_reader
-            .next_message::<MetricsAgentMessage>()
-            .await
-        {
-            // Ticks already in flight when the unsubscribe arrived are not a failure.
-            if let MetricsAgentMessage::Stopped { reason } = message {
-                assert_eq!(reason, MetricsStopReason::Unsubscribed);
-                return true;
-            }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
-
-    assert!(
-        told,
-        "an unsubscribe must be acknowledged on the metrics channel, not answered with silence"
-    );
-
-    session.connection.close(0u32.into(), b"done");
 }

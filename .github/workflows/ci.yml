@@ -93,8 +93,33 @@ jobs:
       - name: Tests
         run: cargo test --workspace --exclude rc-host-agent
 
+      # rc-input's `inject` feature is off by default, but the step above happens to
+      # enable it anyway: rc-host-agent turns it on by default and workspace feature
+      # unification carries that to rc-input. That is incidental — one
+      # `default-features = false` elsewhere would silently stop the injection backend's
+      # tests from running, and they are the only check that the intent tables and the
+      # platform keymap agree about what can be injected. Asking for the feature by
+      # name makes the guarantee explicit instead of a side effect. The check is
+      # per-platform by design: each runner asserts only that its own table is
+      # injectable by its own backend, so all three runners together cover all three.
+      - name: Input injection backend tests
+        run: cargo test -p rc-input --features inject
+
+      # The point of the `inject` feature is that rc-input builds without a desktop,
+      # a display server or any FFI dependency. Nothing verified that until now — the
+      # feature is on in every other step, so the headless path was never exercised.
+      # Building the package alone resolves its features in isolation, which is the
+      # only way to compile it as a machine with no desktop would.
+      - name: Input builds without an injection backend
+        run: cargo check -p rc-input
+
+      # The capture backend needs a display server, so only its compile is checked
+      # here; the tests that touch a real screen are #[ignore]d and run by hand.
+      - name: Video capture backend compiles
+        run: cargo clippy -p rc-video --features capture --all-targets -- -D warnings
+
       # The agent's end-to-end tests each stand up a real QUIC listener and
-      # client. Running sixteen of them at once on a two-core runner starves the
+      # client. Running them in parallel on a two-core runner starves the
       # network stack: a connection completes its handshake and is then lost
       # before the client opens its first stream, failing whichever test loses
       # the race. Serialising this one binary removes the contention without

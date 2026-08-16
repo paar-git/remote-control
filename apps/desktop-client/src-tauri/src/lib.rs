@@ -1,9 +1,7 @@
 //! Desktop client backend.
 //!
 //! The client process runs **unelevated**, by design. It never performs privileged
-//! operating-system work itself; anything requiring Administrator or root is sent to
-//! the host agent over an authenticated session and executed there through the
-//! allowlist in `rc-platform::privileged`.
+//! operating-system work itself.
 //!
 //! Commands exposed to the webview are declared in [`run`]. Each one returns a typed
 //! error string rather than a Rust error, because the webview must never receive an
@@ -16,30 +14,20 @@ mod commands;
 mod connect_commands;
 mod connection;
 mod file_commands;
+mod host;
+mod host_commands;
+mod host_events;
+mod input_commands;
 mod session_commands;
+mod trust_commands;
 mod update_commands;
+mod video_commands;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rc_platform::{AppPaths, HostInfo};
-use rc_security::permissions::{AuthorizationContext, Capability, Role};
-use rc_security::{Clock, DeviceIdentity, SystemClock};
-use rc_storage::audit::AuditEvent;
+use rc_security::{Clock, DeviceIdentity, Permission, PermissionSet, SystemClock};
 use serde::Serialize;
-
-/// An authenticated owner session, held in memory only.
-///
-/// Deliberately not persisted: unlocking the application is a per-run action, so
-/// closing the app relocks it.
-#[derive(Debug, Clone)]
-pub struct OwnerSession {
-    /// Account identifier.
-    pub account_id: String,
-    /// Login name.
-    pub username: String,
-    /// Role. Always [`Role::Owner`] in v1.
-    pub role: Role,
-}
 
 /// Shared backend state, created once during setup.
 pub struct AppState {
@@ -59,14 +47,11 @@ pub struct AppState {
     /// since duplicating a private key is not something that should be easy to do by
     /// accident.
     pub identity: Option<Arc<DeviceIdentity>>,
-    /// Owner account repository.
-    pub owner: Option<rc_storage::OwnerRepository>,
-    /// Trusted-device repository.
-    pub trust: Option<rc_storage::TrustRepository>,
-    /// Audit repository.
-    pub audit_repo: Option<rc_storage::AuditRepository>,
-    /// The authenticated session, if the application is unlocked.
-    pub session: Mutex<Option<OwnerSession>>,
+    /// The host side: the listener, and the prompt that raises the Accept dialog.
+    ///
+    /// Distinct from [`AppState::host`], which is facts about this machine. This is the
+    /// half of the application that answers the door.
+    pub host_runtime: Arc<host::HostRuntime>,
     /// The connection to a saved server, when this client has an identity to use.
     ///
     /// `None` only when the keystore could not be loaded, in which case the window
@@ -79,41 +64,32 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The authorization context for the current session.
+    /// The permissions the connected agent granted this client's outbound session.
     ///
-    /// Returns `None` when the application is locked. Note that this is *application*
-    /// authorization only: it never implies operating-system privilege, which stays
-    /// behind the agent's allowlist.
+    /// Empty whenever nothing is connected. Note what this is *not*: it is not a local
+    /// account's authority, and there is no longer any such thing — the application has
+    /// no login and nothing to unlock. It is the remote machine's answer to "what may
+    /// this session do", which the remote machine also enforces itself on every
+    /// request. Checking it here as well means the client refuses locally rather than
+    /// sending a request it already knows will be denied.
     #[must_use]
-    pub fn authorization(&self) -> Option<AuthorizationContext> {
-        let session = self.session.lock().ok()?;
-        session.as_ref().map(|s| AuthorizationContext::new(s.role))
+    pub fn authorization(&self) -> PermissionSet {
+        self.connection
+            .as_ref()
+            .map_or(PermissionSet::NONE, |manager| manager.granted())
     }
 
-    /// Enforce that the current session holds `capability`.
+    /// Enforce that the session holds `permission`.
     ///
-    /// Every capability check goes through here rather than through scattered
-    /// `is_owner` tests, so adding a role means changing the permission table and
-    /// nothing else.
-    fn require_capability(&self, capability: Capability) -> Result<(), commands::CommandError> {
-        match self.authorization() {
-            None => Err(commands::CommandError::locked()),
-            Some(context) => context
-                .require(capability)
-                .map_err(|_| commands::CommandError::permission_denied(capability)),
-        }
-    }
-
-    /// Append an audit record, logging rather than failing if the write does not work.
-    ///
-    /// Losing an audit row is bad; aborting a completed security action because the
-    /// log write failed would be worse.
-    async fn audit(&self, event: AuditEvent) {
-        let Some(repo) = self.audit_repo.as_ref() else {
-            return;
-        };
-        if let Err(err) = repo.record(&event, self.clock.now_ms()).await {
-            tracing::error!(%err, action = event.action, "could not write an audit record");
+    /// Every check goes through here rather than through scattered tests, so widening
+    /// what a session may do means changing one place. A client with no connection
+    /// holds nothing, so this fails closed before a session exists rather than needing
+    /// a separate "are we connected" question at each call site.
+    fn require_permission(&self, permission: Permission) -> Result<(), commands::CommandError> {
+        if self.authorization().contains(permission) {
+            Ok(())
+        } else {
+            Err(commands::CommandError::permission_denied(permission))
         }
     }
 }
@@ -199,10 +175,7 @@ async fn initialise() -> Arc<AppState> {
         paths: paths.clone(),
         database: None,
         identity: None,
-        owner: None,
-        trust: None,
-        audit_repo: None,
-        session: Mutex::new(None),
+        host_runtime: Arc::new(host::HostRuntime::new(host::TauriPrompt::new())),
         connection: None,
         clock: Arc::clone(&clock),
         updater: update_commands::UpdateRuntime::new(paths.data_dir()),
@@ -255,14 +228,6 @@ async fn initialise() -> Arc<AppState> {
         }
     };
 
-    let (owner, trust, audit_repo) = database.as_ref().map_or((None, None, None), |db| {
-        (
-            Some(rc_storage::OwnerRepository::new(db)),
-            Some(rc_storage::TrustRepository::new(db)),
-            Some(rc_storage::AuditRepository::new(db)),
-        )
-    });
-
     // The connection manager needs an identity: without one this client cannot
     // authenticate to anything, and offering a Connect button that could only fail
     // would be worse than not offering it.
@@ -275,15 +240,34 @@ async fn initialise() -> Arc<AppState> {
         ))
     });
 
+    let host_runtime = Arc::new(host::HostRuntime::new(host::TauriPrompt::new()));
+    if let (Some(identity), Some(db)) = (identity.as_ref(), database.as_ref()) {
+        match rc_storage::SettingsRepository::new(db).load().await {
+            Ok(settings) if settings.accepting => {
+                if let Err(err) = host_runtime
+                    .start(Arc::clone(identity), db, settings.listen_port)
+                    .await
+                {
+                    tracing::error!(
+                        %err,
+                        port = settings.listen_port,
+                        "could not start accepting connections on launch"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::error!(%err, "could not load host settings on launch");
+            }
+        }
+    }
+
     Arc::new(AppState {
         host,
         paths: paths.clone(),
         database,
         identity,
-        owner,
-        trust,
-        audit_repo,
-        session: Mutex::new(None),
+        host_runtime,
         connection,
         clock,
         updater: update_commands::UpdateRuntime::new(paths.data_dir()),
@@ -322,34 +306,54 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup({
+            // Captured rather than looked up through the app: `Manager::state` would
+            // need the trait in scope here, and every Tauri type this file names is one
+            // more thing the linker has to be able to drop from the test binary.
+            let state = Arc::clone(&state);
+            move |app| {
+                // The prompt is built with the rest of the state, before there is a
+                // window to raise a dialog in. This is the first moment there is one.
+                state
+                    .host_runtime
+                    .prompt()
+                    .attach(Arc::new(host_events::WindowChannel::new(
+                        app.handle().clone(),
+                    )));
+                Ok(())
+            }
+        })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             client_info,
             commands::local_identity,
-            commands::owner_status,
-            commands::create_owner,
-            commands::owner_login,
-            commands::owner_logout,
-            commands::list_trusted_devices,
-            commands::rename_trusted_device,
-            commands::revoke_trusted_device,
-            commands::recent_audit_events,
-            commands::check_pairing_code_format,
-            connect_commands::discover_agents,
-            connect_commands::pair_with_server,
-            connect_commands::connect_to_server,
+            host_commands::host_status,
+            host_commands::set_accepting,
+            host_commands::pending_accept_request,
+            host_commands::answer_accept_request,
+            host_commands::dismiss_accept_request,
+            host_commands::list_recent,
+            host_commands::remove_recent,
+            host_commands::host_settings,
+            host_commands::set_unattended_password,
+            trust_commands::list_trusted_devices,
+            trust_commands::set_device_permissions,
+            trust_commands::set_device_unattended,
+            trust_commands::set_device_suspended,
+            trust_commands::revoke_device,
+            trust_commands::probe_device,
+            trust_commands::list_session_history,
+            trust_commands::inbound_sessions,
+            trust_commands::disconnect_inbound,
+            trust_commands::emergency_disconnect,
+            connect_commands::connect_to_address,
             connect_commands::disconnect_from_server,
-            connect_commands::reconnect_to_server,
             connect_commands::connection_state,
             connect_commands::ping_server,
             session_commands::system_snapshot,
             session_commands::subscribe_metrics,
             session_commands::unsubscribe_metrics,
             session_commands::server_facts,
-            session_commands::open_terminal,
-            session_commands::send_terminal_input,
-            session_commands::resize_terminal,
-            session_commands::close_terminal,
             file_commands::list_remote_directory,
             file_commands::list_local_directory,
             file_commands::default_local_directory,
@@ -365,6 +369,16 @@ pub fn run() {
             update_commands::resume_update_download,
             update_commands::cancel_update_download,
             update_commands::install_update,
+            video_commands::video_list_displays,
+            video_commands::video_start_stream,
+            video_commands::video_stop_stream,
+            video_commands::video_request_keyframe,
+            video_commands::video_send_clipboard,
+            input_commands::input_pointer_move,
+            input_commands::input_pointer_button,
+            input_commands::input_scroll,
+            input_commands::input_key,
+            input_commands::input_set_grab,
         ])
         .run(tauri::generate_context!());
 

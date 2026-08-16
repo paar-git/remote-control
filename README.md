@@ -1,56 +1,88 @@
 # Remote Control
 
-A private remote-access platform for servers **you own and administer**: remote
-desktop, a real terminal, file management, monitoring and power control, with strong
-device identity and no third-party cloud in the path.
+Private remote access between machines **you own**. You type an address, the person at
+the other machine clicks Accept, and you are connected. No account, no sign-in, no
+third-party cloud in the path.
 
-> **Status: Phase 2 of 9 complete.** The foundation and the security core — device
-> identity, protected keystore, secure pairing, trusted devices, owner authentication
-> and the capability model — are built, tested and verified. **Networking is not built
-> yet**: two devices can be paired cryptographically but cannot yet connect. That lands
-> in Phase 3. See [`PROGRESS.md`](PROGRESS.md) for exactly what works today and what
-> does not.
+> **Status: you can see the remote screen and drive it.** Two machines can find each
+> other by address and admit each other in one of four ways — incoming access being on,
+> then a trusted identity, an unattended password, or a human clicking Accept — and hold
+> a session carrying the remote display, keyboard and pointer control, file transfer and
+> system monitoring. The window is four categories: Remote Control, My Devices, Sessions
+> and Settings.
+>
+> The display is lossless and sends only the tiles that changed, so a still desktop
+> costs nothing. Shortcuts cross machines by meaning rather than by key: the controller
+> recognises the chord its own OS taught the operator, and the host spells that meaning
+> however it spells it, so Copy is Copy in either direction. A toggle sends a chord
+> literally when a program needs the raw keys instead — `Ctrl+C` in a remote terminal is
+> SIGINT, not Copy.
+>
+> Multi-monitor hosts are navigable — the picker draws the real arrangement and the
+> pointer crosses between screens — and clipboard text is shared, gated on a permission
+> of its own because a clipboard carries what its owner last copied rather than what is
+> on screen.
+>
+> `Alt+Tab` and its kin are taken back from the operator's own desktop and forwarded as
+> the action they mean, on Windows, macOS and X11 — though no backend has yet run on a
+> real desktop. `Ctrl+Alt+Del` cannot be forwarded at all and says so. No lossy codec
+> exists.
+> Screen capture is verified on Windows; macOS and Linux compile and are tested in CI but
+> have never captured a frame. See [`PROGRESS.md`](PROGRESS.md) for exactly what works
+> today.
 
 ## Design in one paragraph
 
-A **host agent** runs as a system service on the machine being controlled. A
-**desktop client** runs unelevated on your main PC. They authenticate each other with
-mutually-authenticated TLS 1.3 over QUIC using self-signed, **fingerprint-pinned**
-device certificates established during a short, single-use pairing exchange. An
-optional **self-hosted coordination service** helps them find each other across
-networks but never terminates encryption and never sees session contents. Privileged
-operating-system work happens only in the agent, only through a closed allowlist of
-fixed program paths and explicit argument vectors.
+One program is both sides. It listens for incoming connections and it makes outgoing
+ones, and the same binary does both — there is no separate agent to install and no
+client to pair with it. Two machines authenticate each other with mutually-authenticated
+TLS 1.3 over QUIC using self-signed certificates, and then, because completing TLS
+proves only *which key* is on the other end, the machine being connected to makes a
+separate admission decision. Incoming access must be on, and then a trusted device
+identity, an unattended password its owner set, or a person clicking Accept, can
+open the door. Persistent access is anchored on that identity,
+so a device reached at a new address keeps its grant and a renewed certificate is not
+an identity change. What that session may then do is fixed at admission and re-checked
+on every single request.
 
 ## Repository layout
 
 ```text
 .
 ├─ apps/
-│  ├─ desktop-client/          Tauri 2 + React + TypeScript client
-│  │  └─ src-tauri/            Client backend (unelevated)
-│  └─ coordination-server/     Optional self-hosted signalling service
+│  └─ desktop-client/          Tauri 2 + React + TypeScript application
+│     └─ src-tauri/            Its backend: connections in and out
 ├─ crates/
 │  ├─ protocol/                Wire protocol, framing, limits, replay guard
-│  ├─ security/                Identity, keystore, pairing, passwords, permissions
-│  ├─ storage/                 SQLite schema, migrations, repositories, audit log
-│  ├─ platform/                OS abstraction, privileged-command allowlist
-│  └─ host-agent/              The agent service
+│  ├─ security/                Identity, keystore, passwords, permissions
+│  ├─ transport/               QUIC, mutual TLS, the handshake, addresses
+│  ├─ storage/                 SQLite schema, migrations, repositories
+│  ├─ platform/                OS abstraction: paths, host facts, addresses
+│  ├─ monitoring/              System metrics collection
+│  ├─ file-transfer/           Chunked, resumable transfers
+│  ├─ input/                   Physical keys, per-OS shortcut translation, displays
+│  ├─ keygrab/                 Taking Alt+Tab back from the operator's own desktop
+│  ├─ clipboard/               Loop-safe clipboard sharing between the two machines
+│  ├─ video/                   Screen capture, tile differencing, encode and decode
+│  ├─ updater/                 Signed release manifests and installation
+│  └─ host-agent/              The admission decision, and a standalone service
 ├─ packages/
-│  └─ shared-types/            Zod mirror of the protocol, reconnection policy
-├─ installers/                 Windows and Linux packaging
-├─ docs/                       Threat model, installation, operations
+│  └─ shared-types/            Zod mirror of the protocol
+├─ docs/                       Access model, threat model, protocol
 └─ scripts/                    Verification and development helpers
 ```
 
-Crates for `remote-desktop`, `file-transfer`, `terminal` and `monitoring` are created in
-the phases that implement them, rather than sitting empty.
+`crates/host-agent` is both a library and a binary. The library holds the admission rule
+and the session server, and the desktop application depends on it so that the two cannot
+drift into deciding differently. The binary is a headless service for a machine with
+nobody sitting at it, where every connection request is dismissed unless a trusted
+unattended device or an unattended password admits it.
 
 ## Requirements
 
 | Tool | Version used | Notes |
 |---|---|---|
-| Rust | 1.96 (edition 2024) | `rustup` installs the pinned toolchain automatically |
+| Rust | 1.90 (edition 2024) | `rust-version` in `Cargo.toml`; `rustup` installs the pinned toolchain automatically |
 | Node | ≥ 20.19 | 24.x verified |
 | pnpm | 11.x | `packageManager` field pins it |
 | MSVC Build Tools | 2022 | Windows only, for linking |
@@ -68,25 +100,7 @@ pnpm install
 pnpm verify
 ```
 
-### Run the agent
-
-```bash
-cargo run -p rc-host-agent -- --root ./local/agent write-config   # seed a config file
-cargo run -p rc-host-agent -- --root ./local/agent check          # validate it
-cargo run -p rc-host-agent -- --root ./local/agent identity       # show this device's identity
-cargo run -p rc-host-agent -- --root ./local/agent pair           # open a pairing window
-cargo run -p rc-host-agent -- --root ./local/agent run            # start it
-```
-
-`identity` creates the device identity on first use and prints the fingerprint a client
-pins. `pair` prints a single-use code that expires in 180 seconds — the one sanctioned
-path by which a code becomes visible. Completing a pairing over the network requires the
-transport from Phase 3.
-
-Omit `--root` to use the production locations (`%ProgramData%\remote-control` on
-Windows, `/etc` + `/var/lib` + `/var/log` on Linux).
-
-### Run the client
+### Run the application
 
 ```bash
 pnpm --filter @rc/desktop-client tauri:dev
@@ -95,57 +109,81 @@ pnpm --filter @rc/desktop-client tauri:dev
 Opening `http://127.0.0.1:1420` in a browser instead will show an explicit
 "backend unavailable" message — the UI has no mock mode.
 
-### Run the coordination service
+The window shows the addresses this machine can be reached on. Type one of them into
+another machine's window and press Connect; a dialog appears here asking whether to
+allow it, and what it may do.
+
+On Windows, the first time incoming connections are enabled the firewall prompt appears.
+Allow it for private networks. Nothing pre-authorises it, deliberately: an application
+that silently opens a port is doing the thing that prompt exists to reveal.
+
+### Run the headless service
+
+For a machine nobody is sitting at:
 
 ```bash
-cargo run -p rc-coordination-server         # binds 127.0.0.1:47812 by default
-curl http://127.0.0.1:47812/health
+cargo run -p rc-host-agent -- --root ./local/agent write-config   # seed a config file
+cargo run -p rc-host-agent -- --root ./local/agent check          # validate it
+cargo run -p rc-host-agent -- --root ./local/agent identity       # show this machine's identity
+cargo run -p rc-host-agent -- --root ./local/agent run            # start it
 ```
+
+There is no window, so there is nobody to click Accept: every connection request is
+dismissed unless an unattended password or a pinned identity admits it. That is the
+fail-closed direction, and it is deliberate.
+
+Omit `--root` to use the production locations (`%ProgramData%\remote-control` on
+Windows, `/etc` + `/var/lib` + `/var/log` on Linux).
 
 ## Security posture
 
 The rules the codebase is built to, each enforced by tests:
 
+- **Completing TLS admits nothing.** It answers which key is on the other end, not
+  whether that key may have a session. The admission decision is separate and happens
+  per connection.
+- **A refused peer learns only that it was refused.** A dismissal, a wrong unattended
+  password and a lockout are one value on the wire, so the answer is not an oracle for
+  whether unattended access is configured.
+- **Nothing identifying travels before the decision.** The acknowledgement sent to
+  everyone who completes TLS carries the protocol version and nothing else.
+- **Permissions are fixed at admission and re-checked on every request.** A permission
+  decided once and trusted forever is the failure this design exists to prevent.
+- **Accepting with nothing ticked is a refusal**, decided in one place that every
+  admission path funnels through.
+- **A pinned machine presenting a different identity is refused outright**, never
+  handed to the Accept dialog — an identity change must not be reachable by a routine
+  click.
 - **Nothing off the wire is trusted.** Frames are rejected on the header alone if they
-  exceed a per-channel limit, before any allocation.
-- **No shell, ever.** Privileged operations resolve to a fixed program path plus an
-  explicit `argv`; caller-supplied values are validated and can never become flags,
-  separators or commands. See `crates/platform/src/privileged.rs`.
-- **An intentional disconnect never auto-reconnects.** Encoded identically in Rust
-  (`DisconnectReason::permits_auto_reconnect`) and TypeScript (`permitsAutoReconnect`),
-  with paired tests on both sides.
-- **Device identity is pinned.** A changed fingerprint is a hard, user-visible failure,
-  never a silent re-trust.
-- **No plaintext secrets at rest.** Passwords are Argon2id hashes; tokens are stored
-  hashed; private keys live in a protected keystore (DPAPI on Windows, `0600` in a
-  `0700` directory on Linux), not the database. Pairing codes are stored only as an
-  Argon2id verifier.
-- **The client is not elevated.** It warns if you run it as administrator.
-- **Authorization is by typed capability.** No `if is_owner` conditionals; adding a
-  capability without deciding which roles get it is a compile error.
-- **Application permission is not OS privilege.** An owner cannot use application
-  permissions to bypass UAC, polkit, or the protected-services deny-list.
+  exceed a per-channel limit, before any allocation. Every path is resolved and checked
+  before any filesystem call.
+- **No plaintext secrets at rest.** The unattended password is an Argon2id hash that
+  never crosses the IPC boundary; private keys live in a protected keystore (DPAPI on
+  Windows, `0600` in a `0700` directory on Linux), not the database.
+- **An intentional disconnect never auto-reconnects**, and neither does a refusal.
+- **The application is not elevated.** It warns if you run it as administrator.
 
-### Security documentation
+### Documentation
 
 | Document | Covers |
 |---|---|
-| [`docs/threat-model.md`](docs/threat-model.md) | Assets, boundaries, adversaries, residual risk |
-| [`docs/pairing-protocol.md`](docs/pairing-protocol.md) | The pairing exchange, transcript construction, domain separation |
+| [`docs/access-model.md`](docs/access-model.md) | The four ways in, the ordering, the oracle properties, what a session may do |
+| [`docs/threat-model.md`](docs/threat-model.md) | Assets, boundaries, adversaries, what got weaker and why |
+| [`docs/network-protocol.md`](docs/network-protocol.md) | QUIC, mutual TLS, the two-leg handshake, channels, ports |
+| [`docs/reconnection.md`](docs/reconnection.md) | What is retried, what is never retried, and why |
 | [`docs/keystore-format.md`](docs/keystore-format.md) | Keystore envelope, DPAPI and Unix protection, installer requirements |
-| [`docs/update-manager.md`](docs/update-manager.md) | Release manifests, platform artifact selection, resumable downloads, verification and install flow |
-| [`docs/owner-authentication.md`](docs/owner-authentication.md) | Argon2id parameters, throttling, hash upgrades |
-| [`docs/permission-model.md`](docs/permission-model.md) | Capabilities, roles, the privilege boundary |
+| [`docs/file-transfer-protocol.md`](docs/file-transfer-protocol.md) | Chunking, resumption, conflict policies, verification |
+| [`docs/update-manager.md`](docs/update-manager.md) | Release manifests, resumable downloads, verification and install flow |
 
-Read [`docs/threat-model.md`](docs/threat-model.md) before exposing anything beyond
-your LAN.
+Read [`docs/threat-model.md`](docs/threat-model.md) before exposing anything beyond your
+LAN. It states plainly what this design gives up relative to a pairing exchange, and why.
 
 ## Not supported, deliberately
 
-Stealth or hidden installation, antivirus evasion, unattended access to devices you do
-not administer, consent bypasses, or any form of covert operation. The agent announces
-itself, logs its sessions, and shows a host-side indicator while a remote-control
-session is active.
+Stealth or hidden installation, antivirus evasion, unattended access to machines you do
+not administer, consent bypasses, or any form of covert operation. The application shows
+a dialog before admitting anyone, shows the session while it runs, and can be
+disconnected from either end at any moment.
 
 ## Licence
 
