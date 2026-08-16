@@ -33,7 +33,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { buttonName, modifierBits, pointerFraction } from './inputCapture.js';
-import { sendKey, sendPointerButton, sendPointerMove, sendScroll } from './inputApi.js';
+import {
+  listenInputAck,
+  sendKey,
+  sendPointerButton,
+  sendPointerMove,
+  sendScroll,
+} from './inputApi.js';
 import { applyRegion } from './video.js';
 import { listenStreamEnded, startStream, stopStream, type StreamStarted } from './videoApi.js';
 
@@ -70,6 +76,7 @@ export function VideoSurface({
   const [started, setStarted] = useState<StreamStarted | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   // Codes currently held down, so they can be released if capture ends mid-chord.
   const heldKeys = useRef(new Set<string>());
@@ -153,6 +160,33 @@ export function VideoSurface({
   }, [capturing, error, releaseHeldKeys]);
 
   const active = capturing && error === null;
+
+  // A host that refuses input looks exactly like one that has frozen. It refuses for
+  // reasons the operator can often act on — a revoked grant, a missing macOS
+  // accessibility permission — so the reason is worth showing rather than dropping.
+  useEffect(() => {
+    if (!active) return undefined;
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    listenInputAck((ack) => {
+      if (cancelled) return;
+      // Cleared by the next event the host does accept, so a permission granted
+      // mid-session stops warning on its own rather than needing a reconnect.
+      setRefusal(ack.ok ? null : (ack.reason ?? 'The other machine refused the input.'));
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [active]);
 
   // `wheel` is attached natively rather than through React, which registers it passively
   // at the root: a passive listener cannot `preventDefault`, so the operator's own page
@@ -271,16 +305,20 @@ export function VideoSurface({
           .join(' ')}
       />
 
-      {active && passthrough && (
+      {/* One status line, because a refusal is the more urgent of the two: an operator
+          whose input is being rejected does not need to be told how it was encoded. */}
+      {active && (refusal !== null || passthrough) && (
         <p
           role="status"
           className={
             'pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-lg ' +
-            'border border-(--color-border) bg-(--color-card) px-3 py-1.5 text-xs ' +
-            'text-(--color-text-secondary) shadow-lg'
+            'border px-3 py-1.5 text-xs shadow-lg ' +
+            (refusal === null
+              ? 'border-(--color-border) bg-(--color-card) text-(--color-text-secondary)'
+              : 'border-(--color-danger) bg-(--color-card) text-(--color-text)')
           }
         >
-          Shortcuts are sent literally
+          {refusal === null ? 'Shortcuts are sent literally' : `Input refused: ${refusal}`}
         </p>
       )}
     </div>

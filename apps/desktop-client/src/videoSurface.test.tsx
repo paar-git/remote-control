@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -25,6 +25,7 @@ vi.mock('./inputApi.js', async (importOriginal) => {
     sendPointerMove: vi.fn(() => Promise.resolve(null)),
     sendPointerButton: vi.fn(() => Promise.resolve(null)),
     sendScroll: vi.fn(() => Promise.resolve(null)),
+    listenInputAck: vi.fn(() => Promise.resolve(() => undefined)),
   };
 });
 
@@ -183,5 +184,67 @@ describe('VideoSurface input capture', () => {
     const [x, y] = vi.mocked(inputApi.sendPointerMove).mock.calls[0] ?? [];
     expect(Number.isNaN(x)).toBe(false);
     expect(Number.isNaN(y)).toBe(false);
+  });
+});
+
+describe('VideoSurface refused input', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(videoApi.startStream).mockResolvedValue(STARTED);
+    vi.mocked(videoApi.listenStreamEnded).mockResolvedValue(() => undefined);
+  });
+
+  /** Render a capturing surface and hand back the ack handler it registered. */
+  async function surfaceWithAcks(): Promise<(ack: inputApi.InputAck) => void> {
+    let deliver: ((ack: inputApi.InputAck) => void) | undefined;
+    vi.mocked(inputApi.listenInputAck).mockImplementation((handler) => {
+      deliver = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} />);
+    await screen.findByTestId('video-surface');
+    await waitFor(() => {
+      expect(deliver).toBeDefined();
+    });
+    return deliver as (ack: inputApi.InputAck) => void;
+  }
+
+  it('says the host refused the input instead of looking frozen', async () => {
+    // A revoked control_input grant is otherwise indistinguishable from a remote
+    // machine that has simply stopped responding.
+    const deliver = await surfaceWithAcks();
+
+    act(() => {
+      deliver({ seq: 3, ok: false, reason: 'this session may not control the host' });
+    });
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/may not control the host/i);
+  });
+
+  it('stops saying so once the host accepts input again', async () => {
+    // A permission restored mid-session must clear the warning, or the operator is
+    // told they cannot type while they can.
+    const deliver = await surfaceWithAcks();
+    act(() => {
+      deliver({ seq: 3, ok: false, reason: 'this session may not control the host' });
+    });
+    await screen.findByRole('status');
+
+    act(() => {
+      deliver({ seq: 4, ok: true, reason: null });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/may not control the host/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it('does not listen for acknowledgements while capture is off', async () => {
+    // Nothing is being sent, so nothing can be refused; a warning here would be noise.
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
+    await screen.findByTestId('video-surface');
+
+    expect(inputApi.listenInputAck).not.toHaveBeenCalled();
   });
 });
