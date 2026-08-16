@@ -216,10 +216,25 @@ impl<S: CaptureSource> VideoService<S> {
                     "no stream is running",
                 )],
             },
-            // Interaction mode, secure attention and clipboard are not this channel's
-            // concern. `DesktopClientMessage` is `#[non_exhaustive]`, so this also
-            // covers any variant a future protocol version adds.
-            _ => Vec::new(),
+            DesktopClientMessage::SetInteractionMode(_) => vec![Self::refuse(
+                ErrorCode::Unsupported,
+                "set_interaction_mode is not handled on the video channel in this build",
+            )],
+            DesktopClientMessage::SecureAttentionSequence => vec![Self::refuse(
+                ErrorCode::Unsupported,
+                "secure_attention_sequence is not handled on the video channel in this build",
+            )],
+            DesktopClientMessage::ClipboardUpdate { .. } => vec![Self::refuse(
+                ErrorCode::Unsupported,
+                "clipboard_update is not handled on the video channel in this build",
+            )],
+            // `DesktopClientMessage` is `#[non_exhaustive]`: this is now solely for a
+            // variant a future protocol version adds that this build does not know
+            // about yet, not for any variant named above.
+            _ => vec![Self::refuse(
+                ErrorCode::Unsupported,
+                "this build does not understand that video-channel request",
+            )],
         }
     }
 
@@ -272,10 +287,13 @@ impl<S: CaptureSource> VideoService<S> {
         }
         match source.displays() {
             Ok(displays) => vec![DesktopAgentMessage::Displays(displays)],
-            Err(err) => vec![Self::refuse(
-                ErrorCode::Internal,
-                format!("could not list displays: {err}"),
-            )],
+            Err(err) => {
+                tracing::warn!(%err, "could not enumerate displays");
+                vec![Self::refuse(
+                    ErrorCode::Internal,
+                    "the display list could not be read",
+                )]
+            }
         }
     }
 
@@ -317,9 +335,10 @@ impl<S: CaptureSource> VideoService<S> {
         let displays = match source.displays() {
             Ok(displays) => displays,
             Err(err) => {
+                tracing::warn!(%err, "could not enumerate displays");
                 return vec![Self::refuse(
                     ErrorCode::Internal,
-                    format!("could not list displays: {err}"),
+                    "the display list could not be read",
                 )];
             }
         };
@@ -336,9 +355,10 @@ impl<S: CaptureSource> VideoService<S> {
         let encoder = match Encoder::new(codec, display.width, display.height) {
             Ok(encoder) => encoder,
             Err(err) => {
+                tracing::warn!(%err, "could not build an encoder");
                 return vec![Self::refuse(
                     ErrorCode::Internal,
-                    format!("could not build an encoder: {err}"),
+                    "the encoder could not be started",
                 )];
             }
         };
@@ -396,9 +416,10 @@ impl<S: CaptureSource> VideoService<S> {
             let displays = match source.displays() {
                 Ok(displays) => displays,
                 Err(err) => {
+                    tracing::warn!(%err, "could not enumerate displays");
                     return vec![Self::refuse(
                         ErrorCode::Internal,
-                        format!("could not list displays: {err}"),
+                        "the display list could not be read",
                     )];
                 }
             };
@@ -417,9 +438,10 @@ impl<S: CaptureSource> VideoService<S> {
                     live.force_keyframe = true;
                 }
                 Err(err) => {
+                    tracing::warn!(%err, "could not build an encoder");
                     return vec![Self::refuse(
                         ErrorCode::Internal,
-                        format!("could not build an encoder: {err}"),
+                        "the encoder could not be started",
                     )];
                 }
             }
@@ -478,8 +500,9 @@ fn now_us() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rc_protocol::desktop::InteractionMode;
+    use rc_protocol::desktop::{DisplayInfo, InteractionMode};
     use rc_security::{Fingerprint, PermissionSet};
+    use rc_video::capture::CapturedFrame;
     use rc_video::capture::mock::MockSource;
 
     fn session_with(permissions: PermissionSet) -> Session {
@@ -491,15 +514,15 @@ mod tests {
     }
 
     /// The service's decisions, without a transport under them.
-    struct Harness {
+    struct Harness<S: CaptureSource> {
         session: Session,
-        source: MockSource,
+        source: S,
         enabled: bool,
         stream: Option<Stream>,
     }
 
-    impl Harness {
-        fn new(permissions: PermissionSet, source: MockSource, enabled: bool) -> Self {
+    impl<S: CaptureSource> Harness<S> {
+        fn new(permissions: PermissionSet, source: S, enabled: bool) -> Self {
             Self {
                 session: session_with(permissions),
                 source,
@@ -530,9 +553,53 @@ mod tests {
         }
     }
 
+    /// Two displays of different sizes, so a `Reconfigure` onto another display can be
+    /// distinguished from one that keeps reusing the encoder it started with: a stale
+    /// 128x128 encoder fed a 64x64 frame would fail the size check inside `encode`
+    /// rather than merely produce a wrong-looking picture.
+    struct TwoDisplays {
+        primary: MockSource,
+        secondary: MockSource,
+    }
+
+    impl TwoDisplays {
+        fn new() -> Self {
+            Self {
+                primary: MockSource::new(128, 128),
+                secondary: MockSource::new(64, 64),
+            }
+        }
+    }
+
+    impl CaptureSource for TwoDisplays {
+        fn displays(&self) -> rc_video::Result<Vec<DisplayInfo>> {
+            let mut all = self.primary.displays()?;
+            let mut rest = self.secondary.displays()?;
+            for display in &mut rest {
+                display.index = 1;
+                display.name = "mock-secondary".to_owned();
+                display.primary = false;
+            }
+            all.append(&mut rest);
+            Ok(all)
+        }
+
+        fn grab(&mut self, index: u8) -> rc_video::Result<CapturedFrame> {
+            match index {
+                0 => self.primary.grab(0),
+                1 => self.secondary.grab(0),
+                other => Err(rc_video::VideoError::NoSuchDisplay(other)),
+            }
+        }
+    }
+
     fn start_stream(codecs: Vec<VideoCodec>) -> DesktopClientMessage {
+        start_stream_on(0, codecs)
+    }
+
+    fn start_stream_on(display_index: u8, codecs: Vec<VideoCodec>) -> DesktopClientMessage {
         DesktopClientMessage::StartStream {
-            display_index: 0,
+            display_index,
             accepted_codecs: codecs,
             quality: QualityPreset::Balanced,
             max_fps: 30,
@@ -625,5 +692,88 @@ mod tests {
         service.tick();
         service.revoke();
         assert!(service.tick().is_empty(), "revocation must stop frames");
+    }
+
+    #[test]
+    fn pausing_stops_frames_and_resuming_does_not_need_a_keyframe() {
+        // Resuming must reuse the encoder. Forcing a full refresh on every resume
+        // would turn a pause into a bandwidth spike on a link already under strain.
+        let mut service = Harness::new(viewing(), MockSource::new(128, 128), true);
+        service.handle(start_stream(vec![VideoCodec::TiledZstd]));
+        service.tick(); // first frame, everything changes
+
+        service.handle(DesktopClientMessage::PauseStream);
+        assert!(service.tick().is_empty(), "a paused stream sends nothing");
+
+        service.handle(DesktopClientMessage::ResumeStream);
+        assert!(
+            service.tick().is_empty(),
+            "resuming an unchanged screen must not force a keyframe"
+        );
+    }
+
+    #[test]
+    fn reconfiguring_onto_another_display_rebuilds_the_encoder_and_forces_a_keyframe() {
+        // The encoder is built for one frame size. Pointing a stale one at a
+        // different-sized display corrupts every frame it produces, and the corruption
+        // looks like a codec defect rather than a configuration one.
+        let mut service = Harness::new(viewing(), TwoDisplays::new(), true);
+        service.handle(start_stream_on(0, vec![VideoCodec::TiledZstd]));
+        service.tick();
+        assert!(
+            service.tick().is_empty(),
+            "an unchanged screen sends nothing before the switch"
+        );
+
+        let replies = service.handle(DesktopClientMessage::Reconfigure {
+            display_index: Some(1),
+            quality: None,
+            max_fps: None,
+        });
+        assert!(
+            replies.is_empty(),
+            "reconfigure onto a valid display is quiet"
+        );
+
+        let frames = service.tick();
+        assert!(
+            !frames.is_empty(),
+            "the newly built encoder must produce a frame, proving it was rebuilt for \
+             the new display's size rather than reused"
+        );
+        assert!(
+            frames.iter().all(|frame| frame.keyframe),
+            "a display switch is a full refresh"
+        );
+    }
+
+    #[test]
+    fn stopping_ends_the_stream_and_a_later_tick_produces_nothing() {
+        let mut service = Harness::new(viewing(), MockSource::new(128, 128), true);
+        service.handle(start_stream(vec![VideoCodec::TiledZstd]));
+        service.tick();
+
+        let replies = service.handle(DesktopClientMessage::StopStream);
+        assert!(matches!(
+            replies.as_slice(),
+            [DesktopAgentMessage::StreamStopped]
+        ));
+
+        // A still screen also sends nothing, so that alone would not distinguish a
+        // stopped stream from a running, idle one. Asking for a keyframe does: a live
+        // stream would honour it silently, but nothing should be left to ask.
+        let keyframe_replies = service.handle(DesktopClientMessage::RequestKeyframe);
+        assert!(
+            matches!(
+                keyframe_replies.as_slice(),
+                [DesktopAgentMessage::Error { .. }]
+            ),
+            "no stream should remain to request a keyframe from"
+        );
+
+        assert!(
+            service.tick().is_empty(),
+            "a stopped stream must not keep producing frames"
+        );
     }
 }
