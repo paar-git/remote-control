@@ -361,6 +361,11 @@ describe('VideoSurface input lag', () => {
 });
 
 describe('VideoSurface clipboard', () => {
+  // Held as values rather than reached through `navigator.clipboard` at assertion time:
+  // reading a method off an object and passing it around loses its `this`.
+  let readText: ReturnType<typeof vi.fn>;
+  let writeText: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(videoApi.startStream).mockResolvedValue(STARTED);
@@ -368,12 +373,9 @@ describe('VideoSurface clipboard', () => {
     vi.mocked(inputApi.listenInputAck).mockResolvedValue(() => undefined);
     vi.mocked(inputApi.listenInputApplied).mockResolvedValue(() => undefined);
     vi.mocked(videoApi.listenClipboard).mockResolvedValue(() => undefined);
-    Object.assign(navigator, {
-      clipboard: {
-        readText: vi.fn(() => Promise.resolve('copied here')),
-        writeText: vi.fn(() => Promise.resolve()),
-      },
-    });
+    readText = vi.fn(() => Promise.resolve('copied here'));
+    writeText = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { clipboard: { readText, writeText } });
   });
 
   /** A sharing surface, and the handler it registered for host clipboard pushes. */
@@ -412,7 +414,7 @@ describe('VideoSurface clipboard', () => {
     });
 
     await waitFor(() => {
-      expect(navigator.clipboard.writeText).toHaveBeenCalledWith('from the remote machine');
+      expect(writeText).toHaveBeenCalledWith('from the remote machine');
     });
   });
 
@@ -423,12 +425,12 @@ describe('VideoSurface clipboard', () => {
     act(() => {
       push('round trip');
     });
-    vi.mocked(navigator.clipboard.readText).mockResolvedValue('round trip');
+    readText.mockResolvedValue('round trip');
 
     canvas.focus();
 
     await waitFor(() => {
-      expect(navigator.clipboard.readText).toHaveBeenCalled();
+      expect(readText).toHaveBeenCalled();
     });
     expect(videoApi.sendClipboard).not.toHaveBeenCalled();
   });
@@ -460,7 +462,7 @@ describe('VideoSurface clipboard', () => {
     canvas.focus();
 
     expect(videoApi.listenClipboard).not.toHaveBeenCalled();
-    expect(navigator.clipboard.readText).not.toHaveBeenCalled();
+    expect(readText).not.toHaveBeenCalled();
     expect(videoApi.sendClipboard).not.toHaveBeenCalled();
   });
 });
