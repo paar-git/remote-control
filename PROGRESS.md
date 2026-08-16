@@ -62,13 +62,21 @@ checksum before anything is installed and never installing without confirmation.
 
 ## What does not work yet
 
-**The remote screen cannot be driven.** It can now be *seen*: the host captures a
-display, sends only the tiles that changed, and the viewer paints them onto a canvas.
-What is missing is the other half — nothing on the controlling side captures a keystroke
-or a pointer movement and puts it on the wire. The input layer beneath that gap is
-complete and tested, including the per-OS shortcut translation, but it has no
-controller-side producer, so `control_input` is still granted and enforced with nothing
-consuming it.
+**Some chords never reach the remote machine.** `Alt+Tab`, `Ctrl+Alt+Del` and the rest
+of what an operating system reserves for itself are intercepted by the *operator's* own
+OS before this app sees the keystroke. Forwarding them needs low-level keyboard hooking,
+which is not built. Everything else about driving the screen works: the surface captures
+keys, pointer motion, clicks and the wheel while it holds focus, and `control_input` is
+now granted, enforced *and* consumed.
+
+**Character keys are injected by US-layout character.** A letter key is delivered to the
+host as the character a US layout would produce, so a host running a non-US layout may
+type a different character than the operator pressed. Chords and intents are unaffected;
+this is a property of the injection backend, not of the translation layer.
+
+**Clipboard sync does not exist.** Copy on one machine does not make the text available
+on the other. The `Copy` intent presses the host's own Copy chord, which fills the
+*host's* clipboard — there is no channel carrying its contents back.
 
 Also absent from the video path: H.264 and every other lossy codec (the variants exist
 and negotiation refuses them), clipboard sync, adaptive quality, and viewing more than

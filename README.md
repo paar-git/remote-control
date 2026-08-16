@@ -4,20 +4,24 @@ Private remote access between machines **you own**. You type an address, the per
 the other machine clicks Accept, and you are connected. No account, no sign-in, no
 third-party cloud in the path.
 
-> **Status: you can see the remote screen, but not yet drive it.** Two machines can
-> find each other by address and admit each other in one of four ways — incoming
-> access being on, then a trusted identity, an unattended password, or a human
-> clicking Accept — and hold a session carrying the remote display, file transfer and
-> system monitoring. The window is four categories: Remote Control, My Devices,
-> Sessions and Settings.
+> **Status: you can see the remote screen and drive it.** Two machines can find each
+> other by address and admit each other in one of four ways — incoming access being on,
+> then a trusted identity, an unattended password, or a human clicking Accept — and hold
+> a session carrying the remote display, keyboard and pointer control, file transfer and
+> system monitoring. The window is four categories: Remote Control, My Devices, Sessions
+> and Settings.
 >
 > The display is lossless and sends only the tiles that changed, so a still desktop
-> costs nothing. What is missing is the controlling half of input: the translation
-> layer that turns a shortcut into whatever the remote OS calls it is complete and
-> tested, but nothing on the viewer captures a keystroke and puts it on the wire yet.
-> Screen capture is verified on Windows; macOS and Linux compile and are tested in CI
-> but have never captured a frame. See [`PROGRESS.md`](PROGRESS.md) for exactly what
-> works today.
+> costs nothing. Shortcuts cross machines by meaning rather than by key: the controller
+> recognises the chord its own OS taught the operator, and the host spells that meaning
+> however it spells it, so Copy is Copy in either direction. A toggle sends a chord
+> literally when a program needs the raw keys instead — `Ctrl+C` in a remote terminal is
+> SIGINT, not Copy.
+>
+> Still missing: `Alt+Tab` and the other chords the operator's own OS swallows before
+> this app sees them, clipboard sync, and any lossy codec. Screen capture is verified on
+> Windows; macOS and Linux compile and are tested in CI but have never captured a frame.
+> See [`PROGRESS.md`](PROGRESS.md) for exactly what works today.
 
 ## Design in one paragraph
 
