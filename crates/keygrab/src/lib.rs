@@ -22,10 +22,11 @@
 //!
 //! # What is implemented
 //!
-//! Windows only, so far. [`new_grab`] reports [`GrabError::Unsupported`] elsewhere
-//! rather than returning something that silently takes nothing — an operator told the
-//! grab is on, whose `Alt+Tab` still switches their local windows, would reasonably
-//! conclude the remote session was broken.
+//! Windows, macOS and X11. Each reports [`GrabError::Refused`] rather than returning
+//! something that silently takes nothing — an operator told the grab is on, whose
+//! `Alt+Tab` still switches their local windows, would reasonably conclude the remote
+//! session was broken. Wayland has no portable equivalent, so a Wayland session gets
+//! whatever `XWayland` can offer or a refusal.
 
 // The workspace warns on `unsafe_code`, and `rc-input` forbids it outright. This crate
 // is the exception that lets both of those stay true: every unsafe block in the project
@@ -35,14 +36,23 @@
 
 use std::sync::mpsc::Sender;
 
-use rc_input::grab::{GrabError, KeyGrab, NoGrab};
+use rc_input::grab::{GrabError, KeyGrab};
 use rc_input::intent::Chord;
 
 #[cfg(target_os = "windows")]
 mod windows;
-
 #[cfg(target_os = "windows")]
 pub use windows::WindowsKeyGrab;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::MacosKeyGrab;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use linux::LinuxKeyGrab;
 
 /// A grab for this platform, forwarding the chords it takes to `sink`.
 ///
@@ -59,40 +69,28 @@ pub fn new_grab(sink: Sender<Chord>) -> Result<Box<dyn KeyGrab + Send>, GrabErro
 /// # Errors
 /// Always [`GrabError::Unsupported`] on this platform: no backend is written yet.
 ///
-/// macOS needs a `CGEventTap` at `kCGHIDEventTap`, which requires the Accessibility
-/// grant. X11 needs `XGrabKey` per chord; Wayland has no portable equivalent at all and
-/// would need the compositor's cooperation.
-#[cfg(not(target_os = "windows"))]
+/// Wayland has no portable equivalent at all and would need the compositor's
+/// cooperation.
+#[cfg(target_os = "macos")]
+pub fn new_grab(sink: Sender<Chord>) -> Result<Box<dyn KeyGrab + Send>, GrabError> {
+    Ok(Box::new(MacosKeyGrab::new(sink)))
+}
+
+/// A grab for this platform, forwarding the chords it takes to `sink`.
+///
+/// # Errors
+/// [`GrabError::Refused`] where no X server can be reached, which includes a Wayland
+/// session with no `XWayland`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn new_grab(sink: Sender<Chord>) -> Result<Box<dyn KeyGrab + Send>, GrabError> {
+    Ok(Box::new(LinuxKeyGrab::new(sink)))
+}
+
+/// A grab for this platform, forwarding the chords it takes to `sink`.
+///
+/// # Errors
+/// Always [`GrabError::Unsupported`] on this platform: no backend is written yet.
+#[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
 pub fn new_grab(_sink: Sender<Chord>) -> Result<Box<dyn KeyGrab + Send>, GrabError> {
     Err(GrabError::Unsupported)
-}
-
-/// A grab that takes nothing, for callers that want a value rather than an error.
-///
-/// Distinct from [`new_grab`] failing: this one is chosen, not suffered. Used where the
-/// operator has turned grabbing off.
-#[must_use]
-pub fn disabled_grab() -> Box<dyn KeyGrab + Send> {
-    Box::new(NoGrab::new())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_disabled_grab_never_claims_to_hold_anything() {
-        // The interface reads `engaged` to tell the operator whether their Alt+Tab is
-        // going to the remote machine. A disabled grab that claimed otherwise would
-        // make that sentence a lie.
-        let grab = disabled_grab();
-        assert!(!grab.engaged());
-    }
-
-    #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn a_platform_without_a_backend_says_so_rather_than_taking_nothing_quietly() {
-        let (sink, _rx) = std::sync::mpsc::channel();
-        assert!(matches!(new_grab(sink), Err(GrabError::Unsupported)));
-    }
 }
