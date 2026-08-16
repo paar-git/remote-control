@@ -42,8 +42,16 @@ import {
   sendPointerMove,
   sendScroll,
 } from './inputApi.js';
+import { ClipboardSync } from './clipboardSync.js';
 import { applyRegion } from './video.js';
-import { listenStreamEnded, startStream, stopStream, type StreamStarted } from './videoApi.js';
+import {
+  listenClipboard,
+  listenStreamEnded,
+  sendClipboard,
+  startStream,
+  stopStream,
+  type StreamStarted,
+} from './videoApi.js';
 
 /** Frames requested per second. The agent may negotiate something slower. */
 const MAX_FPS = 30;
@@ -63,6 +71,7 @@ export function VideoSurface({
   capturing,
   passthrough,
   onPointerSample,
+  sharingClipboard,
 }: {
   /** Which of the agent's displays to capture. */
   readonly displayIndex: number;
@@ -92,6 +101,14 @@ export function VideoSurface({
    * the pointer is.
    */
   readonly onPointerSample: (x: number, y: number) => Crossing | null;
+  /**
+   * Whether the two machines share a clipboard.
+   *
+   * Required rather than optional, like {@link capturing}: clipboard text is the most
+   * sensitive thing this surface moves, and a caller that forgot the prop would share
+   * it by accident rather than by decision.
+   */
+  readonly sharingClipboard: boolean;
 }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [started, setStarted] = useState<StreamStarted | null>(null);
@@ -102,6 +119,8 @@ export function VideoSurface({
 
   // Codes currently held down, so they can be released if capture ends mid-chord.
   const heldKeys = useRef(new Set<string>());
+  // Breaks the clipboard echo. Both ends hold this; see `clipboardSync.ts`.
+  const clipboard = useRef(new ClipboardSync());
 
   useEffect(() => {
     let cancelled = false;
@@ -233,6 +252,53 @@ export function VideoSurface({
     };
   }, [active]);
 
+  // Clipboard, both directions. Reading the operator's own clipboard happens when this
+  // surface takes focus rather than on a timer: that is the moment they have turned
+  // their attention to the remote machine, and polling someone's clipboard in the
+  // background is a different thing to offer than syncing it when they start working.
+  useEffect(() => {
+    if (!sharingClipboard || error !== null) {
+      clipboard.current.reset();
+      return undefined;
+    }
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    listenClipboard((text) => {
+      if (cancelled || !clipboard.current.shouldApply(text)) return;
+      // Best effort: a webview can refuse a clipboard write, and there is nothing
+      // useful to tell the operator when it does.
+      void navigator.clipboard?.writeText(text).catch(() => undefined);
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [sharingClipboard, error]);
+
+  /** Read this machine's clipboard and publish it, if it has changed. */
+  const publishClipboard = useCallback(() => {
+    if (!sharingClipboard) return;
+    void navigator.clipboard
+      ?.readText()
+      .then((text) => {
+        if (clipboard.current.shouldPublish(text)) {
+          return sendClipboard(text).then(() => undefined);
+        }
+        return undefined;
+      })
+      // A refused read is the ordinary case on a window that has never been focused;
+      // it is not worth telling the operator about.
+      .catch(() => undefined);
+  }, [sharingClipboard]);
+
   // `wheel` is attached natively rather than through React, which registers it passively
   // at the root: a passive listener cannot `preventDefault`, so the operator's own page
   // would scroll alongside the remote one.
@@ -339,6 +405,7 @@ export function VideoSurface({
         aria-label={capturing ? 'Remote screen. Click to send keyboard and mouse input.' : undefined}
         onFocus={() => {
           setFocused(true);
+          publishClipboard();
         }}
         onBlur={() => {
           setFocused(false);

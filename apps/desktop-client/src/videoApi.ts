@@ -101,3 +101,32 @@ export async function listenStreamEnded(
     if (parsed.success) handler(parsed.data);
   });
 }
+
+/**
+ * The largest clipboard text this build will carry.
+ *
+ * Mirrors `MAX_CLIPBOARD_BYTES` in `crates/clipboard/src/sync.rs`. Checked here too so
+ * an oversized clipboard is dropped before it crosses the IPC boundary rather than
+ * after.
+ */
+export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
+
+/** Publish this machine's clipboard text to the host. */
+export function sendClipboard(text: string): Promise<null> {
+  return call('video_send_clipboard', z.null(), { text });
+}
+
+/**
+ * Subscribe to clipboard text the host publishes.
+ *
+ * Applied by the webview rather than by Rust, because the operator's clipboard is the
+ * one this window can reach. Nothing on the Rust side keeps a copy of the text.
+ */
+export async function listenClipboard(handler: (text: string) => void): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+
+  return listen('video://clipboard', (event) => {
+    const parsed = z.object({ text: z.string() }).safeParse(event.payload);
+    if (parsed.success) handler(parsed.data.text);
+  });
+}

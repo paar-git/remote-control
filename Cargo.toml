@@ -10,6 +10,7 @@ members = [
     "crates/updater",
     "crates/platform",
     "crates/input",
+    "crates/clipboard",
     "crates/video",
     "crates/host-agent",
     "apps/desktop-client/src-tauri",
@@ -34,6 +35,7 @@ rc-video = { path = "crates/video" }
 rc-storage = { path = "crates/storage" }
 rc-monitoring = { path = "crates/monitoring" }
 rc-file-transfer = { path = "crates/file-transfer" }
+rc-clipboard = { path = "crates/clipboard" }
 rc-updater = { path = "crates/updater" }
 rc-host-agent = { path = "crates/host-agent" }
 

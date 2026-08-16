@@ -20,12 +20,13 @@ path = "src/main.rs"
 # Real OS input injection and display enumeration. On by default for the agent,
 # which is the process that actually drives the machine.
 default = ["inject"]
-inject = ["rc-input/inject", "rc-video/capture"]
+inject = ["rc-input/inject", "rc-video/capture", "rc-clipboard/system"]
 
 [dependencies]
 async-trait = { workspace = true }
 rc-protocol = { workspace = true }
 rc-input = { workspace = true }
+rc-clipboard = { workspace = true }
 rc-platform = { workspace = true }
 rc-security = { workspace = true }
 rc-storage = { workspace = true }

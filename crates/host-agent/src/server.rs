@@ -721,6 +721,10 @@ impl AgentServer {
                                     session,
                                     source,
                                     server.config.features.remote_desktop,
+                                )
+                                .with_clipboard(
+                                    crate::video_service::new_clipboard(),
+                                    server.config.features.clipboard_sync,
                                 );
                                 tokio::spawn(async move {
                                     service.run(&mut reader).await;

@@ -55,6 +55,23 @@ const REGION_HEADER: usize = 16;
 /// stalls it, and this is one small message at the end of a stream, not a frame.
 pub const STREAM_ENDED_EVENT: &str = "video://stream-ended";
 
+/// Event carrying clipboard text the host published.
+///
+/// Announced rather than applied in Rust: the operator's clipboard is the webview's,
+/// and this process has no business holding a copy of text it is only relaying. The
+/// payload is never logged — `crates/host-agent/src/logging.rs` names clipboard
+/// contents among the things that must never reach a log, and the same rule applies on
+/// this side of the link.
+pub const CLIPBOARD_EVENT: &str = "video://clipboard";
+
+/// Clipboard text crossing the IPC boundary.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardTextDto {
+    /// The text. Never logged.
+    pub text: String,
+}
+
 /// Why a stream stopped, for the surface that was showing it.
 ///
 /// Without this, "the agent revoked `ViewScreen`", "the operator hung up" and "the
@@ -247,6 +264,35 @@ pub async fn video_request_keyframe(state: tauri::State<'_, Arc<AppState>>) -> R
         .map_err(|err| describe(&err))
 }
 
+/// Publish this machine's clipboard text to the agent.
+///
+/// The webview reads its own clipboard and hands the text here; nothing on this side
+/// holds a copy beyond the call. Oversized text is refused rather than truncated, for
+/// the same reason `rc_clipboard` refuses it: half a document pasted on the far end
+/// reads as corruption.
+///
+/// # Errors
+/// A string safe to show the operator: nothing is connected, no desktop channel is
+/// open, the text is too large, or the transport failed.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub async fn video_send_clipboard(
+    state: tauri::State<'_, Arc<AppState>>,
+    text: String,
+) -> Result<(), String> {
+    state
+        .require_permission(Permission::Clipboard)
+        .map_err(|err| err.message)?;
+    if text.len() > rc_clipboard::MAX_CLIPBOARD_BYTES {
+        return Err("That is too much text to share through the clipboard.".to_owned());
+    }
+    let manager = connection(&state)?;
+    manager
+        .video_send_clipboard(text)
+        .await
+        .map_err(|err| describe(&err))
+}
+
 /// Why the frame-reading task stopped.
 ///
 /// Kept as data rather than decided inline, so the one part of `read_frames` that is
@@ -318,7 +364,8 @@ async fn read_frames(
     mut decoder: Decoder,
     width: u32,
 ) {
-    let reason = read_frames_inner(&mut reader, &writer, &on_frame, &mut decoder, width).await;
+    let reason =
+        read_frames_inner(&app, &mut reader, &writer, &on_frame, &mut decoder, width).await;
     if let Some(reason) = reason
         && let Err(err) = app.emit(STREAM_ENDED_EVENT, ended_because(&reason))
     {
@@ -329,6 +376,7 @@ async fn read_frames(
 /// The read loop itself. Returns the reason it stopped, or `None` when there is
 /// nobody left to tell — the webview's own end of `on_frame` is what went away.
 async fn read_frames_inner(
+    app: &tauri::AppHandle,
     reader: &mut ChannelReader,
     writer: &Arc<tokio::sync::Mutex<rc_transport::ChannelWriter>>,
     on_frame: &Channel<InvokeResponseBody>,
@@ -391,9 +439,15 @@ async fn read_frames_inner(
                     message,
                 });
             }
-            // Displays, StreamStarted and clipboard updates are not this loop's
-            // concern; StreamStarted was already consumed before it started. Any
-            // future variant is ignored the same way rather than treated as fatal.
+            DesktopAgentMessage::ClipboardUpdate { text } => {
+                // Announced rather than written here: this process has no clipboard of
+                // its own to write to, and the webview is where the operator's
+                // clipboard actually lives.
+                let _ = app.emit(CLIPBOARD_EVENT, ClipboardTextDto { text });
+            }
+            // Displays and StreamStarted are not this loop's concern; StreamStarted was
+            // already consumed before it started. Any future variant is ignored the
+            // same way rather than treated as fatal.
             _ => {}
         }
     }

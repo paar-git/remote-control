@@ -76,6 +76,9 @@ export function SessionScreen({
   // Input is forwarded only where the other machine granted it. Capturing without the
   // grant would send every keystroke to a host that answers each one with a refusal.
   const canControl = permissions.includes('control_input');
+  // The most sensitive thing a session moves, and its own grant for that reason: a
+  // clipboard carries whatever its owner last copied, not what is on screen.
+  const canShareClipboard = permissions.includes('clipboard');
 
   // The host's monitors: asked for once, then kept current by the host's own unsolicited
   // pushes, because a monitor plugged in mid-session moves where every later coordinate
@@ -205,6 +208,7 @@ export function SessionScreen({
             capturing={canControl}
             passthrough={passthrough}
             onPointerSample={navigation.onPointer}
+            sharingClipboard={canShareClipboard}
           />
         ) : (
           <div className="flex h-full items-center justify-center p-6">

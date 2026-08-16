@@ -985,6 +985,22 @@ impl ConnectionManager {
         guard.send(&DesktopClientMessage::RequestKeyframe).await
     }
 
+    /// Publish this machine's clipboard text to the agent.
+    ///
+    /// Rides the video channel because the protocol puts `ClipboardUpdate` there, which
+    /// means clipboard sharing needs a desktop channel open — not a stream running, but
+    /// the channel itself.
+    ///
+    /// # Errors
+    /// The connection is gone, or no desktop channel is open.
+    pub async fn video_send_clipboard(&self, text: String) -> Result<(), TransportError> {
+        let writer = self.video_writer().await?;
+        let mut guard = writer.lock().await;
+        guard
+            .send(&DesktopClientMessage::ClipboardUpdate { text })
+            .await
+    }
+
     /// The video channel's write half, if a stream is open.
     async fn video_writer(&self) -> Result<Arc<Mutex<ChannelWriter>>, TransportError> {
         self.video

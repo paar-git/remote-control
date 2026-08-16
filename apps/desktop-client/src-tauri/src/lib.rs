@@ -373,6 +373,7 @@ pub fn run() {
             video_commands::video_start_stream,
             video_commands::video_stop_stream,
             video_commands::video_request_keyframe,
+            video_commands::video_send_clipboard,
             input_commands::input_pointer_move,
             input_commands::input_pointer_button,
             input_commands::input_scroll,

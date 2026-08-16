@@ -17,6 +17,19 @@
 //! with the real reason rather than silently falling back to something the client did
 //! not advertise it can decode.
 //!
+//! # The clipboard rides this channel, and is its own grant
+//!
+//! `DesktopClientMessage::ClipboardUpdate` arrives here because the protocol puts it
+//! here, so clipboard sharing lives for as long as the desktop channel does. It is
+//! gated on `Permission::Clipboard` rather than on `ControlInput`: a clipboard carries
+//! whatever its owner last copied, routinely a password or a key that was never on
+//! screen, so being allowed to type on a machine says nothing about being allowed to
+//! read that. Like every other grant here it is re-checked per message, never captured
+//! when the channel opens.
+//!
+//! Both ends watch their own clipboard, so the naive arrangement never settles — see
+//! [`rc_clipboard::ClipboardSync`], which holds the digest that breaks the echo.
+//!
 //! # A refusal is always a message, never silence
 //!
 //! A client waiting on `StreamStarted` that never arrives cannot tell a permission
@@ -27,6 +40,7 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use rc_clipboard::{ClipboardAccess, ClipboardSync};
 use rc_protocol::control::ErrorCode;
 use rc_protocol::desktop::{
     DesktopAgentMessage, DesktopClientMessage, QualityPreset, VideoCodec, VideoFrame,
@@ -64,6 +78,13 @@ struct Stream {
     force_keyframe: bool,
 }
 
+/// How often the host's own clipboard is re-read while a desktop channel is open.
+///
+/// Polled rather than subscribed because no platform this ships for offers a portable
+/// change notification. Half a second is below what a human notices between copying on
+/// one machine and pasting on the other, and costs one small read in between.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
+
 /// Serves the video channel for one connection.
 pub struct VideoService<S: CaptureSource> {
     writer: ChannelWriter,
@@ -72,6 +93,19 @@ pub struct VideoService<S: CaptureSource> {
     /// Whether this build was asked to serve video at all.
     enabled: bool,
     stream: Option<Stream>,
+    /// The machine's clipboard, when this build has one and the operator allowed it.
+    ///
+    /// A trait object rather than a second generic parameter: nothing here dispatches
+    /// on the concrete type, and threading one more parameter through every caller and
+    /// test would buy nothing.
+    clipboard: Option<Box<dyn ClipboardAccess + Send>>,
+    /// Whether the host's configuration allows clipboard sharing at all.
+    ///
+    /// Separate from the permission: the grant says this *session* may, the setting
+    /// says this *machine* does. Both must agree.
+    clipboard_enabled: bool,
+    /// The digest that stops the two ends echoing a clipboard back and forth forever.
+    clipboard_sync: ClipboardSync,
 }
 
 impl<S: CaptureSource> VideoService<S> {
@@ -84,7 +118,26 @@ impl<S: CaptureSource> VideoService<S> {
             source,
             enabled,
             stream: None,
+            clipboard: None,
+            clipboard_enabled: false,
+            clipboard_sync: ClipboardSync::new(),
         }
+    }
+
+    /// Serve the clipboard through `clipboard`, if the host's settings allow it.
+    ///
+    /// Left off by [`Self::new`] on purpose: a service that shares the clipboard by
+    /// default would do so on every build that happened to link a backend, rather than
+    /// because someone decided it should.
+    #[must_use]
+    pub fn with_clipboard(
+        mut self,
+        clipboard: Option<Box<dyn ClipboardAccess + Send>>,
+        enabled: bool,
+    ) -> Self {
+        self.clipboard = clipboard;
+        self.clipboard_enabled = enabled;
+        self
     }
 
     /// Serve messages and push frames until the channel closes.
@@ -96,6 +149,9 @@ impl<S: CaptureSource> VideoService<S> {
         // Only polled while a stream exists; reset to "now" whenever a message starts
         // or reshapes one, so a client never waits out the tail of a stale interval.
         let mut next_tick = Instant::now();
+        // Independent of the stream: a clipboard is worth sharing for as long as the
+        // desktop channel is open, including before anyone starts watching the screen.
+        let mut next_clipboard = Instant::now() + CLIPBOARD_POLL;
 
         loop {
             tokio::select! {
@@ -109,6 +165,9 @@ impl<S: CaptureSource> VideoService<S> {
                                 &self.session,
                                 &mut self.source,
                                 self.enabled,
+                                self.clipboard.as_mut(),
+                                self.clipboard_enabled,
+                                &mut self.clipboard_sync,
                                 message,
                             );
                             next_tick = Instant::now();
@@ -119,6 +178,19 @@ impl<S: CaptureSource> VideoService<S> {
                         // Clean close, or a peer that sent something malformed. Either
                         // way this channel is done.
                         Ok(None) | Err(_) => break,
+                    }
+                }
+
+                () = tokio::time::sleep_until(next_clipboard.into()), if self.clipboard.is_some() => {
+                    next_clipboard = Instant::now() + CLIPBOARD_POLL;
+
+                    if let Some(update) = Self::poll_clipboard(
+                        self.clipboard.as_mut(),
+                        self.clipboard_enabled,
+                        &mut self.clipboard_sync,
+                        &self.session,
+                    ) && self.send_all(vec![update]).await.is_err() {
+                        break;
                     }
                 }
 
@@ -146,11 +218,15 @@ impl<S: CaptureSource> VideoService<S> {
     ///
     /// A free-standing decision over the state it touches, so it can be exercised
     /// without a live QUIC stream underneath it.
+    #[allow(clippy::too_many_arguments)]
     fn decide(
         stream: &mut Option<Stream>,
         session: &Session,
         source: &mut S,
         enabled: bool,
+        clipboard: Option<&mut Box<dyn ClipboardAccess + Send>>,
+        clipboard_enabled: bool,
+        clipboard_sync: &mut ClipboardSync,
         message: DesktopClientMessage,
     ) -> Vec<DesktopAgentMessage> {
         match message {
@@ -224,10 +300,9 @@ impl<S: CaptureSource> VideoService<S> {
                 ErrorCode::Unsupported,
                 "secure_attention_sequence is not handled on the video channel in this build",
             )],
-            DesktopClientMessage::ClipboardUpdate { .. } => vec![Self::refuse(
-                ErrorCode::Unsupported,
-                "clipboard_update is not handled on the video channel in this build",
-            )],
+            DesktopClientMessage::ClipboardUpdate { text } => {
+                Self::apply_clipboard(clipboard, clipboard_enabled, clipboard_sync, session, &text)
+            }
             // `DesktopClientMessage` is `#[non_exhaustive]`: this is now solely for a
             // variant a future protocol version adds that this build does not know
             // about yet, not for any variant named above.
@@ -450,6 +525,70 @@ impl<S: CaptureSource> VideoService<S> {
         Vec::new()
     }
 
+    /// Write text the peer published onto this machine's clipboard.
+    ///
+    /// Refuses rather than ignores: a client that pasted into a session which may not
+    /// share a clipboard needs to know its text went nowhere, not watch it vanish.
+    fn apply_clipboard(
+        clipboard: Option<&mut Box<dyn ClipboardAccess + Send>>,
+        enabled: bool,
+        sync: &mut ClipboardSync,
+        session: &Session,
+        text: &str,
+    ) -> Vec<DesktopAgentMessage> {
+        if session.require(Permission::Clipboard).is_err() {
+            return vec![Self::refuse(
+                ErrorCode::Forbidden,
+                "this session may not share the clipboard",
+            )];
+        }
+        if !enabled {
+            return vec![Self::refuse(
+                ErrorCode::Unsupported,
+                "this machine has clipboard sharing turned off",
+            )];
+        }
+        let Some(clipboard) = clipboard else {
+            return vec![Self::refuse(
+                ErrorCode::Unsupported,
+                "this machine has no reachable clipboard",
+            )];
+        };
+        // Oversized or empty text stops here, and so does anything this end already
+        // holds -- which is what keeps a write from waking its own watcher.
+        if !sync.should_apply(text) {
+            return Vec::new();
+        }
+        match clipboard.write_text(text) {
+            Ok(()) => Vec::new(),
+            Err(err) => {
+                tracing::debug!(%err, "the clipboard could not be written");
+                vec![Self::refuse(
+                    ErrorCode::Internal,
+                    "the clipboard could not be written on this machine",
+                )]
+            }
+        }
+    }
+
+    /// This machine's clipboard, if it has changed and the session may see it.
+    ///
+    /// Returns nothing at all in the ordinary case -- an unchanged clipboard is not
+    /// news, and this is called on every poll tick.
+    fn poll_clipboard(
+        clipboard: Option<&mut Box<dyn ClipboardAccess + Send>>,
+        enabled: bool,
+        sync: &mut ClipboardSync,
+        session: &Session,
+    ) -> Option<DesktopAgentMessage> {
+        if !enabled || session.require(Permission::Clipboard).is_err() {
+            return None;
+        }
+        let text = clipboard?.read_text().ok()?;
+        sync.should_publish(&text)
+            .then_some(DesktopAgentMessage::ClipboardUpdate { text })
+    }
+
     fn refuse(code: ErrorCode, message: impl Into<String>) -> DesktopAgentMessage {
         DesktopAgentMessage::Error {
             code,
@@ -499,6 +638,30 @@ pub fn new_source() -> rc_video::Result<rc_video::capture::mock::MockSource> {
     ))
 }
 
+/// This machine's clipboard, or `None` where there is not one to reach.
+///
+/// `None` rather than an error: a host with no clipboard is a host that cannot share
+/// one, which the service already reports per message. Failing to open it must not stop
+/// a video channel that would otherwise work.
+#[cfg(feature = "inject")]
+#[must_use]
+pub fn new_clipboard() -> Option<Box<dyn ClipboardAccess + Send>> {
+    match rc_clipboard::SystemClipboard::open() {
+        Ok(clipboard) => Some(Box::new(clipboard)),
+        Err(err) => {
+            tracing::info!(%err, "clipboard sharing is unavailable on this machine");
+            None
+        }
+    }
+}
+
+/// This machine's clipboard, or `None` where there is not one to reach.
+#[cfg(not(feature = "inject"))]
+#[must_use]
+pub const fn new_clipboard() -> Option<Box<dyn ClipboardAccess + Send>> {
+    None
+}
+
 /// Clamp a client's requested ceiling into `1..=60` and turn it into a tick period.
 fn fps_interval(max_fps: u8) -> Duration {
     let fps = max_fps.clamp(1, 60);
@@ -540,6 +703,9 @@ mod tests {
         source: S,
         enabled: bool,
         stream: Option<Stream>,
+        clipboard: Option<Box<dyn ClipboardAccess + Send>>,
+        clipboard_enabled: bool,
+        clipboard_sync: ClipboardSync,
     }
 
     impl<S: CaptureSource> Harness<S> {
@@ -549,7 +715,41 @@ mod tests {
                 source,
                 enabled,
                 stream: None,
+                clipboard: None,
+                clipboard_enabled: false,
+                clipboard_sync: ClipboardSync::new(),
             }
+        }
+
+        /// Give this host a working clipboard the tests can inspect.
+        fn with_clipboard(mut self, enabled: bool) -> Self {
+            self.clipboard = Some(Box::new(rc_clipboard::MemoryClipboard::new()));
+            self.clipboard_enabled = enabled;
+            self
+        }
+
+        /// What is on this host's clipboard right now.
+        fn clipboard_text(&mut self) -> Option<String> {
+            self.clipboard.as_mut()?.read_text().ok()
+        }
+
+        /// Put text on this host's clipboard, as a user pressing Copy would.
+        fn copy_locally(&mut self, text: &str) {
+            self.clipboard
+                .as_mut()
+                .expect("this harness has a clipboard")
+                .write_text(text)
+                .expect("an in-memory clipboard always accepts a write");
+        }
+
+        /// One clipboard poll, and whatever it decided to publish.
+        fn poll_clipboard(&mut self) -> Option<DesktopAgentMessage> {
+            VideoService::<S>::poll_clipboard(
+                self.clipboard.as_mut(),
+                self.clipboard_enabled,
+                &mut self.clipboard_sync,
+                &self.session,
+            )
         }
 
         /// One client message in, the agent's replies out.
@@ -559,6 +759,9 @@ mod tests {
                 &self.session,
                 &mut self.source,
                 self.enabled,
+                self.clipboard.as_mut(),
+                self.clipboard_enabled,
+                &mut self.clipboard_sync,
                 message,
             )
         }
@@ -572,6 +775,123 @@ mod tests {
         fn revoke(&mut self) {
             self.session = session_with(PermissionSet::NONE);
         }
+    }
+
+    /// A session allowed to share a clipboard, and to watch a screen.
+    fn clipboard_session() -> PermissionSet {
+        PermissionSet::NONE
+            .with(Permission::ViewScreen)
+            .with(Permission::Clipboard)
+    }
+
+    #[test]
+    fn a_session_without_the_clipboard_grant_is_refused_not_ignored() {
+        // Vanishing text is the worst outcome: the operator pasted, saw nothing happen,
+        // and has no way to tell a refusal from a slow link.
+        let mut harness = Harness::new(viewing(), MockSource::new(8, 8), true).with_clipboard(true);
+
+        let replies = harness.handle(DesktopClientMessage::ClipboardUpdate {
+            text: "secret".to_owned(),
+        });
+
+        assert!(matches!(
+            replies.as_slice(),
+            [DesktopAgentMessage::Error {
+                code: ErrorCode::Forbidden,
+                ..
+            }]
+        ));
+        assert_eq!(
+            harness.clipboard_text(),
+            None,
+            "nothing may reach the clipboard"
+        );
+    }
+
+    #[test]
+    fn a_machine_with_clipboard_sharing_turned_off_refuses_even_a_granted_session() {
+        // The grant says this session may; the setting says this machine does. A
+        // permission cannot override the machine's own configuration.
+        let mut harness =
+            Harness::new(clipboard_session(), MockSource::new(8, 8), true).with_clipboard(false);
+
+        let replies = harness.handle(DesktopClientMessage::ClipboardUpdate {
+            text: "secret".to_owned(),
+        });
+
+        assert!(matches!(
+            replies.as_slice(),
+            [DesktopAgentMessage::Error {
+                code: ErrorCode::Unsupported,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_granted_session_reaches_the_clipboard() {
+        let mut harness =
+            Harness::new(clipboard_session(), MockSource::new(8, 8), true).with_clipboard(true);
+
+        let replies = harness.handle(DesktopClientMessage::ClipboardUpdate {
+            text: "shared".to_owned(),
+        });
+
+        assert!(replies.is_empty(), "a successful write says nothing back");
+        assert_eq!(harness.clipboard_text().as_deref(), Some("shared"));
+    }
+
+    #[test]
+    fn text_the_client_sent_is_not_published_straight_back_to_it() {
+        // The echo this whole design exists to stop: without it the host's own watcher
+        // sees the write it just made and returns it to the sender, forever.
+        let mut harness =
+            Harness::new(clipboard_session(), MockSource::new(8, 8), true).with_clipboard(true);
+
+        harness.handle(DesktopClientMessage::ClipboardUpdate {
+            text: "round trip".to_owned(),
+        });
+
+        assert!(harness.poll_clipboard().is_none());
+    }
+
+    #[test]
+    fn something_copied_on_the_host_is_published_once() {
+        let mut harness =
+            Harness::new(clipboard_session(), MockSource::new(8, 8), true).with_clipboard(true);
+        harness.copy_locally("from the host");
+
+        let first = harness.poll_clipboard();
+        let second = harness.poll_clipboard();
+
+        assert!(matches!(
+            first,
+            Some(DesktopAgentMessage::ClipboardUpdate { ref text }) if text == "from the host"
+        ));
+        assert!(second.is_none(), "an unchanged clipboard is not news");
+    }
+
+    #[test]
+    fn the_host_clipboard_is_never_published_to_a_session_without_the_grant() {
+        // The direction that leaks: this one sends the host's own copied text out.
+        let mut harness = Harness::new(viewing(), MockSource::new(8, 8), true).with_clipboard(true);
+        harness.copy_locally("a password");
+
+        assert!(harness.poll_clipboard().is_none());
+    }
+
+    #[test]
+    fn a_revoked_clipboard_grant_stops_publishing_mid_session() {
+        // Authorization is re-asked per poll, exactly as it is per frame and per event.
+        let mut harness =
+            Harness::new(clipboard_session(), MockSource::new(8, 8), true).with_clipboard(true);
+        harness.copy_locally("first");
+        assert!(harness.poll_clipboard().is_some());
+
+        harness.revoke();
+        harness.copy_locally("second");
+
+        assert!(harness.poll_clipboard().is_none());
     }
 
     /// Two displays of different sizes, so a `Reconfigure` onto another display can be
