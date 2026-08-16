@@ -395,13 +395,7 @@ export function VideoSurface({
   // granted would move the mouse over the remote screen, see nothing happen, and
   // reasonably conclude control had never been granted at all.
   const invitation: string | null =
-    error !== null
-      ? null
-      : capturing
-        ? focused
-          ? null
-          : 'Click to control'
-        : 'View only';
+    error !== null ? null : capturing ? (focused ? null : 'Click to control') : 'View only';
 
   if (error !== null) {
     return (
@@ -431,7 +425,9 @@ export function VideoSurface({
         // nothing is a keyboard trap for anyone tabbing through the session screen.
         tabIndex={capturing ? 0 : undefined}
         role={capturing ? 'application' : undefined}
-        aria-label={capturing ? 'Remote screen. Click to send keyboard and mouse input.' : undefined}
+        aria-label={
+          capturing ? 'Remote screen. Click to send keyboard and mouse input.' : undefined
+        }
         onFocus={() => {
           setFocused(true);
           publishClipboard();

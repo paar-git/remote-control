@@ -208,17 +208,15 @@ export default function App(): React.JSX.Element {
       {inboundBanner}
       {inSession && live ? (
         <div className="min-h-0 flex-1">
-        <SessionScreen
-          connection={connection.state}
-          deviceName={
-            connection.state.state === 'connected' ? connection.state.deviceName : null
-          }
-          permissions={connection.state.state === 'connected' ? connection.state.permissions : []}
-          onToast={setToast}
-          onLeave={() => {
-            setInSession(false);
-          }}
-        />
+          <SessionScreen
+            connection={connection.state}
+            deviceName={connection.state.state === 'connected' ? connection.state.deviceName : null}
+            permissions={connection.state.state === 'connected' ? connection.state.permissions : []}
+            onToast={setToast}
+            onLeave={() => {
+              setInSession(false);
+            }}
+          />
         </div>
       ) : (
         <AppShell

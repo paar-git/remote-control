@@ -205,7 +205,11 @@ describe('SessionScreen display picker', () => {
     await userEvent.click(await screen.findByRole('button', { name: /DELL U2720Q/i }));
 
     await waitFor(() => {
-      expect(videoApi.startStream).toHaveBeenCalledWith(1, expect.any(Number), expect.any(Function));
+      expect(videoApi.startStream).toHaveBeenCalledWith(
+        1,
+        expect.any(Number),
+        expect.any(Function),
+      );
     });
   });
 

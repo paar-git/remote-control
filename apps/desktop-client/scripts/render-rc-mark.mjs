@@ -32,7 +32,9 @@ function markSvg(canvas, pad) {
 function writePng(name, canvas, pad) {
   const png = new Resvg(markSvg(canvas, pad), {
     fitTo: { mode: 'width', value: canvas },
-  }).render().asPng();
+  })
+    .render()
+    .asPng();
   writeFileSync(join(icons, name), png);
 }
 

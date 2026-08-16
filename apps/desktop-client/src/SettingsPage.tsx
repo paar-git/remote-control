@@ -256,8 +256,8 @@ export function SettingsPage({
           <div className="min-w-0">
             <p className="text-sm">Moving between displays</p>
             <p className="mt-0.5 text-[13px] text-(--color-text-secondary)">
-              What happens when the pointer reaches the edge of a remote display and
-              another one is beyond it.
+              What happens when the pointer reaches the edge of a remote display and another one is
+              beyond it.
             </p>
           </div>
           <fieldset>
@@ -328,35 +328,35 @@ export function SettingsPage({
             </p>
           </div>
           <fieldset>
-          <legend className="sr-only">Theme</legend>
-          <div className="inline-flex rounded-[4px] border border-(--color-border) bg-(--color-page) p-0.5">
-            {(
-              [
-                ['light', 'Light'],
-                ['dark', 'Dark'],
-                ['system', 'System'],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={theme === value}
-                className={
-                  'rounded-[3px] px-3 py-1.5 text-sm font-medium transition-colors ' +
-                  (theme === value
-                    ? 'bg-(--color-card) text-(--color-text)'
-                    : 'text-(--color-text-secondary) hover:text-(--color-text)')
-                }
-                onClick={() => {
-                  changeTheme(value);
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </fieldset>
+            <legend className="sr-only">Theme</legend>
+            <div className="inline-flex rounded-[4px] border border-(--color-border) bg-(--color-page) p-0.5">
+              {(
+                [
+                  ['light', 'Light'],
+                  ['dark', 'Dark'],
+                  ['system', 'System'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === value}
+                  className={
+                    'rounded-[3px] px-3 py-1.5 text-sm font-medium transition-colors ' +
+                    (theme === value
+                      ? 'bg-(--color-card) text-(--color-text)'
+                      : 'text-(--color-text-secondary) hover:text-(--color-text)')
+                  }
+                  onClick={() => {
+                    changeTheme(value);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </fieldset>
         </div>
       </SettingsSection>
 

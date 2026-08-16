@@ -5,11 +5,7 @@
 
 import { RC_MARK_COLOR, RC_MARK_LINK, RC_MARK_SCREENS, RC_MARK_VIEWBOX } from '../brand/rc-mark';
 
-export function RcMark({
-  size = 21,
-}: {
-  readonly size?: number | undefined;
-}): React.JSX.Element {
+export function RcMark({ size = 21 }: { readonly size?: number | undefined }): React.JSX.Element {
   return (
     <svg
       width={size}

@@ -34,11 +34,7 @@ function display(
 }
 
 const twoAcross = [display(0, 0, 0, 1920, 1080, true), display(1, 1920, 0)];
-const tee = [
-  display(0, 0, 0, 1920, 1080, true),
-  display(1, 1920, 0),
-  display(2, 960, -1080),
-];
+const tee = [display(0, 0, 0, 1920, 1080, true), display(1, 1920, 0), display(2, 960, -1080)];
 
 function memoryStorage(): Storage {
   const map = new Map<string, string>();

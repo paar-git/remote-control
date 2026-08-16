@@ -49,8 +49,7 @@ export function SplitButton({
     variant === 'primary'
       ? 'bg-(--color-accent) text-(--color-accent-text) transition-colors duration-125 hover:bg-(--color-accent-hover) active:bg-(--color-accent-pressed)'
       : 'bg-(--color-hover) text-(--color-text) transition-colors duration-125 hover:bg-(--color-border)';
-  const divider =
-    variant === 'primary' ? 'bg-(--color-accent-pressed)' : 'bg-(--color-border)';
+  const divider = variant === 'primary' ? 'bg-(--color-accent-pressed)' : 'bg-(--color-border)';
 
   return (
     <div ref={root} className="relative inline-flex">
@@ -83,7 +82,9 @@ export function SplitButton({
           onClick={() => {
             setOpen((current) => !current);
           }}
-          className={tall ? 'flex w-12 items-center justify-center' : 'flex w-10 items-center justify-center'}
+          className={
+            tall ? 'flex w-12 items-center justify-center' : 'flex w-10 items-center justify-center'
+          }
         >
           <ChevronDown className="size-4" />
         </button>

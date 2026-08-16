@@ -62,6 +62,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Same reason as in ci.yml: the hosted image's unused toolchains crowd out a
+      # workspace that grew when screen capture arrived, and a full disk surfaces as
+      # a confusing mid-compile error rather than as an out-of-space message.
+      - name: Reclaim disk space
+        if: runner.os == 'Linux'
+        run: |
+          echo "Before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc             /usr/local/share/boost /usr/local/lib/node_modules             /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          echo "After:"; df -h / | tail -1
+
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
         run: |
@@ -89,9 +100,40 @@ jobs:
         if: matrix.rust_target != ''
         run: rustup target add ${{ matrix.rust_target }}
 
+      # Retried because macOS DMG creation is flaky on hosted runners, not because
+      # the build is: `hdiutil` intermittently leaves a `diskimages-helper` process
+      # holding the image, and `bundle_dmg.sh` then fails after the application has
+      # already compiled and bundled successfully. The Rust artifacts are cached in
+      # `target/`, so a second attempt re-runs the packaging in seconds rather than
+      # rebuilding. Only genuine, repeated failures reach the job result.
       - name: Build Tauri bundle
         working-directory: apps/desktop-client
-        run: pnpm tauri build --bundles ${{ matrix.bundle }} ${{ matrix.rust_target != '' && format('--target {0}', matrix.rust_target) || '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          build() {
+            pnpm tauri build --bundles ${{ matrix.bundle }} ${{ matrix.rust_target != '' && format('--target {0}', matrix.rust_target) || '' }}
+          }
+          for attempt in 1 2 3; do
+            echo "::group::Bundle attempt $attempt"
+            if build; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::Bundle attempt $attempt failed."
+            if [ "$attempt" -lt 3 ]; then
+              # Let any stuck disk-image helper exit before trying again.
+              if [ "$RUNNER_OS" = "macOS" ]; then
+                pkill -f diskimages-helper || true
+                sleep 15
+              else
+                sleep 5
+              fi
+            fi
+          done
+          echo "::error::Bundling failed on every attempt."
+          exit 1
         env:
           RC_UPDATE_MANIFEST_PUBLIC_KEYS_B64: ${{ vars.RELEASE_MANIFEST_PUBLIC_KEYS_B64 || vars.RELEASE_MANIFEST_PUBLIC_KEY_B64 }}
 

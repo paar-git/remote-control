@@ -150,10 +150,7 @@ export function primaryDisplay(displays: readonly RemoteDisplay[]): RemoteDispla
  * not — so a monitor unplugged mid-session moves the viewer somewhere real instead of
  * leaving it pointed at nothing.
  */
-export function resolveDisplay(
-  displays: readonly RemoteDisplay[],
-  index: number,
-): number | null {
+export function resolveDisplay(displays: readonly RemoteDisplay[], index: number): number | null {
   if (findDisplay(displays, index) !== null) return index;
   return primaryDisplay(displays)?.index ?? null;
 }
@@ -224,8 +221,7 @@ export function adjacentDisplay(
     // pick the right one rather than always the lowest-numbered.
     let miss = 0;
     if (at !== null) {
-      const [start, end] =
-        edge === 'left' || edge === 'right' ? [cTop, cBottom] : [cLeft, cRight];
+      const [start, end] = edge === 'left' || edge === 'right' ? [cTop, cBottom] : [cLeft, cRight];
       if (at < start) miss = start - at;
       else if (at >= end) miss = at - end + 1;
     }

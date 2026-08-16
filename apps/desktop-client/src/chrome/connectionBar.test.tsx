@@ -93,7 +93,9 @@ describe('ConnectionBar', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Connect options' }));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Connect with password…' }));
     await userEvent.type(screen.getByLabelText('Password'), 'correct horse');
-    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Connect' }));
+    await userEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Connect' }),
+    );
 
     expect(connectToAddress).toHaveBeenCalledWith('192.168.1.77:7443', 'correct horse');
   });

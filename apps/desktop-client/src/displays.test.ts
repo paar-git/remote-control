@@ -281,8 +281,9 @@ describe('layout for the picker', () => {
 
 describe('describing a display', () => {
   it('names resolution, refresh rate and scaling', () => {
-    expect(describeDisplay(display(0, 0, 0, 2560, 1440, true, { refreshHz: 144, scaleFactor: 2 })))
-      .toBe('2560×1440 · 144 Hz · 200%');
+    expect(
+      describeDisplay(display(0, 0, 0, 2560, 1440, true, { refreshHz: 144, scaleFactor: 2 })),
+    ).toBe('2560×1440 · 144 Hz · 200%');
   });
 
   it('omits what the host did not report', () => {

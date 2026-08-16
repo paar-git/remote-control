@@ -55,7 +55,10 @@ export function ThisDevice({
           <p className="truncate text-[15px] font-medium" title={status.machineName}>
             {status.machineName}
           </p>
-          <p role="status" className="mt-0.5 flex items-center gap-1.5 text-[13px] text-(--color-text-secondary)">
+          <p
+            role="status"
+            className="mt-0.5 flex items-center gap-1.5 text-[13px] text-(--color-text-secondary)"
+          >
             <span
               aria-hidden="true"
               className={

@@ -71,13 +71,7 @@ describe('modifierBits', () => {
 
 describe('buttonName', () => {
   it('names the buttons the protocol knows', () => {
-    expect([0, 1, 2, 3, 4].map(buttonName)).toEqual([
-      'left',
-      'middle',
-      'right',
-      'back',
-      'forward',
-    ]);
+    expect([0, 1, 2, 3, 4].map(buttonName)).toEqual(['left', 'middle', 'right', 'back', 'forward']);
   });
 
   it('drops a button the protocol has no name for rather than guessing', () => {

@@ -5,12 +5,7 @@
 import { useCallback, useRef, useState } from 'react';
 
 import { parseAddress } from './address.js';
-import {
-  connectToAddress,
-  getConnectionState,
-  isBusy,
-  type ConnectionState,
-} from './api.js';
+import { connectToAddress, getConnectionState, isBusy, type ConnectionState } from './api.js';
 import type { Toast } from './ui';
 
 export function useConnectForm({

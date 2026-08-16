@@ -89,7 +89,13 @@ describe('connection state', () => {
 
     expect(isBusy({ state: 'offline' })).toBe(false);
     expect(
-      isBusy({ state: 'connected', sessionId: 's', address: 'x', permissions: [], deviceName: 'x' }),
+      isBusy({
+        state: 'connected',
+        sessionId: 's',
+        address: 'x',
+        permissions: [],
+        deviceName: 'x',
+      }),
     ).toBe(false);
     expect(isBusy({ state: 'failed', message: 'no' })).toBe(false);
     expect(isBusy({ state: 'refused', reason: 'not_authorized', message: 'no' })).toBe(false);

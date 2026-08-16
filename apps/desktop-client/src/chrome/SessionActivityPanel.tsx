@@ -21,10 +21,14 @@ export function SessionActivityPanel({
     <Panel testId="session-activity-panel">
       <PanelHeader
         title="Session activity"
-        trailing={records.length > 0 ? <PanelSeeAll label="See all" onClick={onViewAll} /> : undefined}
+        trailing={
+          records.length > 0 ? <PanelSeeAll label="See all" onClick={onViewAll} /> : undefined
+        }
       />
       {shown.length === 0 ? (
-        <p className="px-[22px] pb-6 text-[13px] text-(--color-text-muted)">No session activity yet.</p>
+        <p className="px-[22px] pb-6 text-[13px] text-(--color-text-muted)">
+          No session activity yet.
+        </p>
       ) : (
         <ul>
           {shown.map((record, index) => {
@@ -62,7 +66,9 @@ export function SessionActivityPanel({
                       {formatDayTime(record.startedMs)}
                     </p>
                     {duration !== null && (
-                      <p className="font-mono text-[13px] text-(--color-text-secondary)">{duration}</p>
+                      <p className="font-mono text-[13px] text-(--color-text-secondary)">
+                        {duration}
+                      </p>
                     )}
                   </div>
                 </div>

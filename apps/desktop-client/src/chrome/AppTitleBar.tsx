@@ -59,7 +59,10 @@ export function AppTitleBar({
         <span className="relative flex items-center justify-center gap-2 bg-(--color-page) px-5 text-[15px] text-(--color-text)">
           <Monitor aria-hidden="true" className="size-4" />
           Control
-          <span aria-hidden="true" className="absolute inset-x-0 bottom-0 h-0.5 bg-(--color-accent)" />
+          <span
+            aria-hidden="true"
+            className="absolute inset-x-0 bottom-0 h-0.5 bg-(--color-accent)"
+          />
         </span>
         <button
           type="button"
@@ -71,20 +74,13 @@ export function AppTitleBar({
         </button>
       </nav>
 
-      <div
-        className="min-w-0 flex-1"
-        data-tauri-drag-region=""
-        onDoubleClick={toggleMaximize}
-      />
+      <div className="min-w-0 flex-1" data-tauri-drag-region="" onDoubleClick={toggleMaximize} />
 
       <div className="flex shrink-0">
         <WindowButton label="Minimize" onClick={() => void minimizeWindow()}>
           <CaptionMinimize />
         </WindowButton>
-        <WindowButton
-          label={maximized ? 'Restore' : 'Maximize'}
-          onClick={toggleMaximize}
-        >
+        <WindowButton label={maximized ? 'Restore' : 'Maximize'} onClick={toggleMaximize}>
           {maximized ? <CaptionRestore /> : <CaptionMaximize />}
         </WindowButton>
         <WindowButton label="Close" onClick={() => void closeWindow()} danger>
@@ -135,7 +131,15 @@ function CaptionMinimize(): React.JSX.Element {
 function CaptionMaximize(): React.JSX.Element {
   return (
     <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-      <rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" />
+      <rect
+        x="1.5"
+        y="1.5"
+        width="7"
+        height="7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1"
+      />
     </svg>
   );
 }
@@ -144,7 +148,15 @@ function CaptionRestore(): React.JSX.Element {
   return (
     <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
       <path d="M3 3h5v5" fill="none" stroke="currentColor" strokeWidth="1" />
-      <rect x="1.5" y="3.5" width="5.5" height="5.5" fill="var(--color-titlebar)" stroke="currentColor" strokeWidth="1" />
+      <rect
+        x="1.5"
+        y="3.5"
+        width="5.5"
+        height="5.5"
+        fill="var(--color-titlebar)"
+        stroke="currentColor"
+        strokeWidth="1"
+      />
     </svg>
   );
 }

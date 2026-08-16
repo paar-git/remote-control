@@ -71,6 +71,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The hosted Ubuntu image ships ~25 GB of toolchains this project never uses,
+      # and the workspace outgrew what was left once screen capture pulled in
+      # pipewire, drm and wayland: builds began failing with "No space left on
+      # device" partway through, which reads as a compiler error rather than as a
+      # full disk. Reclaiming the unused images is cheaper than trimming real work.
+      - name: Reclaim disk space
+        if: runner.os == 'Linux'
+        run: |
+          echo "Before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc             /usr/local/share/boost /usr/local/lib/node_modules             /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          echo "After:"; df -h / | tail -1
+
       # The desktop client links against the system webkit stack, so the Tauri
       # packaging dependencies are required even for a check-only build.
       - name: Install Linux build dependencies

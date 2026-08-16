@@ -14,8 +14,7 @@ export function DeviceAvatar({
   readonly size?: 'sm' | 'md' | 'lg' | undefined;
 }): React.JSX.Element {
   const initial = (name.trim().charAt(0) || '?').toUpperCase();
-  const box =
-    size === 'sm' ? 'size-[30px]' : size === 'lg' ? 'size-[50px]' : 'size-10';
+  const box = size === 'sm' ? 'size-[30px]' : size === 'lg' ? 'size-[50px]' : 'size-10';
   const glyph = size === 'lg' ? 'size-6' : size === 'sm' ? 'size-[18px]' : 'size-5';
 
   return (

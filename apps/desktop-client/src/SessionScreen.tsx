@@ -123,9 +123,7 @@ export function SessionScreen({
   }, [hasPicker]);
 
   const pendingTarget =
-    navigation.pending === null
-      ? null
-      : findDisplay(displays, navigation.pending.crossing.display);
+    navigation.pending === null ? null : findDisplay(displays, navigation.pending.crossing.display);
 
   // Measured rather than assumed: this is the one number that says whether the link is
   // healthy, and it is cheap to obtain.
@@ -162,8 +160,7 @@ export function SessionScreen({
     requestKeyframe().catch((error: unknown) => {
       onToast({
         kind: 'error',
-        message:
-          error instanceof Error ? error.message : 'The screen could not be refreshed.',
+        message: error instanceof Error ? error.message : 'The screen could not be refreshed.',
       });
     });
   }, [onToast]);
