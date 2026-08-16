@@ -48,7 +48,7 @@ pub use trust::{NewTrustedDevice, TrustRepository, TrustedDevice};
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Highest migration version this build ships.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 4;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
 
 /// An open, migrated database.
 #[derive(Debug, Clone)]

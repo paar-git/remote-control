@@ -69,6 +69,7 @@ describe('DeviceDetail', () => {
     renderDetail();
     const permissions = within(screen.getByTestId('permissions-section')).getAllByRole('switch');
     expect(permissions.map((item) => item.getAttribute('aria-label'))).toEqual([
+      'Screen Viewing',
       'Keyboard & Mouse',
       'File Transfer',
       'System Metrics',

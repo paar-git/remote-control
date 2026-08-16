@@ -6,11 +6,12 @@
 
 import type { Permission } from './api.js';
 
-/** The three permissions a human can grant from the Accept dialog or a device card. */
+/** The four permissions a human can grant from the Accept dialog or a device card. */
 export const GRANTABLE_PERMISSIONS: readonly {
   readonly id: Exclude<Permission, 'administer'>;
   readonly label: string;
 }[] = [
+  { id: 'view_screen', label: 'Screen Viewing' },
   { id: 'control_input', label: 'Keyboard & Mouse' },
   { id: 'transfer_files', label: 'File Transfer' },
   { id: 'view_metrics', label: 'System Metrics' },
@@ -19,6 +20,8 @@ export const GRANTABLE_PERMISSIONS: readonly {
 /** What a permission is called in the interface. */
 export function permissionLabel(permission: Permission): string {
   switch (permission) {
+    case 'view_screen':
+      return 'Screen Viewing';
     case 'control_input':
       return 'Keyboard & Mouse';
     case 'transfer_files':

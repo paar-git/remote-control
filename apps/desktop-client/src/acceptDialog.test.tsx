@@ -92,14 +92,14 @@ describe('AcceptDialog', () => {
     expect(fingerprint.replaceAll(/\s/g, '').toLowerCase()).toBe(REQUEST.identityFingerprint);
   });
 
-  it('ticks all three permissions by default', async () => {
+  it('ticks every grantable permission by default', async () => {
     backend();
     await openDialog();
 
     for (const box of screen.getAllByRole('checkbox')) {
       expect(box).toBeChecked();
     }
-    expect(screen.getAllByRole('checkbox')).toHaveLength(3);
+    expect(screen.getAllByRole('checkbox')).toHaveLength(4);
   });
 
   it('gives initial focus to Reject, so a stray Enter refuses', async () => {
@@ -137,7 +137,7 @@ describe('AcceptDialog', () => {
     expect(granted()).toBeUndefined();
   });
 
-  it('grants all three when Accept Once is clicked with all three ticked', async () => {
+  it('grants every permission when Accept Once is clicked with all of them ticked', async () => {
     backend();
     const user = userEvent.setup();
     await openDialog();
@@ -146,10 +146,10 @@ describe('AcceptDialog', () => {
 
     await waitFor(() => {
       expect(granted()).toEqual(
-        expect.arrayContaining(['control_input', 'transfer_files', 'view_metrics']),
+        expect.arrayContaining(['view_screen', 'control_input', 'transfer_files', 'view_metrics']),
       );
     });
-    expect(granted()).toHaveLength(3);
+    expect(granted()).toHaveLength(4);
     expect(trust()).toBe('once');
   });
 
@@ -162,9 +162,11 @@ describe('AcceptDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Accept Once' }));
 
     await waitFor(() => {
-      expect(granted()).toEqual(expect.arrayContaining(['control_input', 'view_metrics']));
+      expect(granted()).toEqual(
+        expect.arrayContaining(['view_screen', 'control_input', 'view_metrics']),
+      );
     });
-    expect(granted()).toHaveLength(2);
+    expect(granted()).toHaveLength(3);
     expect(granted()).not.toContain('transfer_files');
   });
 
