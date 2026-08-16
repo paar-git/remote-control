@@ -44,6 +44,7 @@ export function VideoSurface({
   displayIndex,
   fitted,
   capturing,
+  passthrough,
 }: {
   /** Which of the agent's displays to capture. */
   readonly displayIndex: number;
@@ -56,6 +57,14 @@ export function VideoSurface({
    * surface that looks live and silently drops every keystroke.
    */
   readonly capturing: boolean;
+  /**
+   * Send chords literally instead of letting them be recognised as intents.
+   *
+   * Required rather than optional, matching {@link capturing}: a caller that forgot it
+   * would ship a toggle that looks live and changes nothing, which is the exact defect
+   * this escape hatch already had once.
+   */
+  readonly passthrough: boolean;
 }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [started, setStarted] = useState<StreamStarted | null>(null);
@@ -195,7 +204,7 @@ export function VideoSurface({
       down,
       repeat: event.repeat,
       modifiers: modifierBits(event),
-      passthrough: false,
+      passthrough,
     }).catch(() => undefined);
   };
 
@@ -261,6 +270,19 @@ export function VideoSurface({
           .filter(Boolean)
           .join(' ')}
       />
+
+      {active && passthrough && (
+        <p
+          role="status"
+          className={
+            'pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-lg ' +
+            'border border-(--color-border) bg-(--color-card) px-3 py-1.5 text-xs ' +
+            'text-(--color-text-secondary) shadow-lg'
+          }
+        >
+          Shortcuts are sent literally
+        </p>
+      )}
     </div>
   );
 }

@@ -55,6 +55,9 @@ export function SessionScreen({
   const [filesOpen, setFilesOpen] = useState(false);
   const [monitoringOpen, setMonitoringOpen] = useState(false);
   const [fitted, setFitted] = useState(true);
+  // Off by default: translation is right for the shortcuts an operator uses all day,
+  // and wrong only where a chord means something to a program rather than to the OS.
+  const [passthrough, setPassthrough] = useState(false);
   const live = isConnected(connection);
   const canViewScreen = permissions.includes('view_screen');
   // Input is forwarded only where the other machine granted it. Capturing without the
@@ -116,6 +119,10 @@ export function SessionScreen({
         onToggleFitted={() => {
           setFitted((current) => !current);
         }}
+        passthrough={passthrough}
+        onTogglePassthrough={() => {
+          setPassthrough((current) => !current);
+        }}
         onDisconnect={disconnect}
         onOpenFiles={() => {
           setFilesOpen(true);
@@ -129,7 +136,12 @@ export function SessionScreen({
         {canViewScreen ? (
           // Display 0: this build does not yet offer a picker for which of the
           // agent's displays to show, so the primary one is what a session opens on.
-          <VideoSurface displayIndex={0} fitted={fitted} capturing={canControl} />
+          <VideoSurface
+            displayIndex={0}
+            fitted={fitted}
+            capturing={canControl}
+            passthrough={passthrough}
+          />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <div className="max-w-md text-center">

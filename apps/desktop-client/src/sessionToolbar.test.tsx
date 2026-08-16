@@ -11,18 +11,21 @@ function renderToolbar(permissions: readonly string[] = ALL) {
   const onOpenFiles = vi.fn();
   const onOpenMonitoring = vi.fn();
   const onToggleFitted = vi.fn();
+  const onTogglePassthrough = vi.fn();
   render(
     <SessionToolbar
       permissions={permissions}
       machineName="WORK-LAPTOP"
       fitted
       onToggleFitted={onToggleFitted}
+      passthrough={false}
+      onTogglePassthrough={onTogglePassthrough}
       onDisconnect={onDisconnect}
       onOpenFiles={onOpenFiles}
       onOpenMonitoring={onOpenMonitoring}
     />,
   );
-  return { onDisconnect, onOpenFiles, onOpenMonitoring, onToggleFitted };
+  return { onDisconnect, onOpenFiles, onOpenMonitoring, onToggleFitted, onTogglePassthrough };
 }
 
 /** Move the pointer to `clientY`, as the window listener sees it. */
@@ -166,6 +169,8 @@ describe('SessionToolbar', () => {
         machineName="WORK-LAPTOP"
         fitted={false}
         onToggleFitted={vi.fn()}
+        passthrough={false}
+        onTogglePassthrough={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -182,6 +187,8 @@ describe('SessionToolbar', () => {
         machineName="WORK-LAPTOP"
         fitted
         onToggleFitted={vi.fn()}
+        passthrough={false}
+        onTogglePassthrough={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -200,6 +207,8 @@ describe('SessionToolbar', () => {
         machineName="<img src=x onerror=alert(1)>"
         fitted
         onToggleFitted={vi.fn()}
+        passthrough={false}
+        onTogglePassthrough={vi.fn()}
         onDisconnect={vi.fn()}
         onOpenFiles={vi.fn()}
         onOpenMonitoring={vi.fn()}
@@ -208,5 +217,38 @@ describe('SessionToolbar', () => {
 
     expect(screen.getByRole('toolbar').querySelector('img')).toBeNull();
     expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument();
+  });
+});
+
+describe('SessionToolbar keyboard passthrough', () => {
+  it('asks its caller to toggle passthrough rather than deciding alone', async () => {
+    // This button shipped dead once, holding its own useState and reaching nothing.
+    // Asserting aria-pressed would not have caught that; asserting the callback does.
+    const { onTogglePassthrough } = renderToolbar();
+
+    await userEvent.click(screen.getByRole('button', { name: /keyboard passthrough/i }));
+
+    expect(onTogglePassthrough).toHaveBeenCalledOnce();
+  });
+
+  it('shows the state its caller gave it, not one it invented', () => {
+    render(
+      <SessionToolbar
+        permissions={ALL}
+        machineName="WORK-LAPTOP"
+        fitted
+        onToggleFitted={vi.fn()}
+        passthrough
+        onTogglePassthrough={vi.fn()}
+        onDisconnect={vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenMonitoring={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /keyboard passthrough/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 });

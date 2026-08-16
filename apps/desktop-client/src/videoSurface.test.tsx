@@ -51,7 +51,7 @@ describe('VideoSurface', () => {
   it('sizes the canvas to the stream the agent actually started', async () => {
     // A canvas left at its default size silently scales every frame, which reads as
     // a blurry remote rather than as a bug in this component.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
 
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     await waitFor(() => {
@@ -63,7 +63,7 @@ describe('VideoSurface', () => {
   it('says the stream failed rather than showing an empty black rectangle', async () => {
     // Indistinguishable states are the failure this project keeps guarding against:
     // a black canvas could be a locked remote screen or a dead stream.
-    render(<VideoSurface displayIndex={9} fitted capturing={false} />);
+    render(<VideoSurface displayIndex={9} fitted capturing={false} passthrough={false} />);
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not start/i);
   });
 
@@ -76,7 +76,7 @@ describe('VideoSurface', () => {
       return Promise.resolve(() => undefined);
     });
 
-    render(<VideoSurface displayIndex={0} fitted capturing={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
     await screen.findByTestId('video-surface');
 
     await waitFor(() => {
@@ -100,7 +100,7 @@ describe('VideoSurface input capture', () => {
 
   /** Render a capturing surface and hand back its focused canvas. */
   async function focusedSurface(): Promise<HTMLCanvasElement> {
-    render(<VideoSurface displayIndex={0} fitted capturing />);
+    render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} />);
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     canvas.focus();
     return canvas;
@@ -118,7 +118,7 @@ describe('VideoSurface input capture', () => {
   it('sends nothing at all while capture is off', async () => {
     // A session where the operator has not taken control must not leak their typing to
     // the remote machine.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     canvas.focus();
     await userEvent.type(canvas, 'a');
@@ -129,7 +129,7 @@ describe('VideoSurface input capture', () => {
   it('is not a tab stop while capture is off', async () => {
     // A surface that takes focus but forwards nothing is a keyboard trap for anyone
     // tabbing through the session screen.
-    render(<VideoSurface displayIndex={0} fitted capturing={false} />);
+    render(<VideoSurface displayIndex={0} fitted capturing={false} passthrough={false} />);
     const canvas = await screen.findByTestId('video-surface');
     expect(canvas).not.toHaveAttribute('tabindex');
   });
@@ -149,7 +149,7 @@ describe('VideoSurface input capture', () => {
 
   it('releases a key still held when the session unmounts mid-chord', async () => {
     // Closing the session while holding a key is the one exit no event reports.
-    const { unmount } = render(<VideoSurface displayIndex={0} fitted capturing />);
+    const { unmount } = render(<VideoSurface displayIndex={0} fitted capturing passthrough={false} />);
     const canvas = await screen.findByTestId<HTMLCanvasElement>('video-surface');
     canvas.focus();
     await userEvent.keyboard('{Shift>}');

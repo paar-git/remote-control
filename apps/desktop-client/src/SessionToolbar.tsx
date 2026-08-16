@@ -50,6 +50,8 @@ export function SessionToolbar({
   machineName,
   fitted,
   onToggleFitted,
+  passthrough,
+  onTogglePassthrough,
   onDisconnect,
   onOpenFiles,
   onOpenMonitoring,
@@ -68,12 +70,21 @@ export function SessionToolbar({
    */
   readonly fitted: boolean;
   readonly onToggleFitted: () => void;
+  /**
+   * Whether chords are sent literally instead of being translated to intents.
+   *
+   * Required and controlled for the same reason as {@link fitted}, and with more at
+   * stake: this button held its own `useState` and reached nothing, so it looked live
+   * while an operator pressing Ctrl+C against a remote terminal got Copy instead of
+   * SIGINT. Forgetting to wire it is now a type error.
+   */
+  readonly passthrough: boolean;
+  readonly onTogglePassthrough: () => void;
   readonly onDisconnect: () => void;
   readonly onOpenFiles: () => void;
   readonly onOpenMonitoring: () => void;
 }): React.JSX.Element {
   const [visible, setVisible] = useState(true);
-  const [passthrough, setPassthrough] = useState(false);
   const hideAt = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scheduleHide = useCallback(() => {
@@ -140,9 +151,7 @@ export function SessionToolbar({
         icon={Keyboard}
         label="Keyboard passthrough"
         pressed={passthrough}
-        onClick={() => {
-          setPassthrough((current) => !current);
-        }}
+        onClick={onTogglePassthrough}
       />
       <Tool
         icon={Maximize2}
