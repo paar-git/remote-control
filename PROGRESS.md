@@ -165,7 +165,7 @@ Run against the current tree. Reproduce with `pnpm verify`.
 | `cargo test --workspace` | **875 passed**, 0 failed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean, exit 0 |
 | `cargo fmt --all --check` | clean |
-| `pnpm -r test:run` | **393 passed**, 0 failed (342 desktop + 51 shared-types) |
+| `pnpm -r test:run` | **396 passed**, 0 failed (345 desktop + 51 shared-types) |
 | `pnpm -r typecheck` | clean |
 | `pnpm run lint` | clean |
 | `pnpm run format:check` | clean |
