@@ -731,7 +731,17 @@ impl AgentServer {
                                 });
                             }
                             Err(err) => {
+                                // Answered, not dropped: a closed channel is
+                                // indistinguishable from a dead link, and this host's
+                                // problem is one the operator can act on.
                                 tracing::warn!(%err, "video channel opened on a host that cannot capture");
+                                tokio::spawn(async move {
+                                    crate::video_service::serve_without_capture(
+                                        writer,
+                                        &mut reader,
+                                    )
+                                    .await;
+                                });
                             }
                         }
                     }

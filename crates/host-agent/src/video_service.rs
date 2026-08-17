@@ -617,6 +617,34 @@ impl<S: CaptureSource> VideoService<S> {
     }
 }
 
+/// Serve a video channel on a host that cannot capture at all.
+///
+/// Keeps the channel open and answers every request with the reason, instead of
+/// dropping the writer. A channel that simply closes is indistinguishable from a dead
+/// link, which is the one outcome this module's contract forbids: a client waiting on
+/// `StreamStarted` that never arrives cannot tell a host with no display server from a
+/// network that went away.
+///
+/// This is the same rule [`VideoService::decide`] follows for every other refusal; it
+/// was the one path that escaped it.
+pub async fn serve_without_capture(mut writer: ChannelWriter, reader: &mut ChannelReader) {
+    while let Ok(Some(_)) = reader.next_message::<DesktopClientMessage>().await {
+        let refusal = no_capture_refusal();
+        if writer.send(&refusal).await.is_err() {
+            break;
+        }
+    }
+    tracing::debug!("the video channel closed on a host with no capture backend");
+}
+
+/// The message every request gets on a host with no capture backend.
+fn no_capture_refusal() -> DesktopAgentMessage {
+    DesktopAgentMessage::Error {
+        code: ErrorCode::Unsupported,
+        message: "this machine has no usable screen-capture backend".to_owned(),
+    }
+}
+
 /// The capture source this build uses.
 ///
 /// # Errors

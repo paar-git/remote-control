@@ -101,7 +101,8 @@ jobs:
             libegl1-mesa-dev \
             libxcb1-dev \
             libwayland-dev \
-            libdrm-dev
+            libdrm-dev \
+            xvfb
 
       - name: Check formatting
         if: runner.os == 'Linux'
@@ -144,5 +145,15 @@ jobs:
       # before the client opens its first stream, failing whichever test loses
       # the race. Serialising this one binary removes the contention without
       # relaxing anything the tests assert.
+      # Under a virtual display on Linux, because the video tests capture a real
+      # screen. A hosted runner has no display server, so `XcapSource::new()` fails
+      # and the agent can only refuse — which is correct behaviour but cannot prove
+      # a keyframe ever arrives. Xvfb gives those tests something real to capture
+      # rather than having them skipped or weakened.
       - name: Agent end-to-end tests
+        if: runner.os == 'Linux'
+        run: xvfb-run -a --server-args="-screen 0 1280x1024x24" cargo test -p rc-host-agent -- --test-threads=1
+
+      - name: Agent end-to-end tests
+        if: runner.os != 'Linux'
         run: cargo test -p rc-host-agent -- --test-threads=1
